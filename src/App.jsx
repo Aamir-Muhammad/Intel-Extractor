@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 
 // ⚠️ SET THIS to your Cloudflare Worker URL from Part 1
-const WORKER_BASE = "https://ioc-parser.aamirmuhd.workers.dev/";
+const WORKER_BASE = "https://ioc-parser.aamirmuhd.workers.dev";
 
 // ============================================================
 //  Local IOC engine — refang + classify (fully client-side)
