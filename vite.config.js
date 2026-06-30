@@ -3,5 +3,5 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
-  base: "/ioc-extractor/", // GitHub Pages project site path
+  base: "/Intel-Extractor/", // GitHub Pages project site path
 });
