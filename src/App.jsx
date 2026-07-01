@@ -5,7 +5,6 @@ import {
   ClipboardPaste, AlertTriangle, ShieldOff, Trash2, Wand2, FileDown, Code
 } from "lucide-react";
 
-// ⚠️ SET THIS to your Cloudflare Worker URL from Part 1
 const WORKER_BASE = "https://ioc-parser.aamirmuhd.workers.dev";
 
 // ============================================================
