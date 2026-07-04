@@ -2,9 +2,13 @@ import { useState, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
 import {
   Shield, Search, Download, Copy, Check, Loader2, Globe,
-  ClipboardPaste, AlertTriangle, ShieldOff, Trash2, Wand2, FileDown, Code
+  ClipboardPaste, AlertTriangle, ShieldOff, Trash2, Wand2, FileDown,
+  Tags, Filter, Crosshair
 } from "lucide-react";
 
+// ============================================================
+//  Cloudflare Worker proxy
+// ============================================================
 const WORKER_BASE = "https://ioc-parser.aamirmuhd.workers.dev";
 
 // ============================================================
@@ -60,6 +64,189 @@ const isIPv4 = (t) => {
   return m && m.slice(1).every((o) => +o >= 0 && +o <= 255);
 };
 
+// ============================================================
+//  Registry / file-path structured extraction (pre-tokenization)
+// ============================================================
+const HIVE_FULL = {
+  HKLM: "HKEY_LOCAL_MACHINE", HKCU: "HKEY_CURRENT_USER", HKCR: "HKEY_CLASSES_ROOT",
+  HKU: "HKEY_USERS", HKCC: "HKEY_CURRENT_CONFIG",
+};
+
+const expandHive = (k) => {
+  let s = String(k).trim()
+    .replace(/^Registry::/i, "")
+    .replace(/^(HKLM|HKCU|HKCR|HKU|HKCC|HKEY_[A-Za-z_]+):(?=\\|$)/i, "$1");
+  const m = s.match(/^(HKLM|HKCU|HKCR|HKU|HKCC)(?=\\|$)/i);
+  if (m) s = HIVE_FULL[m[1].toUpperCase()] + s.slice(m[1].length);
+  s = s.replace(/^(hkey_[a-z_]+)/i, (h) => h.toUpperCase());
+  return s.replace(/\\+$/, "");
+};
+
+const canonicalReg = (d) => {
+  let s = d.key;
+  if (d.valueName) s += "\\" + d.valueName;
+  if (d.data !== undefined && d.data !== null && d.data !== "") s += " = " + d.data;
+  if (d.valueType) s += " (" + String(d.valueType).toUpperCase() + ")";
+  return s;
+};
+
+const unquote = (s) => String(s).replace(/^["']|["']$/g, "");
+
+// Registry key: hive + backslash segments. Mid segments may contain up to 3 spaces
+// (e.g. "Windows NT", "Internet Settings"); final segment has no spaces so prose
+// after the key isn't swallowed.
+const REG_KEY_RE = /(?:HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER|HKEY_CLASSES_ROOT|HKEY_USERS|HKEY_CURRENT_CONFIG|HKLM|HKCU|HKCR|HKCC|HKU):?\\(?:[^\s\\/:*?"<>|,;\r\n]+(?: [^\s\\/:*?"<>|,;\r\n]+){0,3}\\)*[^\s\\/:*?"<>|,;'"`)\]]+/gi;
+
+// reg add "<key>" /v name /t type /d data
+const REG_ADD_RE = /\breg(?:\.exe)?\s+add\s+("[^"\r\n]+"|\S+)([^\r\n]*)/gi;
+
+// Set-ItemProperty / New-ItemProperty -Path ... -Name ... -Value ...
+const PS_REG_RE = /\b(?:Set-ItemProperty|New-ItemProperty)\b([^\r\n]*)/gi;
+
+// Windows paths: C:\..., \\server\share\..., %ENVVAR%\...
+const WIN_PATH_RE = /(?:[A-Za-z]:\\|\\\\[A-Za-z0-9._$-]{1,64}\\|%[A-Za-z_][A-Za-z0-9_]*%\\)(?:[^\s\\/:*?"<>|,;\r\n]+(?: [^\s\\/:*?"<>|,;\r\n]+){0,3}\\)*[^\\/:*?"<>|,;\r\n]{0,180}/g;
+
+// A new drive/UNC/env root embedded mid-match means the regex bridged two paths
+// (e.g. "...payload.dll and %APPDATA%\..."). Cut before the second root.
+const NEW_ROOT_RE = /\s+(?:[A-Za-z]:\\|%[A-Za-z_][A-Za-z0-9_]*%\\|\\\\[A-Za-z0-9._$-])/;
+
+// Unix paths anchored to common roots
+const UNIX_PATH_RE = /(^|[\s"'`(>])(\/(?:usr|etc|var|tmp|opt|home|bin|sbin|lib|lib64|dev|proc|srv|root|boot|Users|Library|Applications|System|private)\/[^\s"'`<>|,;)]+)/g;
+
+const cleanupWinPath = (raw) => {
+  let s = raw.replace(/[\s.,;:!?)'"`\]]+$/, "");
+  // If the match bridged into a second path root, keep only the first path
+  const nr = s.match(NEW_ROOT_RE);
+  if (nr) s = s.slice(0, nr.index);
+  s = s.replace(/[\s.,;:!?)'"`\]]+$/, "");
+  const i = s.lastIndexOf("\\");
+  if (i < 0) return null;
+  let fin = s.slice(i + 1);
+  if (/\s/.test(fin)) {
+    // Keep spaces in the filename only when a known extension proves it's one file
+    const toks = fin.split(" ");
+    let acc = toks[0], best = null;
+    if (FILE_EXT.test(acc)) best = acc;
+    for (let j = 1; j < toks.length; j++) {
+      acc += " " + toks[j];
+      if (FILE_EXT.test(acc)) best = acc;
+    }
+    fin = best || toks[0];
+    s = s.slice(0, i + 1) + fin;
+  }
+  s = s.replace(/[.,;:!?)'"`\]]+$/, "");
+  if (s.length < 4) return null;
+  if (/^[A-Za-z]:\\?$/.test(s)) return null;
+  if (/^%[A-Za-z_]+%\\?$/.test(s)) return null;
+  return s;
+};
+
+const maybeFileFromData = (v, files) => {
+  const s = String(v);
+  if (/^(?:[A-Za-z]:\\|\\\\|%[A-Za-z_][A-Za-z0-9_]*%\\)/.test(s)) {
+    const c = cleanupWinPath(s);
+    if (c) files.push(c);
+  }
+};
+
+// Extracts registry keys (incl. values) and file paths from full text BEFORE
+// whitespace tokenization, blanking consumed matches so the tokenizer doesn't
+// shred multi-word paths like `C:\Program Files\...` or `...\Windows NT\...`.
+const extractStructured = (text) => {
+  let work = text;
+  const regs = [];
+  const files = [];
+  const blank = (m) => " ".repeat(m.length);
+
+  // 1) reg add command lines (fully structured: key + /v + /t + /d)
+  work = work.replace(REG_ADD_RE, (m, keyRaw, rest) => {
+    const key = expandHive(unquote(keyRaw));
+    if (!/^HKEY_/i.test(key)) return m;
+    const v = rest.match(/\/v\s+("[^"]*"|\S+)/i);
+    const t = rest.match(/\/t\s+(\S+)/i);
+    const d = rest.match(/\/d\s+("[^"]*"|\S+)/i);
+    const det = {
+      key,
+      valueName: v ? unquote(v[1]) : undefined,
+      valueType: t ? t[1] : undefined,
+      data: d ? unquote(d[1]) : undefined,
+    };
+    regs.push(det);
+    if (det.data) maybeFileFromData(det.data, files);
+    return blank(m);
+  });
+
+  // 2) PowerShell Set-ItemProperty / New-ItemProperty
+  work = work.replace(PS_REG_RE, (m, rest) => {
+    const p = rest.match(/-(?:Literal)?Path\s+("[^"]*"|'[^']*'|\S+)/i);
+    if (!p) return m;
+    let key = unquote(p[1]);
+    if (!/^(Registry::)?(HKLM|HKCU|HKCR|HKU|HKCC|HKEY_)/i.test(key)) return m;
+    key = expandHive(key);
+    const n = rest.match(/-Name\s+("[^"]*"|'[^']*'|\S+)/i);
+    const v = rest.match(/-Value\s+("[^"]*"|'[^']*'|\S+)/i);
+    const t = rest.match(/-(?:PropertyType|Type)\s+(\S+)/i);
+    const det = {
+      key,
+      valueName: n ? unquote(n[1]) : undefined,
+      valueType: t ? t[1] : undefined,
+      data: v ? unquote(v[1]) : undefined,
+    };
+    regs.push(det);
+    if (det.data) maybeFileFromData(det.data, files);
+    return blank(m);
+  });
+
+  // 3) Plain registry keys + prose values (`key\Name = data`, `→ 0`, ` : 4`)
+  {
+    let rebuilt = "";
+    let pos = 0;
+    let mm;
+    REG_KEY_RE.lastIndex = 0;
+    while ((mm = REG_KEY_RE.exec(work))) {
+      let keyStr = mm[0].replace(/[.,;:!?)'"`\]]+$/, "");
+      let end = mm.index + keyStr.length;
+      const ahead = work.slice(end, end + 260);
+      const vm = ahead.match(/^\s*(?:=|→|->|:(?=\s))\s*("[^"\r\n]{1,200}"|'[^'\r\n]{1,200}'|[^\s,;"'<>|]{1,200})/);
+      let det;
+      if (vm) {
+        const data = unquote(vm[1]).replace(/[.,;:!?]+$/, "");
+        const full = expandHive(keyStr);
+        const parts = full.split("\\");
+        let key = full, valueName;
+        if (parts.length > 2) { valueName = parts.pop(); key = parts.join("\\"); }
+        det = { key, valueName, data };
+        end += vm[0].length;
+        maybeFileFromData(data, files);
+      } else {
+        det = { key: expandHive(keyStr) };
+      }
+      regs.push(det);
+      rebuilt += work.slice(pos, mm.index) + " ";
+      pos = end;
+      REG_KEY_RE.lastIndex = end;
+    }
+    rebuilt += work.slice(pos);
+    work = rebuilt;
+  }
+
+  // 4) Windows file paths (drive, UNC, %ENVVAR%)
+  work = work.replace(WIN_PATH_RE, (m) => {
+    const c = cleanupWinPath(m);
+    if (c) { files.push(c); return blank(m); }
+    return m;
+  });
+
+  // 5) Unix paths
+  work = work.replace(UNIX_PATH_RE, (m, pre, path) => {
+    const c = path.replace(/[.,;:!?)'"`\]]+$/, "");
+    if (c.length > 4) { files.push(c); return pre + blank(path); }
+    return m;
+  });
+
+  return { cleaned: work, regs, files };
+};
+
 const classify = (t) => {
   if (/^CVE-\d{4}-\d{4,7}$/i.test(t)) return ["CVE", t.toUpperCase()];
   if (/^T\d{4}(?:\.\d{3})?$/.test(t)) return ["MITRE_ATTACK", t.toUpperCase()];
@@ -78,7 +265,7 @@ const classify = (t) => {
   if (/^4[0-9AB][1-9A-HJ-NP-Za-km-z]{93}(?:[1-9A-HJ-NP-Za-km-z]{11})?$/.test(t)) return ["XMR", t];
   if (/^(bc1[ac-hj-np-z02-9]{11,71}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$/.test(t)) return ["BTC", t];
   if (/^ASN?\d{2,}$/i.test(t)) return ["ASN", t.toUpperCase().replace(/^ASN/, "AS")];
-  if (/^(HKLM|HKCU|HKCR|HKU|HKEY_[A-Z_]+)[\\/]/i.test(t)) return ["REGISTRY", t];
+  if (/^(HKLM|HKCU|HKCR|HKU|HKCC|HKEY_[A-Z_]+)[\\/]/i.test(t)) return ["REGISTRY", t];
   if (/\\/.test(t)) return ["FILE", t];
   if (FILE_EXT.test(t)) return ["FILE", t];
   if (/^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(t)) return ["DOMAIN", t.toLowerCase()];
@@ -87,16 +274,38 @@ const classify = (t) => {
 
 const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","ASN","MAC_ADDRESS","BTC","XMR","ETH","REGISTRY","FILE"];
 
+// Returns { data, registryDetails } — data is category → array of strings;
+// registryDetails is [{ key, valueName?, valueType?, data? }] powering hunt queries.
 const extractIocs = (text) => {
   const buckets = {};
   const add = (cat, val) => (buckets[cat] || (buckets[cat] = new Set())).add(val);
+  const regDetails = [];
+  const seenReg = new Set();
+  const pushReg = (d) => {
+    const c = canonicalReg(d);
+    if (!seenReg.has(c)) { seenReg.add(c); regDetails.push(d); }
+    add("REGISTRY", c);
+  };
+
   let work = refangSoft(text);
 
   work = work.replace(/\[([^\]\n]+)\]\(([^)\n]*)\)/g, (_m, label) => {
     const t = trimTok(label.trim());
-    if (t) { const r = classify(t); if (r) add(r[0], r[1]); }
+    if (t) {
+      const r = classify(t);
+      if (r) {
+        if (r[0] === "REGISTRY") pushReg({ key: expandHive(r[1].replace(/\//g, "\\")) });
+        else add(r[0], r[1]);
+      }
+    }
     return "\n";
   });
+
+  // Structured pass: registry keys w/ spaces + values, file paths — before tokenizing
+  const structured = extractStructured(work);
+  work = structured.cleaned;
+  structured.regs.forEach(pushReg);
+  structured.files.forEach((f) => add("FILE", f));
 
   const segments = work.replace(/[\[\]]/g, "").split(/[\n\r;,|]+/);
 
@@ -120,14 +329,26 @@ const extractIocs = (text) => {
 
     for (const t of tokens) {
       const r = classify(t);
-      if (r) add(r[0], r[1]);
+      if (!r) continue;
+      if (r[0] === "REGISTRY") pushReg({ key: expandHive(r[1].replace(/\//g, "\\")) });
+      else add(r[0], r[1]);
     }
   }
 
   const out = {};
   ORDER.forEach((k) => { if (buckets[k]) out[k] = Array.from(buckets[k]); });
   Object.keys(buckets).forEach((k) => { if (!out[k]) out[k] = Array.from(buckets[k]); });
-  return out;
+  return { data: out, registryDetails: regDetails };
+};
+
+// Normalize iocparser category names to the engine's, so merged results dedupe
+const API_KEY_MAP = {
+  "FILE_HASH_MD5": "MD5", "FILE_HASH_SHA1": "SHA1", "FILE_HASH_SHA256": "SHA256", "FILE_HASH_SHA512": "SHA512",
+  "MITRE_ATT&CK": "MITRE_ATTACK", "BITCOIN_ADDRESS": "BTC", "EMAIL_ADDRESS": "EMAIL",
+};
+const normCat = (k) => {
+  const u = String(k).toUpperCase().trim();
+  return API_KEY_MAP[u] || u;
 };
 
 const parseIocs = (raw) => {
@@ -137,14 +358,122 @@ const parseIocs = (raw) => {
   if (d && typeof d === "object") {
     Object.entries(d).forEach(([k, v]) => {
       if (Array.isArray(v)) {
+        const cat = normCat(k);
         const uniq = Array.from(new Set(v.map((x) => String(x).trim()).filter(Boolean)));
-        if (uniq.length) out[k] = uniq;
+        if (uniq.length) out[cat] = Array.from(new Set([...(out[cat] || []), ...uniq]));
       }
     });
   }
   return out;
 };
 
+// Light parser for registry strings pasted as JSON (canonical or bare-key form)
+const parseCanonicalReg = (s) => {
+  let t = refangSoft(String(s)).trim();
+  let valueType;
+  const tm = t.match(/\((REG_[A-Z_0-9]+|DWORD|QWORD|SZ|EXPAND_SZ|MULTI_SZ|BINARY)\)\s*$/i);
+  if (tm) { valueType = tm[1]; t = t.slice(0, tm.index).trim(); }
+  const eq = t.indexOf(" = ");
+  if (eq > 0) {
+    const left = expandHive(t.slice(0, eq).trim());
+    const data = t.slice(eq + 3).trim();
+    const parts = left.split("\\");
+    let key = left, valueName;
+    if (parts.length > 2) { valueName = parts.pop(); key = parts.join("\\"); }
+    return { key, valueName, valueType, data };
+  }
+  return { key: expandHive(t), valueType };
+};
+
+// ============================================================
+//  Dual-source merge (iocparser API + local engine)
+// ============================================================
+const CASE_SENSITIVE_CATS = new Set(["FILE", "REGISTRY", "URL", "BTC", "XMR", "ETH", "SSDEEP"]);
+const normVal = (cat, v) => (CASE_SENSITIVE_CATS.has(cat) ? v : String(v).toLowerCase());
+
+const mergeIocs = (apiData, engData) => {
+  const data = {};
+  const origin = {};
+  const maps = {};
+  const put = (cat, v, src) => {
+    if (!maps[cat]) { maps[cat] = new Map(); data[cat] = []; origin[cat] = {}; }
+    const nk = normVal(cat, v);
+    if (maps[cat].has(nk)) {
+      const existing = maps[cat].get(nk);
+      if (origin[cat][existing] !== src) origin[cat][existing] = "both";
+    } else {
+      maps[cat].set(nk, v);
+      data[cat].push(v);
+      origin[cat][v] = src;
+    }
+  };
+  Object.entries(apiData).forEach(([c, arr]) => arr.forEach((v) => put(c, v, "api")));
+  Object.entries(engData).forEach(([c, arr]) => arr.forEach((v) => put(c, v, "eng")));
+  const ordered = {};
+  ORDER.forEach((k) => { if (data[k]) ordered[k] = data[k]; });
+  Object.keys(data).forEach((k) => { if (!ordered[k]) ordered[k] = data[k]; });
+  return { data: ordered, origin };
+};
+
+const TAG_LABEL = { api: "API Parsed", eng: "Engine Parsed", both: "API + Engine Parsed" };
+
+// ============================================================
+//  Hunt query generators (per-entry clauses OR'd into one query)
+// ============================================================
+const uniqDetails = (details) => {
+  const seen = new Set();
+  return details.filter((d) => {
+    const c = canonicalReg(d);
+    if (seen.has(c)) return false;
+    seen.add(c);
+    return true;
+  });
+};
+const stripHive = (k) => String(k).replace(/^HKEY_[A-Z_]+\\/i, "");
+const kqlStr = (s) => `@"${String(s).replace(/"/g, '""')}"`;
+const reEsc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const buildKQL = (details) => {
+  const clauses = uniqDetails(details).map((d) => {
+    const parts = [`RegistryKey has ${kqlStr(d.key)}`];
+    if (d.valueName) parts.push(`RegistryValueName =~ "${String(d.valueName).replace(/"/g, '\\"')}"`);
+    if (d.data !== undefined && d.data !== null && d.data !== "") parts.push(`RegistryValueData has ${kqlStr(d.data)}`);
+    return parts.length > 1 ? `(${parts.join(" and ")})` : parts[0];
+  });
+  return `DeviceRegistryEvents
+| where ActionType in ("RegistryValueSet", "RegistryKeyCreated")
+| where ${clauses.join("\n    or ")}
+| project Timestamp, DeviceName, ActionType, RegistryKey, RegistryValueName, RegistryValueData, InitiatingProcessFileName, InitiatingProcessCommandLine`;
+};
+
+const buildCQL = (details) => {
+  const clauses = uniqDetails(details).map((d) => {
+    const parts = [`RegObjectName=/(${reEsc(stripHive(d.key))})$/i`];
+    if (d.valueName) parts.push(`RegValueName=/^(${reEsc(d.valueName)})$/i`);
+    if (d.data !== undefined && d.data !== null && d.data !== "") parts.push(`RegStringValue=/^(${reEsc(d.data)})$/i`);
+    return parts.length > 1 ? `(${parts.join(" and ")})` : parts[0];
+  });
+  const body = clauses.length > 1 ? clauses.map((c) => `(${c})`).join("\n   or ") : clauses[0];
+  return `#event_simpleName=/^(AsepValueUpdate|RegGenericValueUpdate|RegSystemConfigValueUpdate)$/
+| ${body}
+| table([@timestamp, ComputerName, ImageFileName, RegObjectName, RegValueName, RegStringValue])`;
+};
+
+const buildSPL = (details) => {
+  const clauses = uniqDetails(details).map((d) => {
+    const to = `TargetObject="*\\${stripHive(d.key)}${d.valueName ? "\\" + d.valueName : "\\*"}"`;
+    return (d.data !== undefined && d.data !== null && d.data !== "")
+      ? `(${to} Details="${String(d.data)}")`
+      : to;
+  });
+  return `index=* source="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=13
+    (${clauses.join("\n     OR ")})
+| table _time, host, Image, TargetObject, Details`;
+};
+
+// ============================================================
+//  Page scrape helpers
+// ============================================================
 const htmlToText = (html) =>
   html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -156,52 +485,30 @@ const htmlToText = (html) =>
     .replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<").replace(/&gt;/gi, ">")
     .replace(/&#0?39;|&apos;/gi, "'").replace(/&quot;/gi, '"')
+    .replace(/&#92;|&bsol;/gi, "\\")
     .replace(/[ \t]+\n/g, "\n");
 
-// ============================================================
-//  KQL/CQL Query Extraction
-// ============================================================
-const extractQueries = (html) => {
-  const queries = [];
-  
-  // Find section headers for context
-  const sections = html.split(/<h[2-3][^>]*>/gi);
-  
-  for (const section of sections) {
-    const sectionTitle = section.match(/^([^<]+)/)?.[1] || "Unknown";
-    
-    // Extract <pre> and <code> blocks
-    const preMatches = section.matchAll(/<pre[^>]*>([\s\S]*?)<\/pre>/gi);
-    for (const match of preMatches) {
-      let code = match[1]
-        .replace(/<code[^>]*>/gi, "")
-        .replace(/<\/code>/gi, "")
-        .replace(/<[^>]+>/g, "") // strip remaining HTML
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&amp;/g, "&")
-        .replace(/&#0?39;|&apos;/g, "'")
-        .replace(/&quot;/g, '"')
-        .trim();
-      
-      if (code.length > 20) { // filter out tiny blocks
-        // Detect query type
-        let type = "Code block";
-        if (/let\s+\w+\s*=|union|summarize|where\s+\||project\s+\|/.test(code)) type = "KQL";
-        if (/event_simpleName|ProcessRollup2|groupBy/.test(code)) type = "CQL";
-        
-        queries.push({
-          type,
-          code,
-          context: sectionTitle.slice(0, 60),
-        });
-      }
-    }
-  }
-  
-  return queries;
+const SCRAPE_DENY = ["w3.org","schema.org","googleapis.com","gstatic.com","google.com","google-analytics.com","googletagmanager.com","doubleclick.net","facebook.com","twitter.com","x.com","t.co","linkedin.com","youtube.com","youtu.be","instagram.com","cloudflare.com","cloudfront.net","jsdelivr.net","cdnjs.com","fontawesome.com","wordpress.org","wp.com","gravatar.com","cookiebot.com","onetrust.com","gmpg.org","bit.ly","gist.github.com"];
+const hostOf = (s) => {
+  try { return new URL(s.includes("://") ? s : "http://" + s).hostname.toLowerCase(); }
+  catch { return String(s).toLowerCase(); }
+};
+const filterScraped = (data, articleUrl) => {
+  const self = hostOf(articleUrl);
+  const deny = (h) => h === self || SCRAPE_DENY.some((d) => h === d || h.endsWith("." + d));
+  const out = {};
+  Object.entries(data).forEach(([k, arr]) => {
+    let v = arr;
+    if (k === "DOMAIN") v = arr.filter((x) => !deny(x));
+    if (k === "URL") v = arr.filter((x) => !deny(hostOf(x)));
+    if (v.length) out[k] = v;
+  });
+  return out;
 };
 
+// ============================================================
+//  Export helpers
+// ============================================================
 const csvCell = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
 const toCSV = (rows) => rows.map((r) => r.map(csvCell).join(",")).join("\n");
 const downloadBlob = (blob, filename) => {
@@ -228,7 +535,7 @@ const buildWorkbook = (sheets) => {
   return new Blob([out], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 };
 
-const SAMPLE_URL = "https://www.microsoft.com/en-us/security/blog/2026/05/28/the-gentlemen-ransomware-dissecting-a-self-propagating-go-encryptor/";
+const SAMPLE_URL = "https://securelist.com/whatsapp-vbs-rmm-campaign/120290/";
 
 export default function App() {
   const [mode, setMode] = useState("url");
@@ -236,7 +543,8 @@ export default function App() {
   const [jsonText, setJsonText] = useState("");
   const [rawText, setRawText] = useState("");
   const [iocData, setIocData] = useState(null);
-  const [queries, setQueries] = useState([]);
+  const [originData, setOriginData] = useState(null);           // cat → { value: "api"|"eng"|"both" }
+  const [registryDetails, setRegistryDetails] = useState([]);   // [{ key, valueName?, valueType?, data? }]
   const [sourceUrl, setSourceUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -244,13 +552,83 @@ export default function App() {
   const [rawArticle, setRawArticle] = useState("");
   const [defangMap, setDefangMap] = useState({});
   const [copied, setCopied] = useState("");
+  const [showTags, setShowTags] = useState(() => {
+    try { return localStorage.getItem("ioc_show_tags") === "1"; } catch { return false; }
+  });
+  const [hideScraped, setHideScraped] = useState(false);
   const copyTimer = useRef(null);
 
+  const toggleTags = () =>
+    setShowTags((v) => {
+      try { localStorage.setItem("ioc_show_tags", v ? "0" : "1"); } catch { /* ignore */ }
+      return !v;
+    });
+
+  // Scraped-IOC filter only makes sense when both sources contributed
+  const canFilterScraped = useMemo(() => {
+    if (!originData) return false;
+    let eng = false, api = false;
+    Object.values(originData).forEach((m) =>
+      Object.values(m).forEach((o) => { if (o === "eng") eng = true; else api = true; })
+    );
+    return eng && api;
+  }, [originData]);
+
+  // What's actually displayed / exported / queried (scraped toggle applied)
+  const displayData = useMemo(() => {
+    if (!iocData) return null;
+    if (!hideScraped || !canFilterScraped) return iocData;
+    const out = {};
+    Object.entries(iocData).forEach(([cat, arr]) => {
+      const keep = arr.filter((v) => (originData?.[cat]?.[v] || "eng") !== "eng");
+      if (keep.length) out[cat] = keep;
+    });
+    return out;
+  }, [iocData, hideScraped, canFilterScraped, originData]);
+
   const entries = useMemo(
-    () => (iocData ? Object.entries(iocData).sort((a, b) => b[1].length - a[1].length) : []),
-    [iocData]
+    () => (displayData ? Object.entries(displayData).sort((a, b) => b[1].length - a[1].length) : []),
+    [displayData]
   );
   const total = useMemo(() => entries.reduce((s, [, v]) => s + v.length, 0), [entries]);
+
+  // Registry details visible under the current scraped filter — hunt queries
+  // regenerate from exactly these, so toggling off garbage rebuilds the query
+  const visibleRegDetails = useMemo(() => {
+    if (!registryDetails.length || !displayData?.REGISTRY) return [];
+    const vis = new Set(displayData.REGISTRY);
+    const seen = new Set();
+    return registryDetails.filter((d) => {
+      const c = canonicalReg(d);
+      if (!vis.has(c) || seen.has(c)) return false;
+      seen.add(c);
+      return true;
+    });
+  }, [registryDetails, displayData]);
+
+  const huntReadySet = useMemo(
+    () => new Set(registryDetails.filter((d) => d.valueName || (d.data !== undefined && d.data !== null && d.data !== "")).map((d) => canonicalReg(d))),
+    [registryDetails]
+  );
+
+  const catTag = (cat, arr) => {
+    if (!originData?.[cat]) return null;
+    let api = false, eng = false;
+    arr.forEach((v) => {
+      const o = originData[cat][v];
+      if (o === "api") api = true;
+      else if (o === "eng") eng = true;
+      else if (o === "both") { api = true; eng = true; }
+    });
+    if (api && eng) return TAG_LABEL.both;
+    if (api) return TAG_LABEL.api;
+    if (eng) return TAG_LABEL.eng;
+    return null;
+  };
+  const tagFor = (cat, v) => {
+    const o = originData?.[cat]?.[v];
+    return o ? TAG_LABEL[o] : "";
+  };
 
   const proc = (arr, cat) => (defangMap[cat] ? arr.map(defang) : arr);
   const toggleDefang = (cat) => setDefangMap((m) => ({ ...m, [cat]: !m[cat] }));
@@ -266,103 +644,155 @@ export default function App() {
       const ta = document.createElement("textarea");
       ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
       document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); flash(key); } catch {}
+      try { document.execCommand("copy"); flash(key); } catch { /* ignore */ }
       document.body.removeChild(ta);
     }
   };
 
+  const resetResults = () => {
+    setError(""); setIocData(null); setOriginData(null); setRegistryDetails([]);
+    setFetchVia(""); setRawArticle(""); setHideScraped(false);
+  };
+
+  // ---- URL mode: iocparser AND page scrape in parallel, results merged ----
   const runFetch = async () => {
-    setError(""); setLoading(true); setIocData(null); setQueries([]); setFetchVia(""); setRawArticle("");
+    resetResults();
+    setLoading(true);
 
     if (!WORKER_BASE || WORKER_BASE.includes("YOUR-WORKER")) {
-      setError('ERROR: Set WORKER_BASE at the top of App.jsx to your Cloudflare Worker URL from Part 1.');
+      setError('Set WORKER_BASE at the top of App.jsx to your deployed Cloudflare Worker URL.');
       setLoading(false);
       return;
     }
 
-    // Hop 1: iocparser via Worker
-    try {
-      const res = await fetch(`${WORKER_BASE}/parse`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
-      });
-      if (res.ok) {
-        const json = await res.json();
-        const parsed = parseIocs(json);
-        if (Object.keys(parsed).length) {
-          setIocData(parsed); setSourceUrl(url); setFetchVia("iocparser.com"); setLoading(false);
-          return;
-        }
+    const apiP = fetch(`${WORKER_BASE}/parse`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    })
+      .then((r) => { if (!r.ok) throw new Error(`iocparser HTTP ${r.status}`); return r.json(); })
+      .then((j) => parseIocs(j));
+
+    const pageP = fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(url)}`)
+      .then((r) => { if (!r.ok) throw new Error(`page HTTP ${r.status}`); return r.text(); });
+
+    const [aRes, pRes] = await Promise.allSettled([apiP, pageP]);
+
+    const apiData = (aRes.status === "fulfilled" && Object.keys(aRes.value).length) ? aRes.value : null;
+
+    let engData = null, engDetails = [], articleText = "";
+    if (pRes.status === "fulfilled" && pRes.value && pRes.value.length >= 50) {
+      articleText = htmlToText(pRes.value);
+      const ex = extractIocs(articleText);
+      const filtered = filterScraped(ex.data, url);
+      if (Object.keys(filtered).length) {
+        engData = filtered;
+        engDetails = ex.registryDetails;
       }
-    } catch { /* fall through */ }
+    }
 
-    // Hop 2: full page fetch + local parse + query extraction
-    try {
-      const res = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(url)}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const html = await res.text();
-      if (!html || html.length < 50) throw new Error("empty response");
-      
-      const text = htmlToText(html);
-      const parsed = extractIocs(text);
-      const foundQueries = extractQueries(html);
-      
-      if (!Object.keys(parsed).length && foundQueries.length === 0) throw new Error("no IOCs or queries found");
-      
-      setRawArticle(text);
-      setIocData(parsed);
-      setQueries(foundQueries);
-      setSourceUrl(url);
-      setFetchVia(`page fetch + local parse${foundQueries.length > 0 ? ` (${foundQueries.length} queries)` : ""}`);
+    if (!apiData && !engData) {
+      const why = [
+        aRes.status === "rejected" ? (aRes.reason?.message || "iocparser failed") : "no API IOCs",
+        pRes.status === "rejected" ? (pRes.reason?.message || "page fetch failed") : "no page IOCs",
+      ].join("; ");
+      setError(`Both iocparser and page-fetch came back empty via your Worker (${why}). Check the Worker is deployed and reachable, or use "Paste IOCs".`);
       setLoading(false);
       return;
-    } catch (e) {
-      setError(`Fetch failed: ${e.message}. Check Worker URL is correct, or use "Paste IOCs".`);
     }
+
+    let data, origin;
+    if (apiData && engData) {
+      ({ data, origin } = mergeIocs(apiData, engData));
+      setFetchVia("iocparser.com + local engine · merged");
+    } else if (apiData) {
+      data = apiData;
+      origin = {};
+      Object.entries(data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "api"; }); });
+      setFetchVia("iocparser.com (via Worker) · page scrape unavailable");
+    } else {
+      data = engData;
+      origin = {};
+      Object.entries(data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "eng"; }); });
+      setFetchVia("page fetch via Worker → local engine");
+    }
+
+    setRegistryDetails(engDetails);
+    setIocData(data);
+    setOriginData(origin);
+    setSourceUrl(url);
+    if (articleText) setRawArticle(articleText);
     setLoading(false);
   };
 
   const runPaste = () => {
-    setError(""); setIocData(null);
+    resetResults();
     try {
       const parsed = parseIocs(JSON.parse(jsonText));
-      if (!Object.keys(parsed).length) throw new Error("No IOC arrays found.");
-      setIocData(parsed); setSourceUrl("(pasted JSON)"); setFetchVia(""); setRawArticle(""); setQueries([]);
-    } catch (e) { setError(`JSON parse error: ${e.message}`); }
+      if (!Object.keys(parsed).length) throw new Error("No IOC arrays found in the pasted JSON.");
+      let details = [];
+      if (parsed.REGISTRY) {
+        const seen = new Set();
+        const canon = [];
+        parsed.REGISTRY.forEach((s) => {
+          const d = parseCanonicalReg(s);
+          const c = canonicalReg(d);
+          if (!seen.has(c)) { seen.add(c); details.push(d); canon.push(c); }
+        });
+        parsed.REGISTRY = canon;
+      }
+      const origin = {};
+      Object.entries(parsed).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "api"; }); });
+      setIocData(parsed); setOriginData(origin); setRegistryDetails(details);
+      setSourceUrl("(pasted JSON)");
+    } catch (e) { setError(`Could not parse JSON: ${e.message}`); }
   };
 
   const runRaw = () => {
-    setError(""); setIocData(null);
-    const parsed = extractIocs(rawText);
-    if (!Object.keys(parsed).length) {
-      setError("No IOCs found. Handles: IPs, domains, URLs, emails, hashes, CVEs, MITRE IDs, ASNs, crypto, MACs, registry keys, filenames (with spaces).");
+    resetResults();
+    const ex = extractIocs(rawText);
+    if (!Object.keys(ex.data).length) {
+      setError("No recognizable IOCs found. Handles markdown reports, defanged & messy text — IPs, domains, URLs, emails, hashes, ssdeep, CVEs, MITRE IDs, ASNs, BTC/XMR/ETH, MACs, registry keys (with values) & file paths.");
       return;
     }
-    setIocData(parsed); setSourceUrl("(raw paste)"); setFetchVia(""); setRawArticle(""); setQueries([]);
+    const origin = {};
+    Object.entries(ex.data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "eng"; }); });
+    setIocData(ex.data); setOriginData(origin); setRegistryDetails(ex.registryDetails);
+    setSourceUrl("(raw paste)");
   };
 
   const saveArticle = () =>
     downloadBlob(new Blob([rawArticle], { type: "text/plain;charset=utf-8" }), `article_${Date.now()}.txt`);
 
   const exportAllCSV = () => {
-    const rows = [["Type", "IOC"]];
-    entries.forEach(([cat, arr]) => proc(arr, cat).forEach((v) => rows.push([cat, v])));
+    const rows = [["Type", "IOC", "Source"]];
+    entries.forEach(([cat, arr]) => {
+      const shown = proc(arr, cat);
+      arr.forEach((orig, i) => rows.push([cat, shown[i], tagFor(cat, orig)]));
+    });
     downloadBlob(new Blob([toCSV(rows)], { type: "text/csv;charset=utf-8" }), "all_iocs.csv");
   };
   const exportAllXLSX = () => {
-    const all = [["Type", "IOC"]];
-    entries.forEach(([cat, arr]) => proc(arr, cat).forEach((v) => all.push([cat, v])));
+    const all = [["Type", "IOC", "Source"]];
+    entries.forEach(([cat, arr]) => {
+      const shown = proc(arr, cat);
+      arr.forEach((orig, i) => all.push([cat, shown[i], tagFor(cat, orig)]));
+    });
     const sheets = [{ name: "All_IOCs", rows: all }];
-    entries.forEach(([cat, arr]) => sheets.push({ name: cat, rows: [["IOC"], ...proc(arr, cat).map((v) => [v])] }));
+    entries.forEach(([cat, arr]) => {
+      const shown = proc(arr, cat);
+      sheets.push({ name: cat, rows: [["IOC", "Source"], ...arr.map((orig, i) => [shown[i], tagFor(cat, orig)])] });
+    });
     downloadBlob(buildWorkbook(sheets), "all_iocs.xlsx");
   };
   const exportTypeCSV = (cat, arr) => {
-    const rows = [["Type", "IOC"], ...proc(arr, cat).map((v) => [cat, v])];
+    const shown = proc(arr, cat);
+    const rows = [["Type", "IOC", "Source"], ...arr.map((orig, i) => [cat, shown[i], tagFor(cat, orig)])];
     downloadBlob(new Blob([toCSV(rows)], { type: "text/csv;charset=utf-8" }), `${cat.toLowerCase()}_iocs.csv`);
   };
   const exportTypeXLSX = (cat, arr) => {
-    const rows = [["IOC"], ...proc(arr, cat).map((v) => [v])];
+    const shown = proc(arr, cat);
+    const rows = [["IOC", "Source"], ...arr.map((orig, i) => [shown[i], tagFor(cat, orig)])];
     downloadBlob(buildWorkbook([{ name: cat, rows }]), `${cat.toLowerCase()}_iocs.xlsx`);
   };
 
@@ -387,22 +817,21 @@ export default function App() {
           </div>
           <div>
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight" style={{ color: "#eafcff", textShadow: "0 0 18px rgba(0,229,255,0.35)" }}>
-              IOC &amp; Detection Query Extractor
+              Threat Intel Article IOC Extractor
             </h1>
             <p className="text-xs sm:text-sm" style={{ color: "#7f95a3" }}>
-              Extract IOCs + KQL/CQL queries · self-hosted · local parsing · zero tokens
+              Self-hosted · local engine · your Worker · zero external tokens
             </p>
           </div>
         </div>
 
         <div className="rounded-xl p-3 mb-4 flex flex-wrap items-center gap-2" style={panel}>
-          <span className="text-xs uppercase tracking-widest mr-1" style={{ color: "#7f95a3" }}>Export IOCs</span>
-          <GButton onClick={exportAllCSV} disabled={!total} color="#00ff9c" icon={<Download size={15} />}>CSV</GButton>
-          <GButton onClick={exportAllXLSX} disabled={!total} color="#00e5ff" icon={<Download size={15} />}>XLSX</GButton>
+          <span className="text-xs uppercase tracking-widest mr-1" style={{ color: "#7f95a3" }}>Export all</span>
+          <GButton onClick={exportAllCSV} disabled={!total} color="#00ff9c" icon={<Download size={15} />}>All IOCs · CSV</GButton>
+          <GButton onClick={exportAllXLSX} disabled={!total} color="#00e5ff" icon={<Download size={15} />}>All IOCs · XLSX</GButton>
           {total > 0 && (
             <span className="text-xs ml-auto" style={{ color: "#7f95a3" }}>
               <span style={{ color: "#00ff9c", fontWeight: 700 }}>{total}</span> IOCs · {entries.length} types
-              {queries.length > 0 && <span style={{ color: "#c084fc" }}> · {queries.length} queries</span>}
             </span>
           )}
         </div>
@@ -429,11 +858,11 @@ export default function App() {
                   />
                 </div>
                 <GButton onClick={runFetch} disabled={!url || loading} color="#00e5ff" solid icon={loading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}>
-                  {loading ? "Fetching…" : "Fetch"}
+                  {loading ? "Fetching…" : "Fetch & Extract"}
                 </GButton>
               </div>
               <p className="text-xs" style={{ color: "#5d7382" }}>
-                Extracts IOCs + KQL/CQL queries from threat intel pages (Microsoft, etc). Fetches via your Cloudflare Worker.
+                Runs iocparser.com and a full page scrape in parallel through your Worker, then merges both for maximum coverage — including registry keys &amp; file paths.
               </p>
             </div>
           )}
@@ -443,13 +872,13 @@ export default function App() {
               <textarea
                 value={jsonText}
                 onChange={(e) => setJsonText(e.target.value)}
-                placeholder='{"IPV4":["1.2.3.4"],"DOMAIN":["evil.com"]} or {"data":{...}}'
+                placeholder='Paste JSON with arrays per type, e.g. {"IPV4":["1.2.3.4"],"DOMAIN":["evil.com"]} or {"data":{...}}'
                 rows={5}
                 className="w-full rounded-lg px-3 py-2.5 text-sm outline-none resize-y"
                 style={{ backgroundColor: "rgba(0,0,0,0.45)", border: "1px solid rgba(120,160,180,0.22)", color: "#dff" }}
               />
               <div className="flex gap-2">
-                <GButton onClick={runPaste} disabled={!jsonText.trim()} color="#00ff9c" solid icon={<ClipboardPaste size={16} />}>Parse</GButton>
+                <GButton onClick={runPaste} disabled={!jsonText.trim()} color="#00ff9c" solid icon={<ClipboardPaste size={16} />}>Parse JSON</GButton>
                 {jsonText && <GButton onClick={() => setJsonText("")} color="#94a3b8" icon={<Trash2 size={15} />}>Clear</GButton>}
               </div>
             </div>
@@ -460,14 +889,17 @@ export default function App() {
               <textarea
                 value={rawText}
                 onChange={(e) => setRawText(e.target.value)}
-                placeholder={"Paste IOCs (any format): 1.2.3.4, evil[.]com, hxxps://bad.site, CVE-2025-1234, HKLM\\System, etc"}
+                placeholder={"Paste IOCs in ANY format — markdown reports, defanged, or messy:\n\n[c7f38cbb99c8b74fa0465293feeba700](https://opentip.kaspersky.com/…) Financial Reports.vbs\ntemu.baskwms[.]top   202.61.160[.]202\nhxxps://evil[.]com/payload   CVE-2025-1234   T1059.005\nreg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v Updater /t REG_SZ /d \"C:\\Users\\x\\evil.exe\""}
                 rows={7}
                 className="w-full rounded-lg px-3 py-2.5 text-sm outline-none resize-y"
                 style={{ backgroundColor: "rgba(0,0,0,0.45)", border: "1px solid rgba(120,160,180,0.22)", color: "#dff" }}
               />
               <div className="flex items-center gap-2">
-                <GButton onClick={runRaw} disabled={!rawText.trim()} color="#c084fc" solid icon={<Wand2 size={16} />}>Parse</GButton>
+                <GButton onClick={runRaw} disabled={!rawText.trim()} color="#c084fc" solid icon={<Wand2 size={16} />}>Refang &amp; Parse</GButton>
                 {rawText && <GButton onClick={() => setRawText("")} color="#94a3b8" icon={<Trash2 size={15} />}>Clear</GButton>}
+                <span className="text-xs ml-auto" style={{ color: "#5d7382" }}>
+                  Handles <span style={{ color: "#8aa0ad" }}>[md](links)</span>, defang, reg add &amp; paths with spaces
+                </span>
               </div>
             </div>
           )}
@@ -493,37 +925,60 @@ export default function App() {
           </div>
         )}
 
-        {sourceUrl && (
-          <div className="flex items-center gap-3 mb-4 flex-wrap">
+        {iocData && (
+          <div className="flex items-center gap-2 mb-4 flex-wrap">
             <p className="text-xs truncate" style={{ color: "#5d7382" }}>
               source: <span style={{ color: "#8aa0ad" }}>{sourceUrl}</span>
-              {fetchVia && <span style={{ color: "#00ff9c" }}> · {fetchVia}</span>}
+              {fetchVia && <span style={{ color: "#00ff9c" }}> · via {fetchVia}</span>}
             </p>
-            {rawArticle && (
-              <button onClick={saveArticle} className="flex items-center gap-1 text-xs rounded-md px-2 py-1"
-                style={{ color: "#00e5ff", border: "1px solid rgba(0,229,255,0.4)", backgroundColor: "rgba(0,229,255,0.07)" }}>
-                <FileDown size={12} /> Save article
-              </button>
-            )}
+            <div className="flex items-center gap-2 ml-auto flex-wrap">
+              <ToggleBtn on={showTags} onClick={toggleTags} icon={<Tags size={12} />}>
+                {showTags ? "Tags: On" : "Tags: Off"}
+              </ToggleBtn>
+              {canFilterScraped && (
+                <ToggleBtn
+                  on={!hideScraped}
+                  onClick={() => setHideScraped((v) => !v)}
+                  icon={<Filter size={12} />}
+                  title="Hide/show engine-scraped IOCs. Exports and hunt queries rebuild from what's left."
+                >
+                  {hideScraped ? "Scraped IOCs: Off" : "Scraped IOCs: On"}
+                </ToggleBtn>
+              )}
+              {rawArticle && (
+                <button onClick={saveArticle} className="flex items-center gap-1 text-xs rounded-md px-2 py-1"
+                  style={{ color: "#00e5ff", border: "1px solid rgba(0,229,255,0.4)", backgroundColor: "rgba(0,229,255,0.07)" }}>
+                  <FileDown size={12} /> Save article ({Math.round(rawArticle.length / 1024)} KB)
+                </button>
+              )}
+            </div>
           </div>
         )}
 
-        {/* IOC Cards */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {entries.map(([cat, arr]) => {
             const c = colorFor(cat);
             const isDefanged = !!defangMap[cat];
             const shown = proc(arr, cat);
             const fmt = { lines: shown.join("\n"), pipe: shown.join("|"), quoted: shown.map((v) => `"${v}"`).join(", ") };
+            const tag = showTags ? catTag(cat, arr) : null;
+            const isReg = cat === "REGISTRY";
             return (
               <div key={cat} id={`cat-${cat}`} className="rounded-xl overflow-hidden flex flex-col" style={{ ...panel, borderColor: `${c}40` }}>
                 <div className="flex items-center justify-between px-4 py-2.5 gap-2" style={{ borderBottom: `1px solid ${c}33`, backgroundColor: `${c}0d` }}>
                   <div className="flex items-center gap-2 min-w-0">
                     <span style={{ width: 9, height: 9, borderRadius: 99, backgroundColor: c, boxShadow: `0 0 10px ${c}` }} />
                     <span className="font-bold tracking-wide truncate" style={{ color: c, textShadow: `0 0 12px ${c}55` }}>{cat}</span>
+                    {tag && (
+                      <span className="text-[10px] rounded-full px-1.5 py-0.5 whitespace-nowrap"
+                        style={{ color: "#8aa0ad", border: "1px solid rgba(138,160,173,0.35)", backgroundColor: "rgba(138,160,173,0.08)" }}>
+                        {tag}
+                      </span>
+                    )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <button onClick={() => toggleDefang(cat)} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
+                      title="Defang this type for safe sharing (display, copy & export)"
                       style={{ color: isDefanged ? "#04111a" : "#ffb84d", backgroundColor: isDefanged ? "#ffb84d" : "rgba(255,184,77,0.10)", border: "1px solid rgba(255,184,77,0.5)" }}>
                       <ShieldOff size={12} /> {isDefanged ? "Defanged" : "Defang"}
                     </button>
@@ -532,12 +987,28 @@ export default function App() {
                 </div>
 
                 <div className="px-4 py-2 overflow-y-auto" style={{ maxHeight: 240 }}>
-                  {shown.map((ioc, i) => (
-                    <div key={i} className="text-xs py-0.5 break-all leading-relaxed" style={{ color: "#c8d6dd" }}>
-                      <span style={{ color: `${c}aa`, userSelect: "none" }}>›</span> {ioc}
-                    </div>
-                  ))}
+                  {shown.map((ioc, i) => {
+                    const huntReady = isReg && huntReadySet.has(arr[i]);
+                    return (
+                      <div key={i} className="text-xs py-0.5 break-all leading-relaxed"
+                        title={huntReady ? "Hunt-ready: key + value captured — enriches the hunt queries below" : undefined}
+                        style={{ color: huntReady ? "#f3ddfa" : "#c8d6dd", fontWeight: huntReady ? 600 : 400 }}>
+                        <span style={{ color: `${c}aa`, userSelect: "none" }}>›</span> {ioc}
+                      </div>
+                    );
+                  })}
                 </div>
+
+                {isReg && visibleRegDetails.length > 0 && (
+                  <div className="px-3 py-2 flex flex-wrap items-center gap-1.5" style={{ borderTop: `1px solid ${c}22`, backgroundColor: `${c}08` }}>
+                    <span className="text-[10px] uppercase tracking-wider flex items-center gap-1 mr-1" style={{ color: "#8aa0ad" }}>
+                      <Crosshair size={11} /> Hunt
+                    </span>
+                    <CopyBtn label="Defender KQL" copied={copied === "reg-kql"} onClick={() => copyText(buildKQL(visibleRegDetails), "reg-kql")} color={c} />
+                    <CopyBtn label="CrowdStrike CQL" copied={copied === "reg-cql"} onClick={() => copyText(buildCQL(visibleRegDetails), "reg-cql")} color={c} />
+                    <CopyBtn label="Splunk SPL" copied={copied === "reg-spl"} onClick={() => copyText(buildSPL(visibleRegDetails), "reg-spl")} color={c} />
+                  </div>
+                )}
 
                 <div className="px-3 py-2.5 flex flex-wrap gap-1.5" style={{ borderTop: `1px solid ${c}22` }}>
                   <CopyBtn label="Lines" copied={copied === `${cat}-lines`} onClick={() => copyText(fmt.lines, `${cat}-lines`)} color={c} />
@@ -553,49 +1024,17 @@ export default function App() {
           })}
         </div>
 
-        {/* Query Cards */}
-        {queries.length > 0 && (
-          <div className="mb-6">
-            <h2 className="text-lg font-bold mb-3" style={{ color: "#c084fc", textShadow: "0 0 12px rgba(192,132,252,0.3)" }}>
-              <Code size={18} className="inline mr-2" /> Detection Queries ({queries.length})
-            </h2>
-            <div className="grid grid-cols-1 gap-4">
-              {queries.map((q, i) => (
-                <div key={i} className="rounded-xl p-4 overflow-hidden" style={{ ...panel, borderColor: "#c084fc40" }}>
-                  <div className="flex items-center justify-between mb-2" style={{ borderBottom: "1px solid rgba(192,132,252,0.2)", paddingBottom: "8px" }}>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-bold rounded px-2 py-0.5" style={{ backgroundColor: "rgba(192,132,252,0.15)", color: "#c084fc" }}>
-                        {q.type}
-                      </span>
-                      <span className="text-xs" style={{ color: "#7f95a3" }}>{q.context}</span>
-                    </div>
-                    <button
-                      onClick={() => copyText(q.code, `query-${i}`)}
-                      className="flex items-center gap-1 text-xs rounded px-2 py-1"
-                      style={{ color: copied === `query-${i}` ? "#04111a" : "#c084fc", backgroundColor: copied === `query-${i}` ? "#c084fc" : "rgba(192,132,252,0.12)", border: "1px solid rgba(192,132,252,0.44)" }}>
-                      {copied === `query-${i}` ? <Check size={12} /> : <Copy size={12} />} {copied === `query-${i}` ? "Copied" : "Copy"}
-                    </button>
-                  </div>
-                  <pre className="text-xs overflow-x-auto p-2 rounded" style={{ backgroundColor: "rgba(0,0,0,0.45)", color: "#dff", border: "1px solid rgba(192,132,252,0.2)" }}>
-                    {q.code}
-                  </pre>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
         {!iocData && !loading && !error && (
           <div className="rounded-xl p-10 text-center" style={panel}>
             <Shield size={34} className="mx-auto mb-3" style={{ color: "#1f4754" }} />
             <p className="text-sm" style={{ color: "#5d7382" }}>
-              Fetch a threat-intel article, paste JSON, or paste raw IOCs.
+              Fetch a threat-intel article URL, paste JSON, or paste raw IOCs — everything is parsed locally.
             </p>
           </div>
         )}
 
         <p className="text-center text-xs mt-8" style={{ color: "#3a4a54" }}>
-          Self-hosted · Cloudflare Worker relay · local IOC engine · KQL/CQL extraction
+          Self-hosted · your Cloudflare Worker · local IOC engine
         </p>
       </div>
     </div>
@@ -611,6 +1050,7 @@ function GButton({ children, onClick, disabled, color, icon, solid }) {
     </button>
   );
 }
+
 function Tab({ children, active, onClick, icon }) {
   return (
     <button onClick={onClick} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold"
@@ -619,6 +1059,20 @@ function Tab({ children, active, onClick, icon }) {
     </button>
   );
 }
+
+function ToggleBtn({ children, on, onClick, icon, title }) {
+  return (
+    <button onClick={onClick} title={title} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
+      style={{
+        color: on ? "#04111a" : "#8aa0ad",
+        backgroundColor: on ? "#8aa0ad" : "rgba(138,160,173,0.08)",
+        border: "1px solid rgba(138,160,173,0.4)",
+      }}>
+      {icon} {children}
+    </button>
+  );
+}
+
 function CopyBtn({ label, onClick, copied, color }) {
   return (
     <button onClick={onClick} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
@@ -627,6 +1081,7 @@ function CopyBtn({ label, onClick, copied, color }) {
     </button>
   );
 }
+
 function ExpBtn({ label, onClick, color }) {
   return (
     <button onClick={onClick} className="flex items-center gap-1 rounded-md px-2.5 py-1 text-xs flex-1 justify-center"
