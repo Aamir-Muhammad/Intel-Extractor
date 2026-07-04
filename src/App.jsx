@@ -3,11 +3,11 @@ import * as XLSX from "xlsx";
 import {
   Shield, Search, Download, Copy, Check, Loader2, Globe,
   ClipboardPaste, AlertTriangle, ShieldOff, Trash2, Wand2, FileDown,
-  Tags, Filter, Crosshair
+  Tags, Crosshair, FileText
 } from "lucide-react";
 
 // ============================================================
-//  Cloudflare Worker proxy
+//  Backend proxy
 // ============================================================
 const WORKER_BASE = "https://ioc-parser.aamirmuhd.workers.dev";
 
@@ -23,7 +23,7 @@ const TYPE_COLORS = {
   CVE: "#ff3b3b", BTC: "#f7931a", XMR: "#ff6600", ETH: "#8a92b2",
   ASN: "#2dd4bf", MAC_ADDRESS: "#a3e635",
   REGISTRY: "#e879f9", FILE: "#94a3b8",
-  MITRE_ATTACK: "#f43f5e",
+  MITRE_ATTACK: "#f43f5e", YARA: "#38bdf8",
 };
 const FALLBACK_PALETTE = ["#00e5ff","#00ff9c","#c084fc","#fbbf24","#ff4d6d","#2dd4bf","#a3e635","#7c9cff","#f59e0b","#e879f9"];
 const colorFor = (cat) => {
@@ -56,6 +56,18 @@ const refangSoft = (s) =>
 const trimTok = (s) =>
   s.replace(/^[.,;:!?'"`(){}<>\u201c\u201d\u2018\u2019]+/, "")
    .replace(/[.,;:!?'"`(){}<>\u201c\u201d\u2018\u2019]+$/, "");
+
+// Drop leading scheme from URLs (http:// https:// ftp://) for display/copy/export.
+// Defanged variants are refanged first so hxxp[://] forms are handled too.
+const stripScheme = (s) => refangSoft(String(s)).replace(/^\s*(?:https?|ftp):\/\//i, "");
+const stripUrlArray = (arr) => {
+  const out = [], seen = new Set();
+  arr.forEach((u) => {
+    const s = stripScheme(u);
+    if (s && !seen.has(s.toLowerCase())) { seen.add(s.toLowerCase()); out.push(s); }
+  });
+  return out;
+};
 
 const FILE_EXT = /\.(exe|dll|sys|scr|pif|cpl|msi|msp|ps1|psm1|psd1|bat|cmd|vbs|vbe|js|jse|wsf|wsh|hta|sct|jar|py|pyc|pl|rb|elf|bin|deb|rpm|apk|dmg|lnk|inf|reg|iso|img|vhd|vmdk|ova|rar|7z|gz|tgz|bz2|xz|cab|ace|tar|txt|csv|tsv|xml|json|yaml|yml|eml|msg|pdf|rtf|docx?|docm|xlsx?|xlsm|xlsb|pptx?|pptm|odt|ods|odp|tmp|dat|log|db|sqlite|key|pem|crt|cer|p12|pfx|chm)$/i;
 
@@ -272,7 +284,7 @@ const classify = (t) => {
   return null;
 };
 
-const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","ASN","MAC_ADDRESS","BTC","XMR","ETH","REGISTRY","FILE"];
+const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","YARA","ASN","MAC_ADDRESS","BTC","XMR","ETH","REGISTRY","FILE"];
 
 // Returns { data, registryDetails } — data is category → array of strings;
 // registryDetails is [{ key, valueName?, valueType?, data? }] powering hunt queries.
@@ -338,18 +350,28 @@ const extractIocs = (text) => {
   const out = {};
   ORDER.forEach((k) => { if (buckets[k]) out[k] = Array.from(buckets[k]); });
   Object.keys(buckets).forEach((k) => { if (!out[k]) out[k] = Array.from(buckets[k]); });
+  if (out.URL) out.URL = stripUrlArray(out.URL);
   return { data: out, registryDetails: regDetails };
 };
 
-// Normalize iocparser category names to the engine's, so merged results dedupe
+// Normalize API category names to the engine's, so merged results dedupe
 const API_KEY_MAP = {
   "FILE_HASH_MD5": "MD5", "FILE_HASH_SHA1": "SHA1", "FILE_HASH_SHA256": "SHA256", "FILE_HASH_SHA512": "SHA512",
   "MITRE_ATT&CK": "MITRE_ATTACK", "BITCOIN_ADDRESS": "BTC", "EMAIL_ADDRESS": "EMAIL",
+  "YARA_RULE": "YARA", "FILE_NAME": "FILE",
 };
 const normCat = (k) => {
   const u = String(k).toUpperCase().trim();
   return API_KEY_MAP[u] || u;
 };
+
+// Categories the API call is authoritative for. When the API succeeds, the local
+// engine contributes ONLY the categories NOT in this set (registry keys with
+// values, file paths, SHA512, ssdeep, ASN, MAC, BTC/XMR/ETH) — so page text never
+// floods DOMAIN/URL with a site's own nav, footer & CDN hosts.
+const API_SUPPORTED_CATS = new Set([
+  "IPV4", "IPV6", "URL", "DOMAIN", "MD5", "SHA1", "SHA256", "EMAIL", "CVE", "MITRE_ATTACK", "YARA",
+]);
 
 const parseIocs = (raw) => {
   let d = raw;
@@ -364,6 +386,7 @@ const parseIocs = (raw) => {
       }
     });
   }
+  if (out.URL) out.URL = stripUrlArray(out.URL);
   return out;
 };
 
@@ -386,7 +409,7 @@ const parseCanonicalReg = (s) => {
 };
 
 // ============================================================
-//  Dual-source merge (iocparser API + local engine)
+//  Dual-source merge (API call + local engine)
 // ============================================================
 const CASE_SENSITIVE_CATS = new Set(["FILE", "REGISTRY", "URL", "BTC", "XMR", "ETH", "SSDEEP"]);
 const normVal = (cat, v) => (CASE_SENSITIVE_CATS.has(cat) ? v : String(v).toLowerCase());
@@ -535,16 +558,15 @@ const buildWorkbook = (sheets) => {
   return new Blob([out], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 };
 
-const SAMPLE_URL = "https://securelist.com/whatsapp-vbs-rmm-campaign/120290/";
-
 export default function App() {
   const [mode, setMode] = useState("url");
-  const [url, setUrl] = useState(SAMPLE_URL);
+  const [url, setUrl] = useState("");
   const [jsonText, setJsonText] = useState("");
   const [rawText, setRawText] = useState("");
   const [iocData, setIocData] = useState(null);
   const [originData, setOriginData] = useState(null);           // cat → { value: "api"|"eng"|"both" }
   const [registryDetails, setRegistryDetails] = useState([]);   // [{ key, valueName?, valueType?, data? }]
+  const [meta, setMeta] = useState(null);                       // { title, description, url, tags[] }
   const [sourceUrl, setSourceUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -555,7 +577,6 @@ export default function App() {
   const [showTags, setShowTags] = useState(() => {
     try { return localStorage.getItem("ioc_show_tags") === "1"; } catch { return false; }
   });
-  const [hideScraped, setHideScraped] = useState(false);
   const copyTimer = useRef(null);
 
   const toggleTags = () =>
@@ -564,27 +585,7 @@ export default function App() {
       return !v;
     });
 
-  // Scraped-IOC filter only makes sense when both sources contributed
-  const canFilterScraped = useMemo(() => {
-    if (!originData) return false;
-    let eng = false, api = false;
-    Object.values(originData).forEach((m) =>
-      Object.values(m).forEach((o) => { if (o === "eng") eng = true; else api = true; })
-    );
-    return eng && api;
-  }, [originData]);
-
-  // What's actually displayed / exported / queried (scraped toggle applied)
-  const displayData = useMemo(() => {
-    if (!iocData) return null;
-    if (!hideScraped || !canFilterScraped) return iocData;
-    const out = {};
-    Object.entries(iocData).forEach(([cat, arr]) => {
-      const keep = arr.filter((v) => (originData?.[cat]?.[v] || "eng") !== "eng");
-      if (keep.length) out[cat] = keep;
-    });
-    return out;
-  }, [iocData, hideScraped, canFilterScraped, originData]);
+  const displayData = iocData;
 
   const entries = useMemo(
     () => (displayData ? Object.entries(displayData).sort((a, b) => b[1].length - a[1].length) : []),
@@ -651,75 +652,85 @@ export default function App() {
 
   const resetResults = () => {
     setError(""); setIocData(null); setOriginData(null); setRegistryDetails([]);
-    setFetchVia(""); setRawArticle(""); setHideScraped(false);
+    setMeta(null); setFetchVia(""); setRawArticle("");
   };
 
-  // ---- URL mode: iocparser AND page scrape in parallel, results merged ----
+  // ---- URL mode: API call AND page fetch in parallel ----
+  // API is authoritative for its supported categories; the local engine only
+  // contributes the types the API can't return (registry+values, file paths,
+  // sha512, ssdeep, asn, mac, btc/xmr/eth). If the API fails, the engine runs in
+  // full as a fallback.
   const runFetch = async () => {
     resetResults();
     setLoading(true);
-
-    if (!WORKER_BASE || WORKER_BASE.includes("YOUR-WORKER")) {
-      setError('Set WORKER_BASE at the top of App.jsx to your deployed Cloudflare Worker URL.');
-      setLoading(false);
-      return;
-    }
 
     const apiP = fetch(`${WORKER_BASE}/parse`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url }),
     })
-      .then((r) => { if (!r.ok) throw new Error(`iocparser HTTP ${r.status}`); return r.json(); })
-      .then((j) => parseIocs(j));
+      .then((r) => { if (!r.ok) throw new Error(`API HTTP ${r.status}`); return r.json(); });
 
     const pageP = fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(url)}`)
       .then((r) => { if (!r.ok) throw new Error(`page HTTP ${r.status}`); return r.text(); });
 
     const [aRes, pRes] = await Promise.allSettled([apiP, pageP]);
 
-    const apiData = (aRes.status === "fulfilled" && Object.keys(aRes.value).length) ? aRes.value : null;
+    const apiJson = aRes.status === "fulfilled" ? aRes.value : null;
+    const apiData = apiJson ? (() => { const d = parseIocs(apiJson); return Object.keys(d).length ? d : null; })() : null;
+    const apiMeta = apiJson && apiJson.meta && typeof apiJson.meta === "object" ? apiJson.meta : null;
 
-    let engData = null, engDetails = [], articleText = "";
+    // Local engine over the fetched page text
+    let engFull = null, engDetails = [], articleText = "";
     if (pRes.status === "fulfilled" && pRes.value && pRes.value.length >= 50) {
       articleText = htmlToText(pRes.value);
       const ex = extractIocs(articleText);
-      const filtered = filterScraped(ex.data, url);
-      if (Object.keys(filtered).length) {
-        engData = filtered;
-        engDetails = ex.registryDetails;
-      }
+      engFull = ex.data;
+      engDetails = ex.registryDetails;
     }
 
-    if (!apiData && !engData) {
+    if (!apiData && (!engFull || !Object.keys(filterScraped(engFull, url)).length)) {
       const why = [
-        aRes.status === "rejected" ? (aRes.reason?.message || "iocparser failed") : "no API IOCs",
+        aRes.status === "rejected" ? (aRes.reason?.message || "API call failed") : "no API IOCs",
         pRes.status === "rejected" ? (pRes.reason?.message || "page fetch failed") : "no page IOCs",
       ].join("; ");
-      setError(`Both iocparser and page-fetch came back empty via your Worker (${why}). Check the Worker is deployed and reachable, or use "Paste IOCs".`);
+      setError(`The API call and page fetch both returned no IOCs (${why}). Try the "Paste IOCs" tab, or check the URL.`);
       setLoading(false);
       return;
     }
 
-    let data, origin;
-    if (apiData && engData) {
-      ({ data, origin } = mergeIocs(apiData, engData));
-      setFetchVia("iocparser.com + local engine · merged");
-    } else if (apiData) {
-      data = apiData;
-      origin = {};
-      Object.entries(data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "api"; }); });
-      setFetchVia("iocparser.com (via Worker) · page scrape unavailable");
+    let data, origin, usedDetails = [];
+    if (apiData) {
+      // Keep only the engine categories the API can't produce
+      const engExtra = {};
+      if (engFull) {
+        Object.entries(engFull).forEach(([cat, arr]) => {
+          if (!API_SUPPORTED_CATS.has(cat) && arr.length) engExtra[cat] = arr;
+        });
+      }
+      if (Object.keys(engExtra).length) {
+        ({ data, origin } = mergeIocs(apiData, engExtra));
+        usedDetails = engExtra.REGISTRY ? engDetails : [];
+        setFetchVia("api call + local extraction");
+      } else {
+        data = apiData;
+        origin = {};
+        Object.entries(data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "api"; }); });
+        setFetchVia("api call");
+      }
     } else {
-      data = engData;
+      // API failed → full local extraction fallback
+      data = filterScraped(engFull, url);
       origin = {};
       Object.entries(data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "eng"; }); });
-      setFetchVia("page fetch via Worker → local engine");
+      usedDetails = engDetails;
+      setFetchVia("local extraction (fallback)");
     }
 
-    setRegistryDetails(engDetails);
+    setRegistryDetails(usedDetails);
     setIocData(data);
     setOriginData(origin);
+    setMeta(apiMeta);
     setSourceUrl(url);
     if (articleText) setRawArticle(articleText);
     setLoading(false);
@@ -820,7 +831,7 @@ export default function App() {
               Threat Intel Article IOC Extractor
             </h1>
             <p className="text-xs sm:text-sm" style={{ color: "#7f95a3" }}>
-              Self-hosted · local engine · your Worker · zero external tokens
+              Extract IOCs, capture hunt artifacts, generate ready-to-run queries.
             </p>
           </div>
         </div>
@@ -830,8 +841,12 @@ export default function App() {
           <GButton onClick={exportAllCSV} disabled={!total} color="#00ff9c" icon={<Download size={15} />}>All IOCs · CSV</GButton>
           <GButton onClick={exportAllXLSX} disabled={!total} color="#00e5ff" icon={<Download size={15} />}>All IOCs · XLSX</GButton>
           {total > 0 && (
-            <span className="text-xs ml-auto" style={{ color: "#7f95a3" }}>
-              <span style={{ color: "#00ff9c", fontWeight: 700 }}>{total}</span> IOCs · {entries.length} types
+            <span className="ml-auto flex items-baseline gap-1.5">
+              <span className="text-2xl font-extrabold tabular-nums leading-none" style={{ color: "#00ff9c", textShadow: "0 0 14px rgba(0,255,156,0.45)" }}>{total}</span>
+              <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "#7f95a3" }}>IOCs</span>
+              <span className="text-sm mx-1" style={{ color: "#3a4a54" }}>·</span>
+              <span className="text-lg font-extrabold tabular-nums leading-none" style={{ color: "#00e5ff", textShadow: "0 0 14px rgba(0,229,255,0.4)" }}>{entries.length}</span>
+              <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "#7f95a3" }}>types</span>
             </span>
           )}
         </div>
@@ -861,9 +876,6 @@ export default function App() {
                   {loading ? "Fetching…" : "Fetch & Extract"}
                 </GButton>
               </div>
-              <p className="text-xs" style={{ color: "#5d7382" }}>
-                Runs iocparser.com and a full page scrape in parallel through your Worker, then merges both for maximum coverage — including registry keys &amp; file paths.
-              </p>
             </div>
           )}
 
@@ -911,6 +923,38 @@ export default function App() {
           )}
         </div>
 
+        {meta && (meta.title || meta.description) && (
+          <div className="rounded-xl p-4 mb-4 flex gap-3" style={{ ...panel, borderColor: "rgba(0,229,255,0.28)", boxShadow: "0 0 24px rgba(0,229,255,0.08)" }}>
+            <div className="mt-0.5 shrink-0 flex h-9 w-9 items-center justify-center rounded-lg"
+              style={{ backgroundColor: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.3)" }}>
+              <FileText size={17} style={{ color: "#00e5ff" }} />
+            </div>
+            <div className="min-w-0 flex-1">
+              {meta.title && (
+                <h2 className="text-sm sm:text-base font-bold leading-snug" style={{ color: "#eafcff" }}>{meta.title}</h2>
+              )}
+              {meta.description && (
+                <p className="text-xs sm:text-sm mt-1 leading-relaxed" style={{ color: "#9fb3bd" }}>{meta.description}</p>
+              )}
+              <div className="flex flex-wrap items-center gap-2 mt-2">
+                {meta.url && (
+                  <a href={meta.url} target="_blank" rel="noreferrer noopener"
+                    className="inline-flex items-center gap-1 text-xs rounded-md px-2 py-0.5 truncate max-w-full"
+                    style={{ color: "#00e5ff", border: "1px solid rgba(0,229,255,0.3)", backgroundColor: "rgba(0,229,255,0.06)" }}>
+                    <Globe size={11} className="shrink-0" /> <span className="truncate">{stripScheme(meta.url)}</span>
+                  </a>
+                )}
+                {Array.isArray(meta.tags) && meta.tags.filter(Boolean).map((t, i) => (
+                  <span key={i} className="text-[11px] rounded-full px-2 py-0.5"
+                    style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.35)", backgroundColor: "rgba(192,132,252,0.08)" }}>
+                    #{String(t)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
         {entries.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-5">
             {entries.map(([cat, arr]) => {
@@ -918,7 +962,7 @@ export default function App() {
               return (
                 <a key={cat} href={`#cat-${cat}`} className="flex items-center gap-2 rounded-full px-3 py-1 text-xs" style={{ border: `1px solid ${c}55`, backgroundColor: `${c}14`, color: c }}>
                   <span style={{ width: 7, height: 7, borderRadius: 99, backgroundColor: c, boxShadow: `0 0 8px ${c}` }} />
-                  {cat} <span style={{ opacity: 0.75 }}>· {arr.length}</span>
+                  {cat} <span className="font-bold" style={{ opacity: 0.85 }}>· {arr.length}</span>
                 </a>
               );
             })}
@@ -935,16 +979,6 @@ export default function App() {
               <ToggleBtn on={showTags} onClick={toggleTags} icon={<Tags size={12} />}>
                 {showTags ? "Tags: On" : "Tags: Off"}
               </ToggleBtn>
-              {canFilterScraped && (
-                <ToggleBtn
-                  on={!hideScraped}
-                  onClick={() => setHideScraped((v) => !v)}
-                  icon={<Filter size={12} />}
-                  title="Hide/show engine-scraped IOCs. Exports and hunt queries rebuild from what's left."
-                >
-                  {hideScraped ? "Scraped IOCs: Off" : "Scraped IOCs: On"}
-                </ToggleBtn>
-              )}
               {rawArticle && (
                 <button onClick={saveArticle} className="flex items-center gap-1 text-xs rounded-md px-2 py-1"
                   style={{ color: "#00e5ff", border: "1px solid rgba(0,229,255,0.4)", backgroundColor: "rgba(0,229,255,0.07)" }}>
@@ -960,7 +994,12 @@ export default function App() {
             const c = colorFor(cat);
             const isDefanged = !!defangMap[cat];
             const shown = proc(arr, cat);
-            const fmt = { lines: shown.join("\n"), pipe: shown.join("|"), quoted: shown.map((v) => `"${v}"`).join(", ") };
+            const fmt = {
+              lines: shown.join("\n"),
+              pipe: shown.join("|"),
+              quoted: shown.map((v) => `"${v}"`).join(", "),
+              comma: shown.join(", "),
+            };
             const tag = showTags ? catTag(cat, arr) : null;
             const isReg = cat === "REGISTRY";
             return (
@@ -982,18 +1021,32 @@ export default function App() {
                       style={{ color: isDefanged ? "#04111a" : "#ffb84d", backgroundColor: isDefanged ? "#ffb84d" : "rgba(255,184,77,0.10)", border: "1px solid rgba(255,184,77,0.5)" }}>
                       <ShieldOff size={12} /> {isDefanged ? "Defanged" : "Defang"}
                     </button>
-                    <span className="text-xs rounded-full px-2 py-0.5" style={{ backgroundColor: `${c}1f`, color: c, border: `1px solid ${c}55` }}>{arr.length}</span>
+                    <span className="flex items-center justify-center text-base font-extrabold tabular-nums rounded-lg px-2.5 py-0.5 min-w-[2.2rem]"
+                      style={{ backgroundColor: `${c}22`, color: c, border: `1px solid ${c}66`, textShadow: `0 0 10px ${c}66` }}>
+                      {arr.length}
+                    </span>
                   </div>
                 </div>
 
                 <div className="px-4 py-2 overflow-y-auto" style={{ maxHeight: 240 }}>
                   {shown.map((ioc, i) => {
                     const huntReady = isReg && huntReadySet.has(arr[i]);
+                    const rowKey = `${cat}-i-${i}`;
+                    const isCopied = copied === rowKey;
                     return (
-                      <div key={i} className="text-xs py-0.5 break-all leading-relaxed"
-                        title={huntReady ? "Hunt-ready: key + value captured — enriches the hunt queries below" : undefined}
-                        style={{ color: huntReady ? "#f3ddfa" : "#c8d6dd", fontWeight: huntReady ? 600 : 400 }}>
-                        <span style={{ color: `${c}aa`, userSelect: "none" }}>›</span> {ioc}
+                      <div key={i} className="group flex items-start gap-1.5 py-0.5 leading-relaxed"
+                        title={huntReady ? "Hunt-ready: key + value captured — enriches the hunt queries below" : undefined}>
+                        <span className="text-xs shrink-0" style={{ color: `${c}aa`, userSelect: "none" }}>›</span>
+                        <span className="text-xs break-all flex-1 min-w-0"
+                          style={{ color: huntReady ? "#f3ddfa" : "#c8d6dd", fontWeight: huntReady ? 600 : 400 }}>
+                          {ioc}
+                        </span>
+                        <button onClick={() => copyText(ioc, rowKey)}
+                          title="Copy this indicator"
+                          className="shrink-0 rounded p-0.5 opacity-40 hover:opacity-100 transition-opacity"
+                          style={{ color: isCopied ? c : "#5d7382" }}>
+                          {isCopied ? <Check size={13} /> : <Copy size={13} />}
+                        </button>
                       </div>
                     );
                   })}
@@ -1012,6 +1065,7 @@ export default function App() {
 
                 <div className="px-3 py-2.5 flex flex-wrap gap-1.5" style={{ borderTop: `1px solid ${c}22` }}>
                   <CopyBtn label="Lines" copied={copied === `${cat}-lines`} onClick={() => copyText(fmt.lines, `${cat}-lines`)} color={c} />
+                  <CopyBtn label="Comma" copied={copied === `${cat}-comma`} onClick={() => copyText(fmt.comma, `${cat}-comma`)} color={c} />
                   <CopyBtn label="Pipe |" copied={copied === `${cat}-pipe`} onClick={() => copyText(fmt.pipe, `${cat}-pipe`)} color={c} />
                   <CopyBtn label={`Quoted "`} copied={copied === `${cat}-quoted`} onClick={() => copyText(fmt.quoted, `${cat}-quoted`)} color={c} />
                 </div>
@@ -1028,13 +1082,13 @@ export default function App() {
           <div className="rounded-xl p-10 text-center" style={panel}>
             <Shield size={34} className="mx-auto mb-3" style={{ color: "#1f4754" }} />
             <p className="text-sm" style={{ color: "#5d7382" }}>
-              Fetch a threat-intel article URL, paste JSON, or paste raw IOCs — everything is parsed locally.
+              Fetch a threat-intel article URL, paste JSON, or paste raw IOCs.
             </p>
           </div>
         )}
 
         <p className="text-center text-xs mt-8" style={{ color: "#3a4a54" }}>
-          Self-hosted · your Cloudflare Worker · local IOC engine
+          IOC extraction · threat-hunting artifacts · query generation
         </p>
       </div>
     </div>
