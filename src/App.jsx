@@ -3,7 +3,7 @@ import * as XLSX from "xlsx";
 import {
   Shield, Search, Download, Copy, Check, Loader2, Globe,
   ClipboardPaste, AlertTriangle, ShieldOff, Trash2, Wand2, FileDown,
-  Tags, Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck
+  Tags, Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles
 } from "lucide-react";
 
 // ============================================================
@@ -300,6 +300,16 @@ const classify = (t) => {
 
 const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","YARA","ASN","MAC_ADDRESS","BTC","XMR","ETH","REGISTRY","FILE","FILE_PATH"];
 
+// Fixed on-screen card order: Domain, URL, IPs, all hashes first — then the rest.
+// Static (not count-based) so discarding IOCs never shuffles box positions.
+const DISPLAY_PRIORITY = ["DOMAIN","URL","IPV4","IPV6","MD5","SHA1","SHA256","SHA512","SSDEEP","IMPHASH"];
+const catRank = (cat) => {
+  const p = DISPLAY_PRIORITY.indexOf(cat);
+  if (p !== -1) return p;
+  const o = ORDER.indexOf(cat);
+  return o === -1 ? 999 : 100 + o;
+};
+
 // Returns { data, registryDetails } — data is category → array of strings;
 // registryDetails is [{ key, valueName?, valueType?, data? }] powering hunt queries.
 const extractIocs = (text) => {
@@ -585,10 +595,11 @@ export default function App() {
   const [originData, setOriginData] = useState(null);           // cat → { value: "api"|"eng"|"both" }
   const [registryDetails, setRegistryDetails] = useState([]);   // [{ key, valueName?, valueType?, data? }]
   const [meta, setMeta] = useState(null);                       // { title, description, url, tags[] }
+  const [aiSummary, setAiSummary] = useState(null);             // { headline, summary, recommendations[] }
+  const [aiLoading, setAiLoading] = useState(false);
   const [sourceUrl, setSourceUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [fetchVia, setFetchVia] = useState("");
   const [rawArticle, setRawArticle] = useState("");
   const [defangMap, setDefangMap] = useState({});
   const [defangAll, setDefangAll] = useState(false);
@@ -607,7 +618,7 @@ export default function App() {
   const displayData = iocData;
 
   const entries = useMemo(
-    () => (displayData ? Object.entries(displayData).sort((a, b) => b[1].length - a[1].length) : []),
+    () => (displayData ? Object.entries(displayData).sort((a, b) => catRank(a[0]) - catRank(b[0])) : []),
     [displayData]
   );
   const total = useMemo(() => entries.reduce((s, [, v]) => s + v.length, 0), [entries]);
@@ -687,7 +698,7 @@ export default function App() {
 
   const resetResults = () => {
     setError(""); setIocData(null); setOriginData(null); setRegistryDetails([]);
-    setMeta(null); setFetchVia(""); setRawArticle(""); setDefangAll(false);
+    setMeta(null); setAiSummary(null); setAiLoading(false); setRawArticle(""); setDefangAll(false);
   };
 
   // ---- URL mode: API call AND page fetch in parallel ----
@@ -746,12 +757,10 @@ export default function App() {
       if (Object.keys(engExtra).length) {
         ({ data, origin } = mergeIocs(apiData, engExtra));
         usedDetails = engExtra.REGISTRY ? engDetails : [];
-        setFetchVia("api call + local extraction");
       } else {
         data = apiData;
         origin = {};
         Object.entries(data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "api"; }); });
-        setFetchVia("api call");
       }
     } else {
       // API failed → full local extraction fallback
@@ -759,7 +768,6 @@ export default function App() {
       origin = {};
       Object.entries(data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "eng"; }); });
       usedDetails = engDetails;
-      setFetchVia("local extraction (fallback)");
     }
 
     setRegistryDetails(usedDetails);
@@ -769,6 +777,29 @@ export default function App() {
     setSourceUrl(url);
     if (articleText) setRawArticle(articleText);
     setLoading(false);
+
+    // Non-blocking AI summary — IOC results are already on screen. On failure
+    // we silently fall back to the plain metadata card.
+    if (articleText && articleText.trim().length > 300) {
+      setAiLoading(true);
+      fetch(`${WORKER_BASE}/summarize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: articleText, title: apiMeta?.title || "" }),
+      })
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .then((j) => {
+          if (j && typeof j.headline === "string" && typeof j.summary === "string") {
+            setAiSummary({
+              headline: j.headline,
+              summary: j.summary,
+              recommendations: Array.isArray(j.recommendations) ? j.recommendations : [],
+            });
+          }
+        })
+        .catch(() => { /* meta card remains as fallback */ })
+        .finally(() => setAiLoading(false));
+    }
   };
 
   const runPaste = () => {
@@ -912,11 +943,11 @@ export default function App() {
           {total > 0 && (
             <div className="flex items-baseline gap-2 rounded-lg px-3 py-1.5"
               style={{ border: "1px solid rgba(0,255,156,0.5)", backgroundColor: "rgba(0,255,156,0.08)", boxShadow: "0 0 18px rgba(0,255,156,0.15)" }}>
+              <span className="text-lg font-extrabold leading-none" style={{ color: "#00ff9c" }}>IOCs:</span>
               <span className="text-lg font-extrabold tabular-nums leading-none" style={{ color: "#00ff9c", textShadow: "0 0 12px rgba(0,255,156,0.5)" }}>{total}</span>
-              <span className="text-lg font-extrabold leading-none" style={{ color: "#00ff9c" }}>IOCs</span>
               <span className="text-lg font-extrabold leading-none" style={{ color: "#2a4a3f" }}>·</span>
+              <span className="text-lg font-extrabold leading-none" style={{ color: "#00e5ff" }}>Types:</span>
               <span className="text-lg font-extrabold tabular-nums leading-none" style={{ color: "#00e5ff", textShadow: "0 0 12px rgba(0,229,255,0.5)" }}>{entries.length}</span>
-              <span className="text-lg font-extrabold leading-none" style={{ color: "#00e5ff" }}>Types</span>
             </div>
           )}
           <span className="text-xs uppercase tracking-widest mr-1" style={{ color: "#7f95a3" }}>Export all</span>
@@ -1009,36 +1040,73 @@ export default function App() {
           )}
         </div>
 
-        {meta && (meta.title || meta.description) && (
-          <div className="rounded-xl p-4 mb-4 flex gap-3" style={{ ...panel, borderColor: "rgba(0,229,255,0.28)", boxShadow: "0 0 24px rgba(0,229,255,0.08)" }}>
+        {(aiLoading || aiSummary) ? (
+          <div className="rounded-xl p-4 mb-4 flex gap-3" style={{ ...panel, borderColor: "rgba(192,132,252,0.35)", boxShadow: "0 0 24px rgba(192,132,252,0.08)" }}>
             <div className="mt-0.5 shrink-0 flex h-9 w-9 items-center justify-center rounded-lg"
-              style={{ backgroundColor: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.3)" }}>
-              <FileText size={17} style={{ color: "#00e5ff" }} />
+              style={{ backgroundColor: "rgba(192,132,252,0.08)", border: "1px solid rgba(192,132,252,0.35)" }}>
+              <Sparkles size={17} style={{ color: "#c084fc" }} />
             </div>
             <div className="min-w-0 flex-1">
-              {meta.title && (
-                <h2 className="text-sm sm:text-base font-bold leading-snug" style={{ color: "#eafcff" }}>{meta.title}</h2>
-              )}
-              {meta.description && (
-                <p className="text-xs sm:text-sm mt-1 leading-relaxed" style={{ color: "#9fb3bd" }}>{meta.description}</p>
-              )}
-              <div className="flex flex-wrap items-center gap-2 mt-2">
-                {meta.url && (
-                  <a href={meta.url} target="_blank" rel="noreferrer noopener"
-                    className="inline-flex items-center gap-1 text-xs rounded-md px-2 py-0.5 truncate max-w-full"
-                    style={{ color: "#00e5ff", border: "1px solid rgba(0,229,255,0.3)", backgroundColor: "rgba(0,229,255,0.06)" }}>
-                    <Globe size={11} className="shrink-0" /> <span className="truncate">{stripScheme(meta.url)}</span>
-                  </a>
-                )}
-                {Array.isArray(meta.tags) && meta.tags.filter(Boolean).map((t, i) => (
-                  <span key={i} className="text-[11px] rounded-full px-2 py-0.5"
-                    style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.35)", backgroundColor: "rgba(192,132,252,0.08)" }}>
-                    #{String(t)}
-                  </span>
-                ))}
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-[10px] uppercase tracking-widest rounded-full px-2 py-0.5"
+                  style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.35)", backgroundColor: "rgba(192,132,252,0.08)" }}>
+                  AI Summary
+                </span>
               </div>
+              {aiLoading ? (
+                <p className="text-xs sm:text-sm animate-pulse" style={{ color: "#9fb3bd" }}>
+                  Analyzing article and generating summary…
+                </p>
+              ) : (
+                <>
+                  <h2 className="text-sm sm:text-base font-bold leading-snug" style={{ color: "#eafcff" }}>{aiSummary.headline}</h2>
+                  <p className="text-xs sm:text-sm mt-1.5 leading-relaxed" style={{ color: "#b8c9d1" }}>{aiSummary.summary}</p>
+                  {aiSummary.recommendations.length > 0 && (
+                    <div className="mt-2.5">
+                      <p className="text-[10px] uppercase tracking-widest mb-1" style={{ color: "#8aa0ad" }}>Recommendations</p>
+                      {aiSummary.recommendations.map((rec, i) => (
+                        <div key={i} className="flex items-start gap-1.5 text-xs sm:text-sm py-0.5 leading-relaxed" style={{ color: "#9fb3bd" }}>
+                          <span className="shrink-0" style={{ color: "#c084fc" }}>▸</span> <span>{rec}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           </div>
+        ) : (
+          meta && (meta.title || meta.description) && (
+            <div className="rounded-xl p-4 mb-4 flex gap-3" style={{ ...panel, borderColor: "rgba(0,229,255,0.28)", boxShadow: "0 0 24px rgba(0,229,255,0.08)" }}>
+              <div className="mt-0.5 shrink-0 flex h-9 w-9 items-center justify-center rounded-lg"
+                style={{ backgroundColor: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.3)" }}>
+                <FileText size={17} style={{ color: "#00e5ff" }} />
+              </div>
+              <div className="min-w-0 flex-1">
+                {meta.title && (
+                  <h2 className="text-sm sm:text-base font-bold leading-snug" style={{ color: "#eafcff" }}>{meta.title}</h2>
+                )}
+                {meta.description && (
+                  <p className="text-xs sm:text-sm mt-1 leading-relaxed" style={{ color: "#9fb3bd" }}>{meta.description}</p>
+                )}
+                <div className="flex flex-wrap items-center gap-2 mt-2">
+                  {meta.url && (
+                    <a href={meta.url} target="_blank" rel="noreferrer noopener"
+                      className="inline-flex items-center gap-1 text-xs rounded-md px-2 py-0.5 truncate max-w-full"
+                      style={{ color: "#00e5ff", border: "1px solid rgba(0,229,255,0.3)", backgroundColor: "rgba(0,229,255,0.06)" }}>
+                      <Globe size={11} className="shrink-0" /> <span className="truncate">{stripScheme(meta.url)}</span>
+                    </a>
+                  )}
+                  {Array.isArray(meta.tags) && meta.tags.filter(Boolean).map((t, i) => (
+                    <span key={i} className="text-[11px] rounded-full px-2 py-0.5"
+                      style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.35)", backgroundColor: "rgba(192,132,252,0.08)" }}>
+                      #{String(t)}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )
         )}
 
         {entries.length > 0 && (
@@ -1059,7 +1127,6 @@ export default function App() {
           <div className="flex items-center gap-2 mb-4 flex-wrap">
             <p className="text-xs truncate" style={{ color: "#5d7382" }}>
               source: <span style={{ color: "#8aa0ad" }}>{sourceUrl}</span>
-              {fetchVia && <span style={{ color: "#00ff9c" }}> · via {fetchVia}</span>}
             </p>
             <div className="flex items-center gap-2 ml-auto flex-wrap">
               <ToggleBtn on={showTags} onClick={toggleTags} icon={<Tags size={12} />}>
@@ -1129,15 +1196,15 @@ export default function App() {
                         </span>
                         <button onClick={() => copyText(ioc, rowKey)}
                           title="Copy this indicator"
-                          className="shrink-0 rounded p-0.5 opacity-40 hover:opacity-100 transition-opacity"
-                          style={{ color: isCopied ? c : "#5d7382" }}>
-                          {isCopied ? <Check size={13} /> : <Copy size={13} />}
+                          className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
+                          style={{ color: isCopied ? c : "#8aa0ad" }}>
+                          {isCopied ? <Check size={16} /> : <Copy size={16} />}
                         </button>
                         <button onClick={() => removeIoc(cat, arr[i])}
                           title="Discard this indicator — removed from copy formats, exports & hunt queries"
-                          className="shrink-0 rounded p-0.5 opacity-40 hover:opacity-100 transition-opacity"
+                          className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
                           style={{ color: "#ff6b6b" }}>
-                          <X size={13} />
+                          <X size={16} />
                         </button>
                       </div>
                     );
@@ -1180,7 +1247,7 @@ export default function App() {
         )}
 
         <p className="text-center text-xs mt-8" style={{ color: "#3a4a54" }}>
-          IOC extraction · threat-hunting artifacts · query generation
+          IOC Extraction · Threat Hunting Artifacts · Hunting Query Generation
         </p>
       </div>
     </div>
