@@ -3,7 +3,7 @@ import * as XLSX from "xlsx";
 import {
   Shield, Search, Download, Copy, Check, Loader2, Globe,
   ClipboardPaste, AlertTriangle, ShieldOff, Trash2, Wand2, FileDown,
-  Tags, Crosshair, FileText
+  Tags, Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck
 } from "lucide-react";
 
 // ============================================================
@@ -22,7 +22,7 @@ const TYPE_COLORS = {
   SSDEEP: "#f472b6", IMPHASH: "#f59e0b",
   CVE: "#ff3b3b", BTC: "#f7931a", XMR: "#ff6600", ETH: "#8a92b2",
   ASN: "#2dd4bf", MAC_ADDRESS: "#a3e635",
-  REGISTRY: "#e879f9", FILE: "#94a3b8",
+  REGISTRY: "#e879f9", FILE: "#94a3b8", FILE_PATH: "#a5b4fc",
   MITRE_ATTACK: "#f43f5e", YARA: "#38bdf8",
 };
 const FALLBACK_PALETTE = ["#00e5ff","#00ff9c","#c084fc","#fbbf24","#ff4d6d","#2dd4bf","#a3e635","#7c9cff","#f59e0b","#e879f9"];
@@ -135,13 +135,14 @@ const cleanupWinPath = (raw) => {
   if (i < 0) return null;
   let fin = s.slice(i + 1);
   if (/\s/.test(fin)) {
-    // Keep spaces in the filename only when a known extension proves it's one file
+    // Keep spaces in the filename only when a known extension proves it's one
+    // file — take the SHORTEST prefix ending in an extension so trailing prose
+    // ("bad.vbs then ran evil.exe") isn't glued on.
     const toks = fin.split(" ");
-    let acc = toks[0], best = null;
-    if (FILE_EXT.test(acc)) best = acc;
-    for (let j = 1; j < toks.length; j++) {
-      acc += " " + toks[j];
-      if (FILE_EXT.test(acc)) best = acc;
+    let acc = "", best = null;
+    for (let j = 0; j < toks.length; j++) {
+      acc = acc ? acc + " " + toks[j] : toks[j];
+      if (FILE_EXT.test(acc)) { best = acc; break; }
     }
     fin = best || toks[0];
     s = s.slice(0, i + 1) + fin;
@@ -242,12 +243,25 @@ const extractStructured = (text) => {
     work = rebuilt;
   }
 
-  // 4) Windows file paths (drive, UNC, %ENVVAR%)
-  work = work.replace(WIN_PATH_RE, (m) => {
-    const c = cleanupWinPath(m);
-    if (c) { files.push(c); return blank(m); }
-    return m;
-  });
+  // 4) Windows file paths (drive, UNC, %ENVVAR%). Consume ONLY the cleaned
+  // path (always a prefix of the raw match) so a second path or filename in
+  // the same greedy match is re-scanned instead of blanked away.
+  {
+    let rebuilt = "", pos = 0, mm;
+    WIN_PATH_RE.lastIndex = 0;
+    while ((mm = WIN_PATH_RE.exec(work))) {
+      if (mm.index < pos) { WIN_PATH_RE.lastIndex = pos; continue; }
+      const c = cleanupWinPath(mm[0]);
+      if (c) {
+        files.push(c);
+        rebuilt += work.slice(pos, mm.index) + " ";
+        pos = mm.index + c.length;
+        WIN_PATH_RE.lastIndex = pos;
+      }
+    }
+    rebuilt += work.slice(pos);
+    work = rebuilt;
+  }
 
   // 5) Unix paths
   work = work.replace(UNIX_PATH_RE, (m, pre, path) => {
@@ -278,13 +292,13 @@ const classify = (t) => {
   if (/^(bc1[ac-hj-np-z02-9]{11,71}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$/.test(t)) return ["BTC", t];
   if (/^ASN?\d{2,}$/i.test(t)) return ["ASN", t.toUpperCase().replace(/^ASN/, "AS")];
   if (/^(HKLM|HKCU|HKCR|HKU|HKCC|HKEY_[A-Z_]+)[\\/]/i.test(t)) return ["REGISTRY", t];
-  if (/\\/.test(t)) return ["FILE", t];
+  if (/\\/.test(t)) return ["FILE_PATH", t];
   if (FILE_EXT.test(t)) return ["FILE", t];
   if (/^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(t)) return ["DOMAIN", t.toLowerCase()];
   return null;
 };
 
-const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","YARA","ASN","MAC_ADDRESS","BTC","XMR","ETH","REGISTRY","FILE"];
+const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","YARA","ASN","MAC_ADDRESS","BTC","XMR","ETH","REGISTRY","FILE","FILE_PATH"];
 
 // Returns { data, registryDetails } — data is category → array of strings;
 // registryDetails is [{ key, valueName?, valueType?, data? }] powering hunt queries.
@@ -317,7 +331,7 @@ const extractIocs = (text) => {
   const structured = extractStructured(work);
   work = structured.cleaned;
   structured.regs.forEach(pushReg);
-  structured.files.forEach((f) => add("FILE", f));
+  structured.files.forEach((f) => add("FILE_PATH", f));
 
   const segments = work.replace(/[\[\]]/g, "").split(/[\n\r;,|]+/);
 
@@ -330,11 +344,15 @@ const extractIocs = (text) => {
     if (!s) continue;
 
     const tokens = s.split(/[\s"'`<>]+/).map(trimTok).filter(Boolean);
-    const hasOtherIoc = tokens.some((t) => { const r = classify(t); return r && r[0] !== "FILE"; });
+    const hasOtherIoc = tokens.some((t) => { const r = classify(t); return r && r[0] !== "FILE" && r[0] !== "FILE_PATH"; });
     const extTokens = tokens.filter((t) => FILE_EXT.test(t));
 
+    // A filename containing spaces (e.g. "Financial Reports.vbs"). Rejects
+    // segments with '=' (URL/query params like icid=...) or too many words,
+    // which previously glued tracking junk onto the real filename.
     const spacedFilename =
-      /\s/.test(s) && !s.includes("/") && !/:\/\//.test(s) &&
+      /\s/.test(s) && !s.includes("/") && !/:\/\//.test(s) && !s.includes("=") &&
+      tokens.length <= 4 &&
       FILE_EXT.test(s) && !hasOtherIoc && extTokens.length === 1;
 
     if (spacedFilename) { add("FILE", s); continue; }
@@ -366,9 +384,9 @@ const normCat = (k) => {
 };
 
 // Categories the API call is authoritative for. When the API succeeds, the local
-// engine contributes ONLY the categories NOT in this set (registry keys with
-// values, file paths, SHA512, ssdeep, ASN, MAC, BTC/XMR/ETH) — so page text never
-// floods DOMAIN/URL with a site's own nav, footer & CDN hosts.
+// engine contributes ONLY the categories NOT in this set. FILE (filenames) is
+// deliberately excluded so engine-found filenames merge with the API's FILE_NAME
+// results; FILE_PATH, REGISTRY, SHA512, ssdeep, ASN, MAC & wallets are engine-only.
 const API_SUPPORTED_CATS = new Set([
   "IPV4", "IPV6", "URL", "DOMAIN", "MD5", "SHA1", "SHA256", "EMAIL", "CVE", "MITRE_ATTACK", "YARA",
 ]);
@@ -411,7 +429,7 @@ const parseCanonicalReg = (s) => {
 // ============================================================
 //  Dual-source merge (API call + local engine)
 // ============================================================
-const CASE_SENSITIVE_CATS = new Set(["FILE", "REGISTRY", "URL", "BTC", "XMR", "ETH", "SSDEEP"]);
+const CASE_SENSITIVE_CATS = new Set(["FILE", "FILE_PATH", "REGISTRY", "URL", "BTC", "XMR", "ETH", "SSDEEP"]);
 const normVal = (cat, v) => (CASE_SENSITIVE_CATS.has(cat) ? v : String(v).toLowerCase());
 
 const mergeIocs = (apiData, engData) => {
@@ -573,6 +591,7 @@ export default function App() {
   const [fetchVia, setFetchVia] = useState("");
   const [rawArticle, setRawArticle] = useState("");
   const [defangMap, setDefangMap] = useState({});
+  const [defangAll, setDefangAll] = useState(false);
   const [copied, setCopied] = useState("");
   const [showTags, setShowTags] = useState(() => {
     try { return localStorage.getItem("ioc_show_tags") === "1"; } catch { return false; }
@@ -631,8 +650,24 @@ export default function App() {
     return o ? TAG_LABEL[o] : "";
   };
 
-  const proc = (arr, cat) => (defangMap[cat] ? arr.map(defang) : arr);
+  const proc = (arr, cat) => ((defangAll || defangMap[cat]) ? arr.map(defang) : arr);
   const toggleDefang = (cat) => setDefangMap((m) => ({ ...m, [cat]: !m[cat] }));
+
+  // Discard a bogus IOC. Copy formats, CSV/XLSX exports and hunt queries all
+  // derive from iocData, so removal propagates everywhere automatically.
+  const removeIoc = (cat, value) => {
+    setIocData((prev) => {
+      if (!prev?.[cat]) return prev;
+      const arr = prev[cat].filter((v) => v !== value);
+      const next = { ...prev };
+      if (arr.length) next[cat] = arr;
+      else delete next[cat];
+      return next;
+    });
+    if (cat === "REGISTRY") {
+      setRegistryDetails((prev) => prev.filter((d) => canonicalReg(d) !== value));
+    }
+  };
 
   const flash = (key) => {
     setCopied(key);
@@ -652,7 +687,7 @@ export default function App() {
 
   const resetResults = () => {
     setError(""); setIocData(null); setOriginData(null); setRegistryDetails([]);
-    setMeta(null); setFetchVia(""); setRawArticle("");
+    setMeta(null); setFetchVia(""); setRawArticle(""); setDefangAll(false);
   };
 
   // ---- URL mode: API call AND page fetch in parallel ----
@@ -763,7 +798,7 @@ export default function App() {
     resetResults();
     const ex = extractIocs(rawText);
     if (!Object.keys(ex.data).length) {
-      setError("No recognizable IOCs found. Handles markdown reports, defanged & messy text — IPs, domains, URLs, emails, hashes, ssdeep, CVEs, MITRE IDs, ASNs, BTC/XMR/ETH, MACs, registry keys (with values) & file paths.");
+      setError("No recognizable IOCs found. Handles markdown reports, defanged & messy text — IPs, domains, URLs, emails, hashes, ssdeep, CVEs, MITRE IDs, ASNs, BTC/XMR/ETH, MACs, registry keys (with values), file names & file paths.");
       return;
     }
     const origin = {};
@@ -820,13 +855,25 @@ export default function App() {
 
   return (
     <div style={rootStyle} className="font-mono">
+      <style>{`
+        * { scrollbar-width: thin; scrollbar-color: #0e7490 #070b10; }
+        *::-webkit-scrollbar { width: 10px; height: 10px; }
+        *::-webkit-scrollbar-track { background: #070b10; border-radius: 8px; }
+        *::-webkit-scrollbar-thumb {
+          background: linear-gradient(180deg, #00e5ff66, #0e7490);
+          border-radius: 8px;
+          border: 2px solid #070b10;
+        }
+        *::-webkit-scrollbar-thumb:hover { background: #00e5ffaa; }
+        *::-webkit-scrollbar-corner { background: #070b10; }
+      `}</style>
       <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
-        <div className="flex items-center gap-3 mb-5">
-          <div className="flex h-11 w-11 items-center justify-center rounded-lg"
+        <div className="flex items-start gap-3 mb-5 flex-wrap">
+          <div className="flex h-11 w-11 items-center justify-center rounded-lg shrink-0"
             style={{ backgroundColor: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.35)", boxShadow: "0 0 22px rgba(0,229,255,0.25)" }}>
             <Shield size={22} style={{ color: "#00e5ff" }} />
           </div>
-          <div>
+          <div className="min-w-0">
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight" style={{ color: "#eafcff", textShadow: "0 0 18px rgba(0,229,255,0.35)" }}>
               Threat Intel Article IOC Extractor
             </h1>
@@ -834,20 +881,59 @@ export default function App() {
               Extract IOCs, capture hunt artifacts, generate ready-to-run queries.
             </p>
           </div>
+          <div className="sm:ml-auto flex flex-col sm:items-end gap-1.5">
+            <p className="text-xs" style={{ color: "#7f95a3" }}>
+              Author — <span style={{ color: "#eafcff", fontWeight: 700 }}>Aamir Muhammad</span>
+              <span style={{ color: "#5d7382" }}> · Threat Hunter | Incident Responder</span>
+            </p>
+            <div className="flex flex-wrap gap-1.5 sm:justify-end">
+              <a href="https://www.linkedin.com/in/aamirmohammad/" target="_blank" rel="noreferrer noopener"
+                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold"
+                style={{ color: "#38bdf8", border: "1px solid rgba(56,189,248,0.4)", backgroundColor: "rgba(56,189,248,0.08)" }}>
+                <Linkedin size={13} /> LinkedIn
+              </a>
+              <a href="https://github.com/Aamir-Muhammad/CrowdStrike-Queries" target="_blank" rel="noreferrer noopener"
+                title="CrowdStrike hunting queries on GitHub"
+                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold"
+                style={{ color: "#ff4d4d", border: "1px solid rgba(255,77,77,0.4)", backgroundColor: "rgba(255,77,77,0.08)" }}>
+                <Github size={13} /><Target size={13} /> CrowdStrike Queries
+              </a>
+              <a href="https://github.com/Aamir-Muhammad/KQL-Queries" target="_blank" rel="noreferrer noopener"
+                title="Defender XDR hunting queries on GitHub"
+                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold"
+                style={{ color: "#00b7ff", border: "1px solid rgba(0,183,255,0.4)", backgroundColor: "rgba(0,183,255,0.08)" }}>
+                <Github size={13} /><ShieldCheck size={13} /> Defender XDR Queries
+              </a>
+            </div>
+          </div>
         </div>
 
         <div className="rounded-xl p-3 mb-4 flex flex-wrap items-center gap-2" style={panel}>
+          {total > 0 && (
+            <div className="flex items-baseline gap-2 rounded-lg px-3 py-1.5"
+              style={{ border: "1px solid rgba(0,255,156,0.5)", backgroundColor: "rgba(0,255,156,0.08)", boxShadow: "0 0 18px rgba(0,255,156,0.15)" }}>
+              <span className="text-lg font-extrabold tabular-nums leading-none" style={{ color: "#00ff9c", textShadow: "0 0 12px rgba(0,255,156,0.5)" }}>{total}</span>
+              <span className="text-lg font-extrabold leading-none" style={{ color: "#00ff9c" }}>IOCs</span>
+              <span className="text-lg font-extrabold leading-none" style={{ color: "#2a4a3f" }}>·</span>
+              <span className="text-lg font-extrabold tabular-nums leading-none" style={{ color: "#00e5ff", textShadow: "0 0 12px rgba(0,229,255,0.5)" }}>{entries.length}</span>
+              <span className="text-lg font-extrabold leading-none" style={{ color: "#00e5ff" }}>Types</span>
+            </div>
+          )}
           <span className="text-xs uppercase tracking-widest mr-1" style={{ color: "#7f95a3" }}>Export all</span>
           <GButton onClick={exportAllCSV} disabled={!total} color="#00ff9c" icon={<Download size={15} />}>All IOCs · CSV</GButton>
           <GButton onClick={exportAllXLSX} disabled={!total} color="#00e5ff" icon={<Download size={15} />}>All IOCs · XLSX</GButton>
           {total > 0 && (
-            <span className="ml-auto flex items-baseline gap-1.5">
-              <span className="text-2xl font-extrabold tabular-nums leading-none" style={{ color: "#00ff9c", textShadow: "0 0 14px rgba(0,255,156,0.45)" }}>{total}</span>
-              <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "#7f95a3" }}>IOCs</span>
-              <span className="text-sm mx-1" style={{ color: "#3a4a54" }}>·</span>
-              <span className="text-lg font-extrabold tabular-nums leading-none" style={{ color: "#00e5ff", textShadow: "0 0 14px rgba(0,229,255,0.4)" }}>{entries.length}</span>
-              <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "#7f95a3" }}>types</span>
-            </span>
+            <button onClick={() => setDefangAll((v) => !v)}
+              title="Defang every IOC type at once — applies to display, all copy buttons and all CSV/XLSX exports"
+              className="ml-auto flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold"
+              style={{
+                color: defangAll ? "#04111a" : "#ffb84d",
+                backgroundColor: defangAll ? "#ffb84d" : "rgba(255,184,77,0.10)",
+                border: "1px solid rgba(255,184,77,0.5)",
+                boxShadow: defangAll ? "0 0 14px rgba(255,184,77,0.4)" : "none",
+              }}>
+              <ShieldOff size={13} /> {defangAll ? "Defang All: On" : "Defang All: Off"}
+            </button>
           )}
         </div>
 
@@ -992,7 +1078,7 @@ export default function App() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {entries.map(([cat, arr]) => {
             const c = colorFor(cat);
-            const isDefanged = !!defangMap[cat];
+            const isDefanged = defangAll || !!defangMap[cat];
             const shown = proc(arr, cat);
             const fmt = {
               lines: shown.join("\n"),
@@ -1046,6 +1132,12 @@ export default function App() {
                           className="shrink-0 rounded p-0.5 opacity-40 hover:opacity-100 transition-opacity"
                           style={{ color: isCopied ? c : "#5d7382" }}>
                           {isCopied ? <Check size={13} /> : <Copy size={13} />}
+                        </button>
+                        <button onClick={() => removeIoc(cat, arr[i])}
+                          title="Discard this indicator — removed from copy formats, exports & hunt queries"
+                          className="shrink-0 rounded p-0.5 opacity-40 hover:opacity-100 transition-opacity"
+                          style={{ color: "#ff6b6b" }}>
+                          <X size={13} />
                         </button>
                       </div>
                     );
