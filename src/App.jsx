@@ -909,7 +909,7 @@ export default function App() {
               Threat Intel Article IOC Extractor
             </h1>
             <p className="text-xs sm:text-sm" style={{ color: "#7f95a3" }}>
-              Extract IOCs, Capture Threat Hunt Artifacts, Generate Ready-To-Run Queries.
+              Extract IOCs, Capture Hunt Artifacts, Ready-To-Run Queries.
             </p>
           </div>
           <div className="sm:ml-auto flex flex-col sm:items-end gap-1.5">
