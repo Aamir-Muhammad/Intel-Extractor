@@ -1,9 +1,9 @@
-import { useState, useMemo, useRef } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
 import {
   Shield, Search, Download, Copy, Check, Loader2, Globe,
   ClipboardPaste, AlertTriangle, ShieldOff, Trash2, Wand2, FileDown,
-  Tags, Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles
+  Tags, Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles, ChevronDown, RefreshCw
 } from "lucide-react";
 
 // ============================================================
@@ -596,7 +596,10 @@ export default function App() {
   const [registryDetails, setRegistryDetails] = useState([]);   // [{ key, valueName?, valueType?, data? }]
   const [meta, setMeta] = useState(null);                       // { title, description, url, tags[] }
   const [aiSummary, setAiSummary] = useState(null);             // { headline, summary, recommendations[] }
-  const [aiLoading, setAiLoading] = useState(false);
+  const [aiState, setAiState] = useState("idle");               // idle | loading | done | error
+  const [aiOpen, setAiOpen] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+  const [cooldown, setCooldown] = useState(0);                  // seconds until retry re-enabled
   const [sourceUrl, setSourceUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -698,7 +701,8 @@ export default function App() {
 
   const resetResults = () => {
     setError(""); setIocData(null); setOriginData(null); setRegistryDetails([]);
-    setMeta(null); setAiSummary(null); setAiLoading(false); setRawArticle(""); setDefangAll(false);
+    setMeta(null); setAiSummary(null); setAiState("idle"); setAiOpen(false);
+    setRetryCount(0); setCooldown(0); setRawArticle(""); setDefangAll(false);
   };
 
   // ---- URL mode: API call AND page fetch in parallel ----
@@ -777,30 +781,56 @@ export default function App() {
     setSourceUrl(url);
     if (articleText) setRawArticle(articleText);
     setLoading(false);
-
-    // Non-blocking AI summary — IOC results are already on screen. On failure
-    // we silently fall back to the plain metadata card.
-    if (articleText && articleText.trim().length > 300) {
-      setAiLoading(true);
-      fetch(`${WORKER_BASE}/summarize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: articleText, title: apiMeta?.title || "" }),
-      })
-        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-        .then((j) => {
-          if (j && typeof j.headline === "string" && typeof j.summary === "string") {
-            setAiSummary({
-              headline: j.headline,
-              summary: j.summary,
-              recommendations: Array.isArray(j.recommendations) ? j.recommendations : [],
-            });
-          }
-        })
-        .catch(() => { /* meta card remains as fallback */ })
-        .finally(() => setAiLoading(false));
-    }
   };
+
+  // ---- On-demand AI summary: fires only when the user opens the dropdown,
+  // preserving free-tier API calls. Retry is rate-limited below.
+  const summarizeNow = (articleText) => {
+    const text = articleText ?? rawArticle;
+    if (!text || text.trim().length < 300) { setAiState("error"); return; }
+    setAiState("loading");
+    fetch(`${WORKER_BASE}/summarize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, title: meta?.title || "" }),
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((j) => {
+        if (j && typeof j.headline === "string" && typeof j.summary === "string") {
+          setAiSummary({
+            headline: j.headline,
+            summary: j.summary,
+            recommendations: Array.isArray(j.recommendations) ? j.recommendations : [],
+          });
+          setAiState("done");
+        } else {
+          throw new Error("bad payload");
+        }
+      })
+      .catch(() => setAiState("error"));
+  };
+
+  const toggleAiPanel = () => {
+    const opening = !aiOpen;
+    setAiOpen(opening);
+    if (opening && aiState === "idle") summarizeNow();
+  };
+
+  // Retry limiter: first 3 retries are free; from the 3rd press onward each
+  // press starts a cooldown of 20s + 5s per extra press (20, 25, 30, …).
+  const retryAi = () => {
+    if (cooldown > 0 || aiState === "loading") return;
+    const n = retryCount + 1;
+    setRetryCount(n);
+    if (n >= 3) setCooldown(20 + 5 * (n - 3));
+    summarizeNow();
+  };
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const t = setTimeout(() => setCooldown((c) => (c > 0 ? c - 1 : 0)), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
 
   const runPaste = () => {
     resetResults();
@@ -909,7 +939,7 @@ export default function App() {
               Threat Intel Article IOC Extractor
             </h1>
             <p className="text-xs sm:text-sm" style={{ color: "#7f95a3" }}>
-              Extract IOCs, Capture Hunt Artifacts, Ready-To-Run Queries.
+              Extract IOCs, capture hunt artifacts, generate ready-to-run queries.
             </p>
           </div>
           <div className="sm:ml-auto flex flex-col sm:items-end gap-1.5">
@@ -1040,73 +1070,106 @@ export default function App() {
           )}
         </div>
 
-        {(aiLoading || aiSummary) ? (
-          <div className="rounded-xl p-4 mb-4 flex gap-3" style={{ ...panel, borderColor: "rgba(192,132,252,0.35)", boxShadow: "0 0 24px rgba(192,132,252,0.08)" }}>
+        {meta && (meta.title || meta.description) && (
+          <div className="rounded-xl p-4 mb-3 flex gap-3" style={{ ...panel, borderColor: "rgba(0,229,255,0.28)", boxShadow: "0 0 24px rgba(0,229,255,0.08)" }}>
             <div className="mt-0.5 shrink-0 flex h-9 w-9 items-center justify-center rounded-lg"
-              style={{ backgroundColor: "rgba(192,132,252,0.08)", border: "1px solid rgba(192,132,252,0.35)" }}>
-              <Sparkles size={17} style={{ color: "#c084fc" }} />
+              style={{ backgroundColor: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.3)" }}>
+              <FileText size={17} style={{ color: "#00e5ff" }} />
             </div>
             <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 mb-1">
-                <span className="text-[10px] uppercase tracking-widest rounded-full px-2 py-0.5"
-                  style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.35)", backgroundColor: "rgba(192,132,252,0.08)" }}>
-                  AI Summary
-                </span>
-              </div>
-              {aiLoading ? (
-                <p className="text-xs sm:text-sm animate-pulse" style={{ color: "#9fb3bd" }}>
-                  Analyzing article and generating summary…
-                </p>
-              ) : (
-                <>
-                  <h2 className="text-sm sm:text-base font-bold leading-snug" style={{ color: "#eafcff" }}>{aiSummary.headline}</h2>
-                  <p className="text-xs sm:text-sm mt-1.5 leading-relaxed" style={{ color: "#b8c9d1" }}>{aiSummary.summary}</p>
-                  {aiSummary.recommendations.length > 0 && (
-                    <div className="mt-2.5">
-                      <p className="text-[10px] uppercase tracking-widest mb-1" style={{ color: "#8aa0ad" }}>Recommendations</p>
-                      {aiSummary.recommendations.map((rec, i) => (
-                        <div key={i} className="flex items-start gap-1.5 text-xs sm:text-sm py-0.5 leading-relaxed" style={{ color: "#9fb3bd" }}>
-                          <span className="shrink-0" style={{ color: "#c084fc" }}>▸</span> <span>{rec}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </>
+              {meta.title && (
+                <h2 className="text-sm sm:text-base font-bold leading-snug" style={{ color: "#eafcff" }}>{meta.title}</h2>
               )}
+              {meta.description && (
+                <p className="text-xs sm:text-sm mt-1 leading-relaxed" style={{ color: "#9fb3bd" }}>{meta.description}</p>
+              )}
+              <div className="flex flex-wrap items-center gap-2 mt-2">
+                {meta.url && (
+                  <a href={meta.url} target="_blank" rel="noreferrer noopener"
+                    className="inline-flex items-center gap-1 text-xs rounded-md px-2 py-0.5 truncate max-w-full"
+                    style={{ color: "#00e5ff", border: "1px solid rgba(0,229,255,0.3)", backgroundColor: "rgba(0,229,255,0.06)" }}>
+                    <Globe size={11} className="shrink-0" /> <span className="truncate">{stripScheme(meta.url)}</span>
+                  </a>
+                )}
+                {Array.isArray(meta.tags) && meta.tags.filter(Boolean).map((t, i) => (
+                  <span key={i} className="text-[11px] rounded-full px-2 py-0.5"
+                    style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.35)", backgroundColor: "rgba(192,132,252,0.08)" }}>
+                    #{String(t)}
+                  </span>
+                ))}
+              </div>
             </div>
           </div>
-        ) : (
-          meta && (meta.title || meta.description) && (
-            <div className="rounded-xl p-4 mb-4 flex gap-3" style={{ ...panel, borderColor: "rgba(0,229,255,0.28)", boxShadow: "0 0 24px rgba(0,229,255,0.08)" }}>
-              <div className="mt-0.5 shrink-0 flex h-9 w-9 items-center justify-center rounded-lg"
-                style={{ backgroundColor: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.3)" }}>
-                <FileText size={17} style={{ color: "#00e5ff" }} />
-              </div>
-              <div className="min-w-0 flex-1">
-                {meta.title && (
-                  <h2 className="text-sm sm:text-base font-bold leading-snug" style={{ color: "#eafcff" }}>{meta.title}</h2>
+        )}
+
+        {rawArticle && sourceUrl && (
+          <div className="rounded-xl mb-4 overflow-hidden" style={{ ...panel, borderColor: "rgba(192,132,252,0.35)", boxShadow: aiOpen ? "0 0 24px rgba(192,132,252,0.10)" : "none" }}>
+            <button onClick={toggleAiPanel}
+              className="w-full flex items-center justify-between px-4 py-3 text-left"
+              style={{ backgroundColor: aiOpen ? "rgba(192,132,252,0.06)" : "transparent" }}>
+              <span className="flex items-center gap-2.5 min-w-0">
+                <span className="shrink-0 flex h-7 w-7 items-center justify-center rounded-lg"
+                  style={{ backgroundColor: "rgba(192,132,252,0.08)", border: "1px solid rgba(192,132,252,0.35)" }}>
+                  <Sparkles size={14} style={{ color: "#c084fc" }} />
+                </span>
+                <span className="text-sm font-bold tracking-wide" style={{ color: "#c084fc" }}>AI Summary</span>
+                {aiState === "idle" && (
+                  <span className="text-[10px] uppercase tracking-widest rounded-full px-2 py-0.5 hidden sm:inline"
+                    style={{ color: "#8aa0ad", border: "1px solid rgba(120,160,180,0.3)" }}>
+                    click to generate
+                  </span>
                 )}
-                {meta.description && (
-                  <p className="text-xs sm:text-sm mt-1 leading-relaxed" style={{ color: "#9fb3bd" }}>{meta.description}</p>
+              </span>
+              <ChevronDown size={18} className="shrink-0 transition-transform"
+                style={{ color: "#c084fc", transform: aiOpen ? "rotate(180deg)" : "rotate(0deg)" }} />
+            </button>
+
+            {aiOpen && (
+              <div className="px-4 pb-4 pt-1" style={{ borderTop: "1px solid rgba(192,132,252,0.2)" }}>
+                {aiState === "loading" && (
+                  <p className="text-xs sm:text-sm animate-pulse pt-2" style={{ color: "#9fb3bd" }}>
+                    Analyzing article and generating summary…
+                  </p>
                 )}
-                <div className="flex flex-wrap items-center gap-2 mt-2">
-                  {meta.url && (
-                    <a href={meta.url} target="_blank" rel="noreferrer noopener"
-                      className="inline-flex items-center gap-1 text-xs rounded-md px-2 py-0.5 truncate max-w-full"
-                      style={{ color: "#00e5ff", border: "1px solid rgba(0,229,255,0.3)", backgroundColor: "rgba(0,229,255,0.06)" }}>
-                      <Globe size={11} className="shrink-0" /> <span className="truncate">{stripScheme(meta.url)}</span>
-                    </a>
-                  )}
-                  {Array.isArray(meta.tags) && meta.tags.filter(Boolean).map((t, i) => (
-                    <span key={i} className="text-[11px] rounded-full px-2 py-0.5"
-                      style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.35)", backgroundColor: "rgba(192,132,252,0.08)" }}>
-                      #{String(t)}
-                    </span>
-                  ))}
-                </div>
+
+                {aiState === "done" && aiSummary && (
+                  <div className="pt-2">
+                    <h2 className="text-sm sm:text-base font-bold leading-snug" style={{ color: "#eafcff" }}>{aiSummary.headline}</h2>
+                    <p className="text-xs sm:text-sm mt-1.5 leading-relaxed" style={{ color: "#b8c9d1" }}>{aiSummary.summary}</p>
+                    {aiSummary.recommendations.length > 0 && (
+                      <div className="mt-2.5">
+                        <p className="text-[10px] uppercase tracking-widest mb-1" style={{ color: "#8aa0ad" }}>Recommendations</p>
+                        {aiSummary.recommendations.map((rec, i) => (
+                          <div key={i} className="flex items-start gap-1.5 text-xs sm:text-sm py-0.5 leading-relaxed" style={{ color: "#9fb3bd" }}>
+                            <span className="shrink-0" style={{ color: "#c084fc" }}>▸</span> <span>{rec}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {aiState === "error" && (
+                  <div className="pt-2">
+                    <p className="text-xs sm:text-sm leading-relaxed" style={{ color: "#ffb4b4" }}>
+                      The AI engines are experiencing high traffic right now, so a summary couldn't be generated. Please give it a moment and retry.
+                    </p>
+                    <button onClick={retryAi} disabled={cooldown > 0}
+                      className="mt-2.5 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold"
+                      style={{
+                        color: cooldown > 0 ? "#5d7382" : "#c084fc",
+                        border: `1px solid ${cooldown > 0 ? "rgba(120,160,180,0.25)" : "rgba(192,132,252,0.45)"}`,
+                        backgroundColor: cooldown > 0 ? "rgba(120,160,180,0.06)" : "rgba(192,132,252,0.10)",
+                        cursor: cooldown > 0 ? "not-allowed" : "pointer",
+                      }}>
+                      <RefreshCw size={13} className={cooldown > 0 ? "" : ""} />
+                      {cooldown > 0 ? `Retry available in ${cooldown}s` : "Retry AI Summary"}
+                    </button>
+                  </div>
+                )}
               </div>
-            </div>
-          )
+            )}
+          </div>
         )}
 
         {entries.length > 0 && (
