@@ -525,6 +525,35 @@ const buildSPL = (details) => {
 // ============================================================
 //  Page scrape helpers
 // ============================================================
+// Extract just the article body from raw HTML, stripping navigation chrome,
+// footers, sidebars, cookie banners etc. so the AI summarizer gets clean
+// prose instead of menu text. IOC extraction still uses the full-page text.
+const extractArticleBody = (html) => {
+  let h = html;
+  // 1) Strip elements that are never article content
+  h = h.replace(/<(script|style|noscript|iframe|svg|form|button|input|select|textarea|label)\b[\s\S]*?<\/\1>/gi, " ");
+  h = h.replace(/<(nav|header|footer|aside|menu|menuitem)\b[\s\S]*?<\/\1>/gi, " ");
+  // 2) Strip common non-content class/id patterns (cookie banners, share widgets, nav bars)
+  h = h.replace(/<[^>]+(?:class|id)=["'][^"']*(?:cookie|consent|gdpr|banner|popup|modal|sidebar|widget|share|social|newsletter|subscribe|comment|ad-|advertisement|masthead|top-bar|site-header|site-footer|breadcrumb|pagination|related-post|recommended)[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/gi, " ");
+  // 3) Try to find <article> tag content first
+  const articleMatch = h.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i);
+  if (articleMatch && articleMatch[1].length > 500) {
+    return htmlToText(articleMatch[1]);
+  }
+  // 4) Try <main> tag
+  const mainMatch = h.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i);
+  if (mainMatch && mainMatch[1].length > 500) {
+    return htmlToText(mainMatch[1]);
+  }
+  // 5) Try role="main" or role="article"
+  const roleMatch = h.match(/<[^>]+role=["'](?:main|article)["'][^>]*>([\s\S]*?)<\/[^>]+>/i);
+  if (roleMatch && roleMatch[1].length > 500) {
+    return htmlToText(roleMatch[1]);
+  }
+  // 6) Fallback: return the stripped HTML (nav/header/footer already removed above)
+  return htmlToText(h);
+};
+
 const htmlToText = (html) =>
   html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -604,6 +633,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [rawArticle, setRawArticle] = useState("");
+  const [articleClean, setArticleClean] = useState("");           // nav-stripped body for AI summary
   const [defangMap, setDefangMap] = useState({});
   const [defangAll, setDefangAll] = useState(false);
   const [copied, setCopied] = useState("");
@@ -702,7 +732,7 @@ export default function App() {
   const resetResults = () => {
     setError(""); setIocData(null); setOriginData(null); setRegistryDetails([]);
     setMeta(null); setAiSummary(null); setAiState("idle"); setAiOpen(false);
-    setRetryCount(0); setCooldown(0); setRawArticle(""); setDefangAll(false);
+    setRetryCount(0); setCooldown(0); setRawArticle(""); setArticleClean(""); setDefangAll(false);
   };
 
   // ---- URL mode: API call AND page fetch in parallel ----
@@ -731,9 +761,10 @@ export default function App() {
     const apiMeta = apiJson && apiJson.meta && typeof apiJson.meta === "object" ? apiJson.meta : null;
 
     // Local engine over the fetched page text
-    let engFull = null, engDetails = [], articleText = "";
+    let engFull = null, engDetails = [], articleText = "", articleBody = "";
     if (pRes.status === "fulfilled" && pRes.value && pRes.value.length >= 50) {
-      articleText = htmlToText(pRes.value);
+      articleText = htmlToText(pRes.value);       // full page text for IOC extraction
+      articleBody = extractArticleBody(pRes.value); // clean article prose for AI summary
       const ex = extractIocs(articleText);
       engFull = ex.data;
       engDetails = ex.registryDetails;
@@ -780,13 +811,14 @@ export default function App() {
     setMeta(apiMeta);
     setSourceUrl(url);
     if (articleText) setRawArticle(articleText);
+    if (articleBody) setArticleClean(articleBody);
     setLoading(false);
   };
 
   // ---- On-demand AI summary: fires only when the user opens the dropdown,
   // preserving free-tier API calls. Retry is rate-limited below.
-  const summarizeNow = (articleText) => {
-    const text = articleText ?? rawArticle;
+  const summarizeNow = () => {
+    const text = articleClean || rawArticle;
     if (!text || text.trim().length < 300) { setAiState("error"); return; }
     setAiState("loading");
     fetch(`${WORKER_BASE}/summarize`, {
@@ -1102,7 +1134,7 @@ export default function App() {
           </div>
         )}
 
-        {rawArticle && sourceUrl && (
+        {(articleClean || rawArticle) && sourceUrl && (
           <div className="rounded-xl mb-4 overflow-hidden" style={{ ...panel, borderColor: "rgba(192,132,252,0.35)", boxShadow: aiOpen ? "0 0 24px rgba(192,132,252,0.10)" : "none" }}>
             <button onClick={toggleAiPanel}
               className="w-full flex items-center justify-between px-4 py-3 text-left"
