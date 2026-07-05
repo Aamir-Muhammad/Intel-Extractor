@@ -57,8 +57,6 @@ const trimTok = (s) =>
   s.replace(/^[.,;:!?'"`(){}<>\u201c\u201d\u2018\u2019]+/, "")
    .replace(/[.,;:!?'"`(){}<>\u201c\u201d\u2018\u2019]+$/, "");
 
-// Drop leading scheme from URLs (http:// https:// ftp://) for display/copy/export.
-// Defanged variants are refanged first so hxxp[://] forms are handled too.
 const stripScheme = (s) => refangSoft(String(s)).replace(/^\s*(?:https?|ftp):\/\//i, "");
 const stripUrlArray = (arr) => {
   const out = [], seen = new Set();
@@ -76,9 +74,7 @@ const isIPv4 = (t) => {
   return m && m.slice(1).every((o) => +o >= 0 && +o <= 255);
 };
 
-// ============================================================
-//  Registry / file-path structured extraction (pre-tokenization)
-// ============================================================
+// Registry helpers (your original)
 const HIVE_FULL = {
   HKLM: "HKEY_LOCAL_MACHINE", HKCU: "HKEY_CURRENT_USER", HKCR: "HKEY_CLASSES_ROOT",
   HKU: "HKEY_USERS", HKCC: "HKEY_CURRENT_CONFIG",
@@ -104,21 +100,16 @@ const canonicalReg = (d) => {
 
 const unquote = (s) => String(s).replace(/^["']|["']$/g, "");
 
-// Registry key: hive + backslash segments. Mid segments may contain up to 3 spaces
 const REG_KEY_RE = /(?:HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER|HKEY_CLASSES_ROOT|HKEY_USERS|HKEY_CURRENT_CONFIG|HKLM|HKCU|HKCR|HKCC|HKU):?\\(?:[^\s\\/:*?"<>|,;\r\n]+(?: [^\s\\/:*?"<>|,;\r\n]+){0,3}\\)*[^\s\\/:*?"<>|,;'"`)\]]+/gi;
 
-// reg add command
 const REG_ADD_RE = /\breg(?:\.exe)?\s+add\s+("[^"\r\n]+"|\S+)([^\r\n]*)/gi;
 
-// PowerShell registry
 const PS_REG_RE = /\b(?:Set-ItemProperty|New-ItemProperty)\b([^\r\n]*)/gi;
 
-// Windows paths
 const WIN_PATH_RE = /(?:[A-Za-z]:\\|\\\\[A-Za-z0-9._$-]{1,64}\\|%[A-Za-z_][A-Za-z0-9_]*%\\)(?:[^\s\\/:*?"<>|,;\r\n]+(?: [^\s\\/:*?"<>|,;\r\n]+){0,3}\\)*[^\\/:*?"<>|,;\r\n]{0,180}/g;
 
 const NEW_ROOT_RE = /\s+(?:[A-Za-z]:\\|%[A-Za-z_][A-Za-z0-9_]*%\\|\\\\[A-Za-z0-9._$-])/;
 
-// Unix paths
 const UNIX_PATH_RE = /(^|[\s"'`(>])(\/(?:usr|etc|var|tmp|opt|home|bin|sbin|lib|lib64|dev|proc|srv|root|boot|Users|Library|Applications|System|private)\/[^\s"'`<>|,;)]+)/g;
 
 const cleanupWinPath = (raw) => {
@@ -281,6 +272,7 @@ const classify = (t) => {
 };
 
 const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","YARA","ASN","MAC_ADDRESS","BTC","XMR","ETH","REGISTRY","FILE","FILE_PATH"];
+
 const DISPLAY_PRIORITY = ["DOMAIN","URL","IPV4","IPV6","MD5","SHA1","SHA256","SHA512","SSDEEP","IMPHASH"];
 const catRank = (cat) => {
   const p = DISPLAY_PRIORITY.indexOf(cat);
@@ -403,9 +395,6 @@ const parseCanonicalReg = (s) => {
   return { key: expandHive(t), valueType };
 };
 
-// ============================================================
-//  Dual-source merge
-// ============================================================
 const CASE_SENSITIVE_CATS = new Set(["FILE", "FILE_PATH", "REGISTRY", "URL", "BTC", "XMR", "ETH", "SSDEEP"]);
 const normVal = (cat, v) => (CASE_SENSITIVE_CATS.has(cat) ? v : String(v).toLowerCase());
 
@@ -435,7 +424,7 @@ const mergeIocs = (apiData, engData) => {
 
 const TAG_LABEL = { api: "API Parsed", eng: "Engine Parsed", both: "API + Engine Parsed" };
 
-// Hunt query generators (keep your original)
+// Hunt queries (your original)
 const uniqDetails = (details) => {
   const seen = new Set();
   return details.filter((d) => {
@@ -487,9 +476,7 @@ const buildSPL = (details) => {
 | table _time, host, Image, TargetObject, Details`;
 };
 
-// ============================================================
-//  Page scrape helpers
-// ============================================================
+// Page scrape helpers
 const extractArticleBody = (html) => {
   let h = html;
   h = h.replace(/<(script|style|noscript|iframe|svg|form|button|input|select|textarea|label)\b[\s\S]*?<\/\1>/gi, " ");
@@ -540,9 +527,7 @@ const filterScraped = (data, articleUrl) => {
   return out;
 };
 
-// ============================================================
-//  Export helpers
-// ============================================================
+// Export helpers (your original)
 const csvCell = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
 const toCSV = (rows) => rows.map((r) => r.map(csvCell).join(",")).join("\n");
 const downloadBlob = (blob, filename) => {
@@ -641,7 +626,6 @@ export default function App() {
     if (eng) return TAG_LABEL.eng;
     return null;
   };
-
   const tagFor = (cat, v) => {
     const o = originData?.[cat]?.[v];
     return o ? TAG_LABEL[o] : "";
@@ -669,7 +653,6 @@ export default function App() {
     clearTimeout(copyTimer.current);
     copyTimer.current = setTimeout(() => setCopied(""), 1300);
   };
-
   const copyText = async (text, key) => {
     try { await navigator.clipboard.writeText(text); flash(key); }
     catch {
@@ -997,7 +980,7 @@ export default function App() {
               <textarea
                 value={jsonText}
                 onChange={(e) => setJsonText(e.target.value)}
-                placeholder='Paste JSON with arrays per type...'
+                placeholder='Paste JSON with arrays per type, e.g. {"IPV4":["1.2.3.4"],"DOMAIN":["evil.com"]} or {"data":{...}}'
                 rows={5}
                 className="w-full rounded-lg px-3 py-2.5 text-sm outline-none resize-y"
                 style={{ backgroundColor: "rgba(0,0,0,0.45)", border: "1px solid rgba(120,160,180,0.22)", color: "#dff" }}
@@ -1014,13 +997,13 @@ export default function App() {
               <textarea
                 value={rawText}
                 onChange={(e) => setRawText(e.target.value)}
-                placeholder="Paste IOCs in ANY format..."
+                placeholder={"Paste IOCs in ANY format — markdown reports, defanged, or messy:\n\n[c7f38cbb99c8b74fa0465293feeba700](https://opentip.kaspersky.com/…) Financial Reports.vbs\ntemu.baskwms[.]top   202.61.160[.]202\nhxxps://evil[.]com/payload   CVE-2025-1234   T1059.005\nreg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v Updater /t REG_SZ /d \"C:\\Users\\x\\evil.exe\""}
                 rows={7}
                 className="w-full rounded-lg px-3 py-2.5 text-sm outline-none resize-y"
                 style={{ backgroundColor: "rgba(0,0,0,0.45)", border: "1px solid rgba(120,160,180,0.22)", color: "#dff" }}
               />
               <div className="flex items-center gap-2">
-                <GButton onClick={runRaw} disabled={!rawText.trim()} color="#c084fc" solid icon={<Wand2 size={16} />}>Refang & Parse</GButton>
+                <GButton onClick={runRaw} disabled={!rawText.trim()} color="#c084fc" solid icon={<Wand2 size={16} />}>Refang &amp; Parse</GButton>
                 {rawText && <GButton onClick={() => setRawText("")} color="#94a3b8" icon={<Trash2 size={15} />}>Clear</GButton>}
               </div>
             </div>
@@ -1033,45 +1016,94 @@ export default function App() {
           )}
         </div>
 
-        {/* Meta panel unchanged */}
         {meta && (meta.title || meta.description) && (
-          <div className="rounded-xl p-4 mb-3 flex gap-3" style={{ ...panel, borderColor: "rgba(0,229,255,0.28)" }}>
-            {/* your original meta JSX */}
+          <div className="rounded-xl p-4 mb-3 flex gap-3" style={{ ...panel, borderColor: "rgba(0,229,255,0.28)", boxShadow: "0 0 24px rgba(0,229,255,0.08)" }}>
+            <div className="mt-0.5 shrink-0 flex h-9 w-9 items-center justify-center rounded-lg"
+              style={{ backgroundColor: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.3)" }}>
+              <FileText size={17} style={{ color: "#00e5ff" }} />
+            </div>
+            <div className="min-w-0 flex-1">
+              {meta.title && (
+                <h2 className="text-sm sm:text-base font-bold leading-snug" style={{ color: "#eafcff" }}>{meta.title}</h2>
+              )}
+              {meta.description && (
+                <p className="text-xs sm:text-sm mt-1 leading-relaxed" style={{ color: "#9fb3bd" }}>{meta.description}</p>
+              )}
+              <div className="flex flex-wrap items-center gap-2 mt-2">
+                {meta.url && (
+                  <a href={meta.url} target="_blank" rel="noreferrer noopener"
+                    className="inline-flex items-center gap-1 text-xs rounded-md px-2 py-0.5 truncate max-w-full"
+                    style={{ color: "#00e5ff", border: "1px solid rgba(0,229,255,0.3)", backgroundColor: "rgba(0,229,255,0.06)" }}>
+                    <Globe size={11} className="shrink-0" /> <span className="truncate">{stripScheme(meta.url)}</span>
+                  </a>
+                )}
+                {Array.isArray(meta.tags) && meta.tags.filter(Boolean).map((t, i) => (
+                  <span key={i} className="text-[11px] rounded-full px-2 py-0.5"
+                    style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.35)", backgroundColor: "rgba(192,132,252,0.08)" }}>
+                    #{String(t)}
+                  </span>
+                ))}
+              </div>
+            </div>
           </div>
         )}
 
-        {/* Improved AI Summary Panel */}
         {(articleClean || rawArticle) && sourceUrl && (
-          <div className="rounded-xl mb-4 overflow-hidden" style={{ ...panel, borderColor: "rgba(192,132,252,0.35)" }}>
+          <div className="rounded-xl mb-4 overflow-hidden" style={{ ...panel, borderColor: "rgba(192,132,252,0.35)", boxShadow: aiOpen ? "0 0 24px rgba(192,132,252,0.10)" : "none" }}>
             <button onClick={toggleAiPanel}
               className="w-full flex items-center justify-between px-4 py-3 text-left"
               style={{ backgroundColor: aiOpen ? "rgba(192,132,252,0.06)" : "transparent" }}>
-              <span className="flex items-center gap-2.5">
-                <Sparkles size={14} style={{ color: "#c084fc" }} />
-                <span className="text-sm font-bold" style={{ color: "#c084fc" }}>AI Summary</span>
+              <span className="flex items-center gap-2.5 min-w-0">
+                <span className="shrink-0 flex h-7 w-7 items-center justify-center rounded-lg"
+                  style={{ backgroundColor: "rgba(192,132,252,0.08)", border: "1px solid rgba(192,132,252,0.35)" }}>
+                  <Sparkles size={14} style={{ color: "#c084fc" }} />
+                </span>
+                <span className="text-sm font-bold tracking-wide" style={{ color: "#c084fc" }}>AI Summary</span>
               </span>
-              <ChevronDown size={18} style={{ color: "#c084fc", transform: aiOpen ? "rotate(180deg)" : "" }} />
+              <ChevronDown size={18} className="shrink-0 transition-transform"
+                style={{ color: "#c084fc", transform: aiOpen ? "rotate(180deg)" : "rotate(0deg)" }} />
             </button>
 
             {aiOpen && (
-              <div className="px-4 pb-4 pt-1">
-                {aiState === "loading" && <p className="animate-pulse" style={{ color: "#9fb3bd" }}>Analyzing...</p>}
+              <div className="px-4 pb-4 pt-1" style={{ borderTop: "1px solid rgba(192,132,252,0.2)" }}>
+                {aiState === "loading" && (
+                  <p className="text-xs sm:text-sm animate-pulse pt-2" style={{ color: "#9fb3bd" }}>
+                    Analyzing article and generating technical summary…
+                  </p>
+                )}
+
                 {aiState === "done" && aiSummary && (
-                  <div>
-                    <h2 style={{ color: "#eafcff" }}>{aiSummary.headline}</h2>
-                    <p style={{ color: "#b8c9d1" }}>{aiSummary.summary}</p>
-                    {aiSummary.recommendations?.length > 0 && (
-                      <div>
-                        <p style={{ color: "#8aa0ad" }}>Recommendations</p>
-                        {aiSummary.recommendations.map((rec, i) => <div key={i}>▸ {rec}</div>)}
+                  <div className="pt-2">
+                    <h2 className="text-sm sm:text-base font-bold leading-snug" style={{ color: "#eafcff" }}>{aiSummary.headline}</h2>
+                    <p className="text-xs sm:text-sm mt-1.5 leading-relaxed" style={{ color: "#b8c9d1" }}>{aiSummary.summary}</p>
+                    {aiSummary.recommendations.length > 0 && (
+                      <div className="mt-2.5">
+                        <p className="text-[10px] uppercase tracking-widest mb-1" style={{ color: "#8aa0ad" }}>Recommendations</p>
+                        {aiSummary.recommendations.map((rec, i) => (
+                          <div key={i} className="flex items-start gap-1.5 text-xs sm:text-sm py-0.5 leading-relaxed" style={{ color: "#9fb3bd" }}>
+                            <span className="shrink-0" style={{ color: "#c084fc" }}>▸</span> <span>{rec}</span>
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>
                 )}
+
                 {aiState === "error" && (
-                  <div>
-                    <p style={{ color: "#ffb4b4" }}>Failed to generate summary.</p>
-                    <button onClick={retryAi} disabled={cooldown > 0}>Retry</button>
+                  <div className="pt-2">
+                    <p className="text-xs sm:text-sm leading-relaxed" style={{ color: "#ffb4b4" }}>
+                      Failed to generate summary. This can happen on protected pages.
+                    </p>
+                    <button onClick={retryAi} disabled={cooldown > 0}
+                      className="mt-2.5 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold"
+                      style={{
+                        color: cooldown > 0 ? "#5d7382" : "#c084fc",
+                        border: `1px solid ${cooldown > 0 ? "rgba(120,160,180,0.25)" : "rgba(192,132,252,0.45)"}`,
+                        backgroundColor: cooldown > 0 ? "rgba(120,160,180,0.06)" : "rgba(192,132,252,0.10)",
+                      }}>
+                      <RefreshCw size={13} />
+                      {cooldown > 0 ? `Retry in ${cooldown}s` : "Retry AI Summary"}
+                    </button>
                   </div>
                 )}
               </div>
@@ -1079,22 +1111,133 @@ export default function App() {
           </div>
         )}
 
-        {/* Your original IOC cards grid and footer */}
         {entries.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-5">
             {entries.map(([cat, arr]) => {
               const c = colorFor(cat);
               return (
                 <a key={cat} href={`#cat-${cat}`} className="flex items-center gap-2 rounded-full px-3 py-1 text-xs" style={{ border: `1px solid ${c}55`, backgroundColor: `${c}14`, color: c }}>
-                  <span style={{ width: 7, height: 7, borderRadius: 99, backgroundColor: c }} />
-                  {cat} <span className="font-bold">· {arr.length}</span>
+                  <span style={{ width: 7, height: 7, borderRadius: 99, backgroundColor: c, boxShadow: `0 0 8px ${c}` }} />
+                  {cat} <span className="font-bold" style={{ opacity: 0.85 }}>· {arr.length}</span>
                 </a>
               );
             })}
           </div>
         )}
 
-        {/* IOC cards grid - keep your original full card code here */}
+        {iocData && (
+          <div className="flex items-center gap-2 mb-4 flex-wrap">
+            <p className="text-xs truncate" style={{ color: "#5d7382" }}>
+              source: <span style={{ color: "#8aa0ad" }}>{sourceUrl}</span>
+            </p>
+            <div className="flex items-center gap-2 ml-auto flex-wrap">
+              <ToggleBtn on={showTags} onClick={toggleTags} icon={<Tags size={12} />}>
+                {showTags ? "Tags: On" : "Tags: Off"}
+              </ToggleBtn>
+              {rawArticle && (
+                <button onClick={saveArticle} className="flex items-center gap-1 text-xs rounded-md px-2 py-1"
+                  style={{ color: "#00e5ff", border: "1px solid rgba(0,229,255,0.4)", backgroundColor: "rgba(0,229,255,0.07)" }}>
+                  <FileDown size={12} /> Save article ({Math.round(rawArticle.length / 1024)} KB)
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {entries.map(([cat, arr]) => {
+            const c = colorFor(cat);
+            const isDefanged = defangAll || !!defangMap[cat];
+            const shown = proc(arr, cat);
+            const fmt = {
+              lines: shown.join("\n"),
+              pipe: shown.join("|"),
+              quoted: shown.map((v) => `"${v}"`).join(", "),
+              comma: shown.join(", "),
+            };
+            const tag = showTags ? catTag(cat, arr) : null;
+            const isReg = cat === "REGISTRY";
+            return (
+              <div key={cat} id={`cat-${cat}`} className="rounded-xl overflow-hidden flex flex-col" style={{ ...panel, borderColor: `${c}40` }}>
+                <div className="flex items-center justify-between px-4 py-2.5 gap-2" style={{ borderBottom: `1px solid ${c}33`, backgroundColor: `${c}0d` }}>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span style={{ width: 9, height: 9, borderRadius: 99, backgroundColor: c, boxShadow: `0 0 10px ${c}` }} />
+                    <span className="font-bold tracking-wide truncate" style={{ color: c, textShadow: `0 0 12px ${c}55` }}>{cat}</span>
+                    {tag && (
+                      <span className="text-[10px] rounded-full px-1.5 py-0.5 whitespace-nowrap"
+                        style={{ color: "#8aa0ad", border: "1px solid rgba(138,160,173,0.35)", backgroundColor: "rgba(138,160,173,0.08)" }}>
+                        {tag}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button onClick={() => toggleDefang(cat)} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
+                      title="Defang this type for safe sharing (display, copy & export)"
+                      style={{ color: isDefanged ? "#04111a" : "#ffb84d", backgroundColor: isDefanged ? "#ffb84d" : "rgba(255,184,77,0.10)", border: "1px solid rgba(255,184,77,0.5)" }}>
+                      <ShieldOff size={12} /> {isDefanged ? "Defanged" : "Defang"}
+                    </button>
+                    <span className="flex items-center justify-center text-base font-extrabold tabular-nums rounded-lg px-2.5 py-0.5 min-w-[2.2rem]"
+                      style={{ backgroundColor: `${c}22`, color: c, border: `1px solid ${c}66`, textShadow: `0 0 10px ${c}66` }}>
+                      {arr.length}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="px-4 py-2 overflow-y-auto" style={{ maxHeight: 240 }}>
+                  {shown.map((ioc, i) => {
+                    const huntReady = isReg && huntReadySet.has(arr[i]);
+                    const rowKey = `${cat}-i-${i}`;
+                    const isCopied = copied === rowKey;
+                    return (
+                      <div key={i} className="group flex items-start gap-1.5 py-0.5 leading-relaxed"
+                        title={huntReady ? "Hunt-ready: key + value captured — enriches the hunt queries below" : undefined}>
+                        <span className="text-xs shrink-0" style={{ color: `${c}aa`, userSelect: "none" }}>›</span>
+                        <span className="text-xs break-all flex-1 min-w-0"
+                          style={{ color: huntReady ? "#f3ddfa" : "#c8d6dd", fontWeight: huntReady ? 600 : 400 }}>
+                          {ioc}
+                        </span>
+                        <button onClick={() => copyText(ioc, rowKey)}
+                          title="Copy this indicator"
+                          className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
+                          style={{ color: isCopied ? c : "#8aa0ad" }}>
+                          {isCopied ? <Check size={16} /> : <Copy size={16} />}
+                        </button>
+                        <button onClick={() => removeIoc(cat, arr[i])}
+                          title="Discard this indicator — removed from copy formats, exports & hunt queries"
+                          className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
+                          style={{ color: "#ff6b6b" }}>
+                          <X size={16} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {isReg && visibleRegDetails.length > 0 && (
+                  <div className="px-3 py-2 flex flex-wrap items-center gap-1.5" style={{ borderTop: `1px solid ${c}22`, backgroundColor: `${c}08` }}>
+                    <span className="text-[10px] uppercase tracking-wider flex items-center gap-1 mr-1" style={{ color: "#8aa0ad" }}>
+                      <Crosshair size={11} /> Hunt
+                    </span>
+                    <CopyBtn label="Defender KQL" copied={copied === "reg-kql"} onClick={() => copyText(buildKQL(visibleRegDetails), "reg-kql")} color={c} />
+                    <CopyBtn label="CrowdStrike CQL" copied={copied === "reg-cql"} onClick={() => copyText(buildCQL(visibleRegDetails), "reg-cql")} color={c} />
+                    <CopyBtn label="Splunk SPL" copied={copied === "reg-spl"} onClick={() => copyText(buildSPL(visibleRegDetails), "reg-spl")} color={c} />
+                  </div>
+                )}
+
+                <div className="px-3 py-2.5 flex flex-wrap gap-1.5" style={{ borderTop: `1px solid ${c}22` }}>
+                  <CopyBtn label="Lines" copied={copied === `${cat}-lines`} onClick={() => copyText(fmt.lines, `${cat}-lines`)} color={c} />
+                  <CopyBtn label="Comma" copied={copied === `${cat}-comma`} onClick={() => copyText(fmt.comma, `${cat}-comma`)} color={c} />
+                  <CopyBtn label="Pipe |" copied={copied === `${cat}-pipe`} onClick={() => copyText(fmt.pipe, `${cat}-pipe`)} color={c} />
+                  <CopyBtn label={`Quoted "`} copied={copied === `${cat}-quoted`} onClick={() => copyText(fmt.quoted, `${cat}-quoted`)} color={c} />
+                </div>
+                <div className="px-3 pb-3 flex gap-1.5">
+                  <ExpBtn label="CSV" onClick={() => exportTypeCSV(cat, arr)} color={c} />
+                  <ExpBtn label="XLSX" onClick={() => exportTypeXLSX(cat, arr)} color={c} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
 
         {!iocData && !loading && !error && (
           <div className="rounded-xl p-10 text-center" style={panel}>
@@ -1113,12 +1256,11 @@ export default function App() {
   );
 }
 
-// Helper Components
 function GButton({ children, onClick, disabled, color, icon, solid }) {
   return (
     <button onClick={onClick} disabled={disabled}
       className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold transition-opacity"
-      style={{ color: solid ? "#04111a" : color, backgroundColor: solid ? color : `${color}14`, border: `1px solid ${color}${solid ? "" : "55"}`, opacity: disabled ? 0.4 : 1, cursor: disabled ? "not-allowed" : "pointer" }}>
+      style={{ color: solid ? "#04111a" : color, backgroundColor: solid ? color : `${color}14`, border: `1px solid ${color}${solid ? "" : "55"}`, boxShadow: solid ? `0 0 18px ${color}55` : "none", opacity: disabled ? 0.4 : 1, cursor: disabled ? "not-allowed" : "pointer" }}>
       {icon}{children}
     </button>
   );
@@ -1127,7 +1269,7 @@ function GButton({ children, onClick, disabled, color, icon, solid }) {
 function Tab({ children, active, onClick, icon }) {
   return (
     <button onClick={onClick} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold"
-      style={{ color: active ? "#04111a" : "#8aa0ad", backgroundColor: active ? "#00e5ff" : "transparent" }}>
+      style={{ color: active ? "#04111a" : "#8aa0ad", backgroundColor: active ? "#00e5ff" : "transparent", boxShadow: active ? "0 0 14px rgba(0,229,255,0.4)" : "none" }}>
       {icon} {children}
     </button>
   );
