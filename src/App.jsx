@@ -754,21 +754,25 @@ export default function App() {
   const [cooldown, setCooldown] = useState(0);                  // seconds until retry re-enabled
   const [enrichCache, setEnrichCache] = useState({});             // {iocKey: {loading,data,error}}
 
-  // ---- IOC Enrichment: ThreatFox + URLhaus + MalwareBazaar (browser-direct, no Worker) ----
+  // ---- IOC Enrichment: ThreatFox + URLhaus + MalwareBazaar via Worker proxy ----
   const enrichIOC = async (cat, value) => {
     const key = `${cat}::${value}`;
     if (enrichCache[key]) return; // already enriched or in-progress
     setEnrichCache((c) => ({ ...c, [key]: { loading: true } }));
     const results = {};
+    const callEnrich = async (api) => {
+      const r = await fetch(`${WORKER_BASE}/enrich`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api, value }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    };
     try {
       // ThreatFox — IPs, domains, URLs, hashes
       if (["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512"].includes(cat)) {
         try {
-          const r = await fetch("https://threatfox-api.abuse.ch/api/v1/", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ query: "search_ioc", search_term: value }),
-          });
-          const j = await r.json();
+          const j = await callEnrich("threatfox");
           if (j.query_status === "ok" && Array.isArray(j.data) && j.data.length > 0) {
             const d = j.data[0];
             results.threatfox = { malware: d.malware_printable || d.malware, threat: d.threat_type_desc || d.threat_type, confidence: d.confidence_level, first: d.first_seen };
@@ -778,11 +782,7 @@ export default function App() {
       // URLhaus — IPs, domains (host lookup), URLs (url lookup)
       if (["IPV4","DOMAIN"].includes(cat)) {
         try {
-          const r = await fetch("https://urlhaus-api.abuse.ch/v1/host/", {
-            method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: `host=${encodeURIComponent(value)}`,
-          });
-          const j = await r.json();
+          const j = await callEnrich("urlhaus_host");
           if (j.query_status === "ok" || j.query_status === "no_results") {
             results.urlhaus = { urls_total: j.urls?.length || 0, status: j.query_status === "ok" ? "listed" : "clean" };
           }
@@ -790,11 +790,7 @@ export default function App() {
       }
       if (cat === "URL") {
         try {
-          const r = await fetch("https://urlhaus-api.abuse.ch/v1/url/", {
-            method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: `url=${encodeURIComponent(value)}`,
-          });
-          const j = await r.json();
+          const j = await callEnrich("urlhaus_url");
           if (j.query_status !== "no_results" && j.id) {
             results.urlhaus = { status: j.threat || "listed", tags: (j.tags || []).join(", ") };
           }
@@ -803,12 +799,7 @@ export default function App() {
       // MalwareBazaar — hashes only
       if (["MD5","SHA1","SHA256","SHA512"].includes(cat)) {
         try {
-          const hashType = cat === "MD5" ? "md5_hash" : cat === "SHA1" ? "sha1_hash" : "sha256_hash";
-          const r = await fetch("https://mb-api.abuse.ch/api/v1/", {
-            method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: `query=get_info&hash=${encodeURIComponent(value)}`,
-          });
-          const j = await r.json();
+          const j = await callEnrich("malwarebazaar");
           if (j.query_status === "ok" && Array.isArray(j.data) && j.data.length > 0) {
             const d = j.data[0];
             results.malwarebazaar = { family: d.signature || "unknown", type: d.file_type, size: d.file_size, first: d.first_seen };
