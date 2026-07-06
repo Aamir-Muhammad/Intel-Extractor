@@ -2,14 +2,54 @@ import { useState, useMemo, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
 import {
   Shield, Search, Download, Copy, Check, Loader2, Globe,
-  ClipboardPaste, AlertTriangle, ShieldOff, Trash2, Wand2, FileDown,
-  Tags, Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles, ChevronDown, RefreshCw
+  ClipboardPaste, AlertTriangle, ShieldOff, Trash2, Wand2,
+  Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles, ChevronDown, RefreshCw
 } from "lucide-react";
 
 // ============================================================
 //  Backend proxy
 // ============================================================
 const WORKER_BASE = "https://ioc-parser.aamirmuhd.workers.dev";
+
+// ============================================================
+//  IOC Whitelist — exact-match auto-removal from parsed results
+// ============================================================
+const isPrivateIP = (ip) => {
+  const m = ip.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (!m) return false;
+  const [, a, b] = m.map(Number);
+  return a === 10 || a === 127 || a === 0 || (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 255);
+};
+const WL_DOMAINS = new Set(["github.com","www.github.com","localhost","example.com","www.example.com"]);
+const WL_FILES = new Set([
+  "cmd.exe","powershell.exe","pwsh.exe","mshta.exe","certutil.exe","regsvr32.exe",
+  "rundll32.exe","wscript.exe","cscript.exe","msiexec.exe","bitsadmin.exe",
+  "schtasks.exe","wmic.exe","net.exe","net1.exe","netsh.exe","sc.exe","reg.exe",
+  "attrib.exe","bcdedit.exe","vssadmin.exe","explorer.exe","conhost.exe",
+  "svchost.exe","services.exe","lsass.exe","csrss.exe","smss.exe","winlogon.exe",
+  "wininit.exe","dllhost.exe","taskhostw.exe","taskhost.exe","control.exe",
+  "cmstp.exe","forfiles.exe","msbuild.exe","installutil.exe","hh.exe","bash.exe",
+  "wsl.exe","nslookup.exe","ipconfig.exe","systeminfo.exe","whoami.exe",
+  "hostname.exe","findstr.exe","xcopy.exe","robocopy.exe","expand.exe",
+  "extrac32.exe","nltest.exe","gpresult.exe","ping.exe","tracert.exe","ftp.exe",
+  "curl.exe","certreq.exe","msdt.exe","odbcconf.exe","esentutl.exe","pcalua.exe",
+  "eventvwr.exe","mmc.exe","regedit.exe","tasklist.exe","taskkill.exe",
+  "\\","/"
+]);
+const WL_IPS6 = new Set(["::1","::","fe80::1","0:0:0:0:0:0:0:1","0:0:0:0:0:0:0:0"]);
+const applyWhitelist = (data) => {
+  const out = {};
+  Object.entries(data).forEach(([cat, arr]) => {
+    let filtered = arr;
+    if (cat === "IPV4") filtered = arr.filter(v => !isPrivateIP(v));
+    else if (cat === "IPV6") filtered = arr.filter(v => !WL_IPS6.has(v.toLowerCase()));
+    else if (cat === "DOMAIN") filtered = arr.filter(v => !WL_DOMAINS.has(v.toLowerCase()));
+    else if (cat === "FILE") filtered = arr.filter(v => !WL_FILES.has(v.toLowerCase()));
+    if (filtered.length) out[cat] = filtered;
+  });
+  return out;
+};
 
 // ============================================================
 //  Local IOC engine — refang + classify (fully client-side)
@@ -466,7 +506,6 @@ const mergeIocs = (apiData, engData) => {
   return { data: ordered, origin };
 };
 
-const TAG_LABEL = { api: "API Parsed", eng: "Engine Parsed", both: "API + Engine Parsed" };
 
 // ============================================================
 //  Hunt query generators (per-entry clauses OR'd into one query)
@@ -713,6 +752,75 @@ export default function App() {
   const [aiOpen, setAiOpen] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
   const [cooldown, setCooldown] = useState(0);                  // seconds until retry re-enabled
+  const [enrichCache, setEnrichCache] = useState({});             // {iocKey: {loading,data,error}}
+
+  // ---- IOC Enrichment: ThreatFox + URLhaus + MalwareBazaar (browser-direct, no Worker) ----
+  const enrichIOC = async (cat, value) => {
+    const key = `${cat}::${value}`;
+    if (enrichCache[key]) return; // already enriched or in-progress
+    setEnrichCache((c) => ({ ...c, [key]: { loading: true } }));
+    const results = {};
+    try {
+      // ThreatFox — IPs, domains, URLs, hashes
+      if (["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512"].includes(cat)) {
+        try {
+          const r = await fetch("https://threatfox-api.abuse.ch/api/v1/", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query: "search_ioc", search_term: value }),
+          });
+          const j = await r.json();
+          if (j.query_status === "ok" && Array.isArray(j.data) && j.data.length > 0) {
+            const d = j.data[0];
+            results.threatfox = { malware: d.malware_printable || d.malware, threat: d.threat_type_desc || d.threat_type, confidence: d.confidence_level, first: d.first_seen };
+          }
+        } catch {}
+      }
+      // URLhaus — IPs, domains (host lookup), URLs (url lookup)
+      if (["IPV4","DOMAIN"].includes(cat)) {
+        try {
+          const r = await fetch("https://urlhaus-api.abuse.ch/v1/host/", {
+            method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `host=${encodeURIComponent(value)}`,
+          });
+          const j = await r.json();
+          if (j.query_status === "ok" || j.query_status === "no_results") {
+            results.urlhaus = { urls_total: j.urls?.length || 0, status: j.query_status === "ok" ? "listed" : "clean" };
+          }
+        } catch {}
+      }
+      if (cat === "URL") {
+        try {
+          const r = await fetch("https://urlhaus-api.abuse.ch/v1/url/", {
+            method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `url=${encodeURIComponent(value)}`,
+          });
+          const j = await r.json();
+          if (j.query_status !== "no_results" && j.id) {
+            results.urlhaus = { status: j.threat || "listed", tags: (j.tags || []).join(", ") };
+          }
+        } catch {}
+      }
+      // MalwareBazaar — hashes only
+      if (["MD5","SHA1","SHA256","SHA512"].includes(cat)) {
+        try {
+          const hashType = cat === "MD5" ? "md5_hash" : cat === "SHA1" ? "sha1_hash" : "sha256_hash";
+          const r = await fetch("https://mb-api.abuse.ch/api/v1/", {
+            method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `query=get_info&hash=${encodeURIComponent(value)}`,
+          });
+          const j = await r.json();
+          if (j.query_status === "ok" && Array.isArray(j.data) && j.data.length > 0) {
+            const d = j.data[0];
+            results.malwarebazaar = { family: d.signature || "unknown", type: d.file_type, size: d.file_size, first: d.first_seen };
+          }
+        } catch {}
+      }
+      const hasData = Object.keys(results).length > 0;
+      setEnrichCache((c) => ({ ...c, [key]: { loading: false, data: hasData ? results : null, error: !hasData } }));
+    } catch {
+      setEnrichCache((c) => ({ ...c, [key]: { loading: false, data: null, error: true } }));
+    }
+  };
   const [sourceUrl, setSourceUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -721,16 +829,8 @@ export default function App() {
   const [defangMap, setDefangMap] = useState({});
   const [defangAll, setDefangAll] = useState(false);
   const [copied, setCopied] = useState("");
-  const [showTags, setShowTags] = useState(() => {
-    try { return localStorage.getItem("ioc_show_tags") === "1"; } catch { return false; }
-  });
   const copyTimer = useRef(null);
 
-  const toggleTags = () =>
-    setShowTags((v) => {
-      try { localStorage.setItem("ioc_show_tags", v ? "0" : "1"); } catch { /* ignore */ }
-      return !v;
-    });
 
   const displayData = iocData;
 
@@ -758,25 +858,6 @@ export default function App() {
     () => new Set(registryDetails.filter((d) => d.valueName || (d.data !== undefined && d.data !== null && d.data !== "")).map((d) => canonicalReg(d))),
     [registryDetails]
   );
-
-  const catTag = (cat, arr) => {
-    if (!originData?.[cat]) return null;
-    let api = false, eng = false;
-    arr.forEach((v) => {
-      const o = originData[cat][v];
-      if (o === "api") api = true;
-      else if (o === "eng") eng = true;
-      else if (o === "both") { api = true; eng = true; }
-    });
-    if (api && eng) return TAG_LABEL.both;
-    if (api) return TAG_LABEL.api;
-    if (eng) return TAG_LABEL.eng;
-    return null;
-  };
-  const tagFor = (cat, v) => {
-    const o = originData?.[cat]?.[v];
-    return o ? TAG_LABEL[o] : "";
-  };
 
   const proc = (arr, cat) => ((defangAll || defangMap[cat]) ? arr.map(defang) : arr);
   const toggleDefang = (cat) => setDefangMap((m) => ({ ...m, [cat]: !m[cat] }));
@@ -891,7 +972,7 @@ export default function App() {
     }
 
     setRegistryDetails(usedDetails);
-    setIocData(data);
+    setIocData(applyWhitelist(data));
     setOriginData(origin);
     setMeta(apiMeta);
     setSourceUrl(url);
@@ -968,7 +1049,7 @@ export default function App() {
       }
       const origin = {};
       Object.entries(parsed).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "api"; }); });
-      setIocData(parsed); setOriginData(origin); setRegistryDetails(details);
+      setIocData(applyWhitelist(parsed)); setOriginData(origin); setRegistryDetails(details);
       setSourceUrl("(pasted JSON)");
     } catch (e) { setError(`Could not parse JSON: ${e.message}`); }
   };
@@ -982,42 +1063,40 @@ export default function App() {
     }
     const origin = {};
     Object.entries(ex.data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "eng"; }); });
-    setIocData(ex.data); setOriginData(origin); setRegistryDetails(ex.registryDetails);
+    setIocData(applyWhitelist(ex.data)); setOriginData(origin); setRegistryDetails(ex.registryDetails);
     setSourceUrl("(raw paste)");
   };
 
-  const saveArticle = () =>
-    downloadBlob(new Blob([rawArticle], { type: "text/plain;charset=utf-8" }), `article_${Date.now()}.txt`);
 
   const exportAllCSV = () => {
-    const rows = [["Type", "IOC", "Source"]];
+    const rows = [["Type", "IOC"]];
     entries.forEach(([cat, arr]) => {
       const shown = proc(arr, cat);
-      arr.forEach((orig, i) => rows.push([cat, shown[i], tagFor(cat, orig)]));
+      arr.forEach((orig, i) => rows.push([cat, shown[i]]));
     });
     downloadBlob(new Blob([toCSV(rows)], { type: "text/csv;charset=utf-8" }), "all_iocs.csv");
   };
   const exportAllXLSX = () => {
-    const all = [["Type", "IOC", "Source"]];
+    const all = [["Type", "IOC"]];
     entries.forEach(([cat, arr]) => {
       const shown = proc(arr, cat);
-      arr.forEach((orig, i) => all.push([cat, shown[i], tagFor(cat, orig)]));
+      arr.forEach((orig, i) => all.push([cat, shown[i]]));
     });
     const sheets = [{ name: "All_IOCs", rows: all }];
     entries.forEach(([cat, arr]) => {
       const shown = proc(arr, cat);
-      sheets.push({ name: cat, rows: [["IOC", "Source"], ...arr.map((orig, i) => [shown[i], tagFor(cat, orig)])] });
+      sheets.push({ name: cat, rows: [["IOC"], ...arr.map((orig, i) => [shown[i]])] });
     });
     downloadBlob(buildWorkbook(sheets), "all_iocs.xlsx");
   };
   const exportTypeCSV = (cat, arr) => {
     const shown = proc(arr, cat);
-    const rows = [["Type", "IOC", "Source"], ...arr.map((orig, i) => [cat, shown[i], tagFor(cat, orig)])];
+    const rows = [["Type", "IOC"], ...arr.map((orig, i) => [cat, shown[i]])];
     downloadBlob(new Blob([toCSV(rows)], { type: "text/csv;charset=utf-8" }), `${cat.toLowerCase()}_iocs.csv`);
   };
   const exportTypeXLSX = (cat, arr) => {
     const shown = proc(arr, cat);
-    const rows = [["IOC", "Source"], ...arr.map((orig, i) => [shown[i], tagFor(cat, orig)])];
+    const rows = [["IOC"], ...arr.map((orig, i) => [shown[i]])];
     downloadBlob(buildWorkbook([{ name: cat, rows }]), `${cat.toLowerCase()}_iocs.xlsx`);
   };
 
@@ -1057,7 +1136,7 @@ export default function App() {
               Threat Intel Article IOC Extractor
             </h1>
             <p className="text-xs sm:text-sm" style={{ color: "#7f95a3" }}>
-              Extract IOCs, capture hunt artifacts, generate ready-to-run queries.
+              Extract IOCs, Capture Hunt Artifacts, Generate Ready-To-Run Queries.
             </p>
           </div>
           <div className="sm:ml-auto flex flex-col sm:items-end gap-1.5">
@@ -1252,21 +1331,18 @@ export default function App() {
 
                 {aiState === "done" && aiSummary && (
                   <div className="pt-2">
-                    <h2 className="text-sm sm:text-base font-bold leading-snug" style={{ color: "#eafcff" }}>{aiSummary.headline}</h2>
+                    <h2 className="text-sm sm:text-base font-extrabold leading-snug" style={{ color: "#eafcff" }}>{aiSummary.headline}</h2>
                     {aiSummary.executive_summary && (
-                      <div className="mt-2 rounded-lg px-3 py-2" style={{ backgroundColor: "rgba(0,229,255,0.05)", border: "1px solid rgba(0,229,255,0.18)" }}>
-                        <p className="text-[10px] uppercase tracking-widest mb-1" style={{ color: "#00e5ff" }}>Executive Summary</p>
-                        <p className="text-xs sm:text-sm leading-relaxed" style={{ color: "#d4e3ea" }}>{aiSummary.executive_summary}</p>
-                      </div>
+                      <p className="text-xs sm:text-sm mt-2 font-semibold leading-relaxed" style={{ color: "#d4e3ea" }}>{defang(aiSummary.executive_summary)}</p>
                     )}
-                    <p className="text-[10px] uppercase tracking-widest mt-2.5 mb-0.5" style={{ color: "#8aa0ad" }}>Technical Analysis</p>
-                    <p className="text-xs sm:text-sm leading-relaxed" style={{ color: "#b8c9d1" }}>{aiSummary.summary}</p>
+                    <p className="text-[10px] uppercase tracking-widest mt-3 mb-0.5" style={{ color: "#8aa0ad" }}>Technical Analysis</p>
+                    <p className="text-xs sm:text-sm font-medium leading-relaxed" style={{ color: "#b8c9d1" }}>{defang(aiSummary.summary)}</p>
                     {aiSummary.recommendations.length > 0 && (
                       <div className="mt-2.5">
                         <p className="text-[10px] uppercase tracking-widest mb-1" style={{ color: "#8aa0ad" }}>Recommendations</p>
                         {aiSummary.recommendations.map((rec, i) => (
-                          <div key={i} className="flex items-start gap-1.5 text-xs sm:text-sm py-0.5 leading-relaxed" style={{ color: "#9fb3bd" }}>
-                            <span className="shrink-0" style={{ color: "#c084fc" }}>▸</span> <span>{rec}</span>
+                          <div key={i} className="flex items-start gap-1.5 text-xs sm:text-sm py-0.5 leading-relaxed font-medium" style={{ color: "#9fb3bd" }}>
+                            <span className="shrink-0" style={{ color: "#c084fc" }}>▸</span> <span>{defang(rec)}</span>
                           </div>
                         ))}
                       </div>
@@ -1317,24 +1393,6 @@ export default function App() {
           </div>
         )}
 
-        {iocData && (
-          <div className="flex items-center gap-2 mb-4 flex-wrap">
-            <p className="text-xs truncate" style={{ color: "#5d7382" }}>
-              source: <span style={{ color: "#8aa0ad" }}>{sourceUrl}</span>
-            </p>
-            <div className="flex items-center gap-2 ml-auto flex-wrap">
-              <ToggleBtn on={showTags} onClick={toggleTags} icon={<Tags size={12} />}>
-                {showTags ? "Tags: On" : "Tags: Off"}
-              </ToggleBtn>
-              {rawArticle && (
-                <button onClick={saveArticle} className="flex items-center gap-1 text-xs rounded-md px-2 py-1"
-                  style={{ color: "#00e5ff", border: "1px solid rgba(0,229,255,0.4)", backgroundColor: "rgba(0,229,255,0.07)" }}>
-                  <FileDown size={12} /> Save article ({Math.round(rawArticle.length / 1024)} KB)
-                </button>
-              )}
-            </div>
-          </div>
-        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {entries.map(([cat, arr]) => {
@@ -1347,7 +1405,6 @@ export default function App() {
               quoted: shown.map((v) => `"${v}"`).join(", "),
               comma: shown.join(", "),
             };
-            const tag = showTags ? catTag(cat, arr) : null;
             const isReg = cat === "REGISTRY";
             return (
               <div key={cat} id={`cat-${cat}`} className="rounded-xl overflow-hidden flex flex-col" style={{ ...panel, borderColor: `${c}40` }}>
@@ -1355,12 +1412,6 @@ export default function App() {
                   <div className="flex items-center gap-2 min-w-0">
                     <span style={{ width: 9, height: 9, borderRadius: 99, backgroundColor: c, boxShadow: `0 0 10px ${c}` }} />
                     <span className="font-bold tracking-wide truncate" style={{ color: c, textShadow: `0 0 12px ${c}55` }}>{cat}</span>
-                    {tag && (
-                      <span className="text-[10px] rounded-full px-1.5 py-0.5 whitespace-nowrap"
-                        style={{ color: "#8aa0ad", border: "1px solid rgba(138,160,173,0.35)", backgroundColor: "rgba(138,160,173,0.08)" }}>
-                        {tag}
-                      </span>
-                    )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <button onClick={() => toggleDefang(cat)} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
@@ -1375,31 +1426,66 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="px-4 py-2 overflow-y-auto" style={{ maxHeight: 240 }}>
+                <div className="px-4 py-2 overflow-y-auto" style={{ maxHeight: 260 }}>
                   {shown.map((ioc, i) => {
                     const huntReady = isReg && huntReadySet.has(arr[i]);
                     const rowKey = `${cat}-i-${i}`;
                     const isCopied = copied === rowKey;
+                    const eKey = `${cat}::${arr[i]}`;
+                    const enr = enrichCache[eKey];
+                    const enrichable = ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512"].includes(cat);
                     return (
-                      <div key={i} className="group flex items-start gap-1.5 py-0.5 leading-relaxed"
-                        title={huntReady ? "Hunt-ready: key + value captured — enriches the hunt queries below" : undefined}>
-                        <span className="text-xs shrink-0" style={{ color: `${c}aa`, userSelect: "none" }}>›</span>
-                        <span className="text-xs break-all flex-1 min-w-0"
-                          style={{ color: huntReady ? "#f3ddfa" : "#c8d6dd", fontWeight: huntReady ? 600 : 400 }}>
-                          {ioc}
-                        </span>
-                        <button onClick={() => copyText(ioc, rowKey)}
-                          title="Copy this indicator"
-                          className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
-                          style={{ color: isCopied ? c : "#8aa0ad" }}>
-                          {isCopied ? <Check size={16} /> : <Copy size={16} />}
-                        </button>
-                        <button onClick={() => removeIoc(cat, arr[i])}
-                          title="Discard this indicator — removed from copy formats, exports & hunt queries"
-                          className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
-                          style={{ color: "#ff6b6b" }}>
-                          <X size={16} />
-                        </button>
+                      <div key={i}>
+                        <div className="group flex items-start gap-1.5 py-0.5 leading-relaxed"
+                          title={huntReady ? "Hunt-ready: key + value captured — enriches the hunt queries below" : undefined}>
+                          <span className="text-xs shrink-0" style={{ color: `${c}aa`, userSelect: "none" }}>›</span>
+                          <span className="text-xs break-all flex-1 min-w-0"
+                            style={{ color: huntReady ? "#f3ddfa" : "#c8d6dd", fontWeight: huntReady ? 600 : 400 }}>
+                            {ioc}
+                          </span>
+                          {enrichable && (
+                            <button onClick={() => enrichIOC(cat, arr[i])}
+                              title="Enrich via ThreatFox / URLhaus / MalwareBazaar"
+                              className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
+                              style={{ color: enr?.data ? "#00ff9c" : enr?.error ? "#ff6b6b" : "#c084fc" }}>
+                              {enr?.loading ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
+                            </button>
+                          )}
+                          <button onClick={() => copyText(ioc, rowKey)}
+                            title="Copy this indicator"
+                            className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
+                            style={{ color: isCopied ? c : "#8aa0ad" }}>
+                            {isCopied ? <Check size={16} /> : <Copy size={16} />}
+                          </button>
+                          <button onClick={() => removeIoc(cat, arr[i])}
+                            title="Discard this indicator"
+                            className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
+                            style={{ color: "#ff6b6b" }}>
+                            <X size={16} />
+                          </button>
+                        </div>
+                        {enr?.data && (
+                          <div className="ml-4 mb-1.5 flex flex-wrap gap-1 text-[10px]">
+                            {enr.data.threatfox && (
+                              <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.12)", border: "1px solid rgba(255,77,109,0.3)" }}>
+                                ThreatFox: {enr.data.threatfox.malware} · {enr.data.threatfox.threat}
+                              </span>
+                            )}
+                            {enr.data.urlhaus && (
+                              <span className="rounded-full px-2 py-0.5" style={{ color: "#fbbf24", backgroundColor: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.3)" }}>
+                                URLhaus: {enr.data.urlhaus.status}{enr.data.urlhaus.urls_total ? ` · ${enr.data.urlhaus.urls_total} URLs` : ""}{enr.data.urlhaus.tags ? ` · ${enr.data.urlhaus.tags}` : ""}
+                              </span>
+                            )}
+                            {enr.data.malwarebazaar && (
+                              <span className="rounded-full px-2 py-0.5" style={{ color: "#00e5ff", backgroundColor: "rgba(0,229,255,0.12)", border: "1px solid rgba(0,229,255,0.3)" }}>
+                                MalBazaar: {enr.data.malwarebazaar.family} · {enr.data.malwarebazaar.type}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        {enr && !enr.loading && !enr.data && enr.error && (
+                          <p className="ml-4 mb-1 text-[10px]" style={{ color: "#5d7382" }}>No threat data found</p>
+                        )}
                       </div>
                     );
                   })}
@@ -1427,7 +1513,10 @@ export default function App() {
                   </div>
                 )}
 
-                <div className="px-3 py-2.5 flex flex-wrap gap-1.5" style={{ borderTop: `1px solid ${c}22` }}>
+                <div className="px-3 py-2.5 flex flex-wrap items-center gap-1.5" style={{ borderTop: `1px solid ${c}22` }}>
+                  <span className="text-[10px] uppercase tracking-wider flex items-center gap-1 mr-1" style={{ color: "#8aa0ad" }}>
+                    <Copy size={11} /> Copy
+                  </span>
                   <CopyBtn label="Lines" copied={copied === `${cat}-lines`} onClick={() => copyText(fmt.lines, `${cat}-lines`)} color={c} />
                   <CopyBtn label="Comma" copied={copied === `${cat}-comma`} onClick={() => copyText(fmt.comma, `${cat}-comma`)} color={c} />
                   <CopyBtn label="Pipe |" copied={copied === `${cat}-pipe`} onClick={() => copyText(fmt.pipe, `${cat}-pipe`)} color={c} />
@@ -1473,19 +1562,6 @@ function Tab({ children, active, onClick, icon }) {
   return (
     <button onClick={onClick} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold"
       style={{ color: active ? "#04111a" : "#8aa0ad", backgroundColor: active ? "#00e5ff" : "transparent", boxShadow: active ? "0 0 14px rgba(0,229,255,0.4)" : "none" }}>
-      {icon} {children}
-    </button>
-  );
-}
-
-function ToggleBtn({ children, on, onClick, icon, title }) {
-  return (
-    <button onClick={onClick} title={title} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
-      style={{
-        color: on ? "#04111a" : "#8aa0ad",
-        backgroundColor: on ? "#8aa0ad" : "rgba(138,160,173,0.08)",
-        border: "1px solid rgba(138,160,173,0.4)",
-      }}>
       {icon} {children}
     </button>
   );
