@@ -57,6 +57,8 @@ const trimTok = (s) =>
   s.replace(/^[.,;:!?'"`(){}<>\u201c\u201d\u2018\u2019]+/, "")
    .replace(/[.,;:!?'"`(){}<>\u201c\u201d\u2018\u2019]+$/, "");
 
+// Drop leading scheme from URLs (http:// https:// ftp://) for display/copy/export.
+// Defanged variants are refanged first so hxxp[://] forms are handled too.
 const stripScheme = (s) => refangSoft(String(s)).replace(/^\s*(?:https?|ftp):\/\//i, "");
 const stripUrlArray = (arr) => {
   const out = [], seen = new Set();
@@ -74,7 +76,9 @@ const isIPv4 = (t) => {
   return m && m.slice(1).every((o) => +o >= 0 && +o <= 255);
 };
 
-// Registry helpers (your original)
+// ============================================================
+//  Registry / file-path structured extraction (pre-tokenization)
+// ============================================================
 const HIVE_FULL = {
   HKLM: "HKEY_LOCAL_MACHINE", HKCU: "HKEY_CURRENT_USER", HKCR: "HKEY_CLASSES_ROOT",
   HKU: "HKEY_USERS", HKCC: "HKEY_CURRENT_CONFIG",
@@ -100,20 +104,30 @@ const canonicalReg = (d) => {
 
 const unquote = (s) => String(s).replace(/^["']|["']$/g, "");
 
+// Registry key: hive + backslash segments. Mid segments may contain up to 3 spaces
+// (e.g. "Windows NT", "Internet Settings"); final segment has no spaces so prose
+// after the key isn't swallowed.
 const REG_KEY_RE = /(?:HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER|HKEY_CLASSES_ROOT|HKEY_USERS|HKEY_CURRENT_CONFIG|HKLM|HKCU|HKCR|HKCC|HKU):?\\(?:[^\s\\/:*?"<>|,;\r\n]+(?: [^\s\\/:*?"<>|,;\r\n]+){0,3}\\)*[^\s\\/:*?"<>|,;'"`)\]]+/gi;
 
+// reg add "<key>" /v name /t type /d data
 const REG_ADD_RE = /\breg(?:\.exe)?\s+add\s+("[^"\r\n]+"|\S+)([^\r\n]*)/gi;
 
+// Set-ItemProperty / New-ItemProperty -Path ... -Name ... -Value ...
 const PS_REG_RE = /\b(?:Set-ItemProperty|New-ItemProperty)\b([^\r\n]*)/gi;
 
+// Windows paths: C:\..., \\server\share\..., %ENVVAR%\...
 const WIN_PATH_RE = /(?:[A-Za-z]:\\|\\\\[A-Za-z0-9._$-]{1,64}\\|%[A-Za-z_][A-Za-z0-9_]*%\\)(?:[^\s\\/:*?"<>|,;\r\n]+(?: [^\s\\/:*?"<>|,;\r\n]+){0,3}\\)*[^\\/:*?"<>|,;\r\n]{0,180}/g;
 
+// A new drive/UNC/env root embedded mid-match means the regex bridged two paths
+// (e.g. "...payload.dll and %APPDATA%\..."). Cut before the second root.
 const NEW_ROOT_RE = /\s+(?:[A-Za-z]:\\|%[A-Za-z_][A-Za-z0-9_]*%\\|\\\\[A-Za-z0-9._$-])/;
 
+// Unix paths anchored to common roots
 const UNIX_PATH_RE = /(^|[\s"'`(>])(\/(?:usr|etc|var|tmp|opt|home|bin|sbin|lib|lib64|dev|proc|srv|root|boot|Users|Library|Applications|System|private)\/[^\s"'`<>|,;)]+)/g;
 
 const cleanupWinPath = (raw) => {
   let s = raw.replace(/[\s.,;:!?)'"`\]]+$/, "");
+  // If the match bridged into a second path root, keep only the first path
   const nr = s.match(NEW_ROOT_RE);
   if (nr) s = s.slice(0, nr.index);
   s = s.replace(/[\s.,;:!?)'"`\]]+$/, "");
@@ -121,6 +135,9 @@ const cleanupWinPath = (raw) => {
   if (i < 0) return null;
   let fin = s.slice(i + 1);
   if (/\s/.test(fin)) {
+    // Keep spaces in the filename only when a known extension proves it's one
+    // file — take the SHORTEST prefix ending in an extension so trailing prose
+    // ("bad.vbs then ran evil.exe") isn't glued on.
     const toks = fin.split(" ");
     let acc = "", best = null;
     for (let j = 0; j < toks.length; j++) {
@@ -145,12 +162,16 @@ const maybeFileFromData = (v, files) => {
   }
 };
 
+// Extracts registry keys (incl. values) and file paths from full text BEFORE
+// whitespace tokenization, blanking consumed matches so the tokenizer doesn't
+// shred multi-word paths like `C:\Program Files\...` or `...\Windows NT\...`.
 const extractStructured = (text) => {
   let work = text;
   const regs = [];
   const files = [];
   const blank = (m) => " ".repeat(m.length);
 
+  // 1) reg add command lines (fully structured: key + /v + /t + /d)
   work = work.replace(REG_ADD_RE, (m, keyRaw, rest) => {
     const key = expandHive(unquote(keyRaw));
     if (!/^HKEY_/i.test(key)) return m;
@@ -168,6 +189,7 @@ const extractStructured = (text) => {
     return blank(m);
   });
 
+  // 2) PowerShell Set-ItemProperty / New-ItemProperty
   work = work.replace(PS_REG_RE, (m, rest) => {
     const p = rest.match(/-(?:Literal)?Path\s+("[^"]*"|'[^']*'|\S+)/i);
     if (!p) return m;
@@ -188,6 +210,7 @@ const extractStructured = (text) => {
     return blank(m);
   });
 
+  // 3) Plain registry keys + prose values (`key\Name = data`, `→ 0`, ` : 4`)
   {
     let rebuilt = "";
     let pos = 0;
@@ -220,6 +243,9 @@ const extractStructured = (text) => {
     work = rebuilt;
   }
 
+  // 4) Windows file paths (drive, UNC, %ENVVAR%). Consume ONLY the cleaned
+  // path (always a prefix of the raw match) so a second path or filename in
+  // the same greedy match is re-scanned instead of blanked away.
   {
     let rebuilt = "", pos = 0, mm;
     WIN_PATH_RE.lastIndex = 0;
@@ -237,6 +263,7 @@ const extractStructured = (text) => {
     work = rebuilt;
   }
 
+  // 5) Unix paths
   work = work.replace(UNIX_PATH_RE, (m, pre, path) => {
     const c = path.replace(/[.,;:!?)'"`\]]+$/, "");
     if (c.length > 4) { files.push(c); return pre + blank(path); }
@@ -273,6 +300,8 @@ const classify = (t) => {
 
 const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","YARA","ASN","MAC_ADDRESS","BTC","XMR","ETH","REGISTRY","FILE","FILE_PATH"];
 
+// Fixed on-screen card order: Domain, URL, IPs, all hashes first — then the rest.
+// Static (not count-based) so discarding IOCs never shuffles box positions.
 const DISPLAY_PRIORITY = ["DOMAIN","URL","IPV4","IPV6","MD5","SHA1","SHA256","SHA512","SSDEEP","IMPHASH"];
 const catRank = (cat) => {
   const p = DISPLAY_PRIORITY.indexOf(cat);
@@ -281,6 +310,8 @@ const catRank = (cat) => {
   return o === -1 ? 999 : 100 + o;
 };
 
+// Returns { data, registryDetails } — data is category → array of strings;
+// registryDetails is [{ key, valueName?, valueType?, data? }] powering hunt queries.
 const extractIocs = (text) => {
   const buckets = {};
   const add = (cat, val) => (buckets[cat] || (buckets[cat] = new Set())).add(val);
@@ -306,6 +337,7 @@ const extractIocs = (text) => {
     return "\n";
   });
 
+  // Structured pass: registry keys w/ spaces + values, file paths — before tokenizing
   const structured = extractStructured(work);
   work = structured.cleaned;
   structured.regs.forEach(pushReg);
@@ -325,6 +357,9 @@ const extractIocs = (text) => {
     const hasOtherIoc = tokens.some((t) => { const r = classify(t); return r && r[0] !== "FILE" && r[0] !== "FILE_PATH"; });
     const extTokens = tokens.filter((t) => FILE_EXT.test(t));
 
+    // A filename containing spaces (e.g. "Financial Reports.vbs"). Rejects
+    // segments with '=' (URL/query params like icid=...) or too many words,
+    // which previously glued tracking junk onto the real filename.
     const spacedFilename =
       /\s/.test(s) && !s.includes("/") && !/:\/\//.test(s) && !s.includes("=") &&
       tokens.length <= 4 &&
@@ -347,6 +382,7 @@ const extractIocs = (text) => {
   return { data: out, registryDetails: regDetails };
 };
 
+// Normalize API category names to the engine's, so merged results dedupe
 const API_KEY_MAP = {
   "FILE_HASH_MD5": "MD5", "FILE_HASH_SHA1": "SHA1", "FILE_HASH_SHA256": "SHA256", "FILE_HASH_SHA512": "SHA512",
   "MITRE_ATT&CK": "MITRE_ATTACK", "BITCOIN_ADDRESS": "BTC", "EMAIL_ADDRESS": "EMAIL",
@@ -357,6 +393,10 @@ const normCat = (k) => {
   return API_KEY_MAP[u] || u;
 };
 
+// Categories the API call is authoritative for. When the API succeeds, the local
+// engine contributes ONLY the categories NOT in this set. FILE (filenames) is
+// deliberately excluded so engine-found filenames merge with the API's FILE_NAME
+// results; FILE_PATH, REGISTRY, SHA512, ssdeep, ASN, MAC & wallets are engine-only.
 const API_SUPPORTED_CATS = new Set([
   "IPV4", "IPV6", "URL", "DOMAIN", "MD5", "SHA1", "SHA256", "EMAIL", "CVE", "MITRE_ATTACK", "YARA",
 ]);
@@ -378,6 +418,7 @@ const parseIocs = (raw) => {
   return out;
 };
 
+// Light parser for registry strings pasted as JSON (canonical or bare-key form)
 const parseCanonicalReg = (s) => {
   let t = refangSoft(String(s)).trim();
   let valueType;
@@ -395,6 +436,9 @@ const parseCanonicalReg = (s) => {
   return { key: expandHive(t), valueType };
 };
 
+// ============================================================
+//  Dual-source merge (API call + local engine)
+// ============================================================
 const CASE_SENSITIVE_CATS = new Set(["FILE", "FILE_PATH", "REGISTRY", "URL", "BTC", "XMR", "ETH", "SSDEEP"]);
 const normVal = (cat, v) => (CASE_SENSITIVE_CATS.has(cat) ? v : String(v).toLowerCase());
 
@@ -424,7 +468,9 @@ const mergeIocs = (apiData, engData) => {
 
 const TAG_LABEL = { api: "API Parsed", eng: "Engine Parsed", both: "API + Engine Parsed" };
 
-// Hunt queries (your original)
+// ============================================================
+//  Hunt query generators (per-entry clauses OR'd into one query)
+// ============================================================
 const uniqDetails = (details) => {
   const seen = new Set();
   return details.filter((d) => {
@@ -476,22 +522,119 @@ const buildSPL = (details) => {
 | table _time, host, Image, TargetObject, Details`;
 };
 
-// Page scrape helpers
+// ---- Universal hunt query builders: per-category KQL / CQL / SPL ----
+const kqlList = (arr) => arr.map((v) => `"${v.replace(/"/g, '\\"')}"`).join(", ");
+const cqlPat = (arr) => arr.map((v) => reEsc(v)).join("|");
+
+const huntKQL = (cat, arr) => {
+  switch (cat) {
+    case "IPV4": case "IPV6":
+      return `DeviceNetworkEvents\n| where RemoteIP in (${kqlList(arr)})\n| project Timestamp, DeviceName, RemoteIP, RemotePort, RemoteUrl, InitiatingProcessFileName, InitiatingProcessCommandLine`;
+    case "DOMAIN":
+      return `let domains = dynamic([${kqlList(arr)}]);\nDeviceNetworkEvents\n| where RemoteUrl has_any (domains)\n| project Timestamp, DeviceName, RemoteUrl, RemoteIP, RemotePort, InitiatingProcessFileName`;
+    case "URL":
+      return `DeviceNetworkEvents\n| where RemoteUrl has_any (${kqlList(arr)})\n| project Timestamp, DeviceName, RemoteUrl, RemoteIP, InitiatingProcessFileName, InitiatingProcessCommandLine`;
+    case "MD5":
+      return `DeviceFileEvents\n| where MD5 in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, FolderPath, MD5, SHA256, InitiatingProcessFileName\nunion DeviceProcessEvents\n| where MD5 in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, ProcessCommandLine, MD5`;
+    case "SHA1":
+      return `DeviceFileEvents\n| where SHA1 in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, FolderPath, SHA1, SHA256, InitiatingProcessFileName`;
+    case "SHA256":
+      return `DeviceFileEvents\n| where SHA256 in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, FolderPath, SHA256, InitiatingProcessFileName\nunion DeviceProcessEvents\n| where SHA256 in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, ProcessCommandLine, SHA256`;
+    case "FILE":
+      return `DeviceFileEvents\n| where FileName in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, FolderPath, SHA256, ActionType, InitiatingProcessFileName\nunion DeviceProcessEvents\n| where FileName in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, ProcessCommandLine, SHA256`;
+    case "FILE_PATH":
+      return `DeviceFileEvents\n| where ${arr.map((p) => `FolderPath has @"${p.replace(/"/g, '\\"')}"`).join("\n    or ")}\n| project Timestamp, DeviceName, FileName, FolderPath, SHA256, InitiatingProcessFileName`;
+    case "EMAIL":
+      return `EmailEvents\n| where SenderFromAddress in~ (${kqlList(arr)})\n| project Timestamp, Subject, SenderFromAddress, RecipientEmailAddress, DeliveryAction, NetworkMessageId`;
+    case "CVE":
+      return `DeviceTvmSoftwareVulnerabilities\n| where CveId in~ (${kqlList(arr)})\n| project DeviceName, SoftwareName, SoftwareVersion, CveId, VulnerabilitySeverityLevel`;
+    default: return null;
+  }
+};
+
+const huntCQL = (cat, arr) => {
+  switch (cat) {
+    case "IPV4":
+      return `#event_simpleName=NetworkConnectIP4\n| RemoteAddressIP4=in(${kqlList(arr)})\n| table([@timestamp, ComputerName, RemoteAddressIP4, RemotePort, ImageFileName])`;
+    case "IPV6":
+      return `#event_simpleName=NetworkConnectIP6\n| RemoteAddressIP6=in(${kqlList(arr)})\n| table([@timestamp, ComputerName, RemoteAddressIP6, RemotePort, ImageFileName])`;
+    case "DOMAIN":
+      return `#event_simpleName=DnsRequest\n| DomainName=/(${cqlPat(arr)})$/i\n| table([@timestamp, ComputerName, DomainName, RespondingDnsServer, ImageFileName])`;
+    case "URL":
+      return `#event_simpleName=DnsRequest OR #event_simpleName=HttpRequest\n| /(${cqlPat(arr)})/i\n| table([@timestamp, ComputerName, DomainName, HttpUrl, ImageFileName])`;
+    case "MD5":
+      return `#event_simpleName=ProcessRollup2\n| MD5HashData=in(${kqlList(arr)})\n| table([@timestamp, ComputerName, ImageFileName, CommandLine, MD5HashData, SHA256HashData])`;
+    case "SHA1":
+      return `#event_simpleName=ProcessRollup2\n| SHA1HashData=in(${kqlList(arr)})\n| table([@timestamp, ComputerName, ImageFileName, CommandLine, SHA1HashData])`;
+    case "SHA256":
+      return `#event_simpleName=ProcessRollup2\n| SHA256HashData=in(${kqlList(arr)})\n| table([@timestamp, ComputerName, ImageFileName, CommandLine, SHA256HashData])`;
+    case "FILE": case "FILE_PATH":
+      return `#event_simpleName=ProcessRollup2 OR #event_simpleName=NewExecutableWritten\n| ImageFileName=/(${cqlPat(arr)})/i\n| table([@timestamp, ComputerName, ImageFileName, CommandLine, SHA256HashData])`;
+    case "EMAIL":
+      return `#event_simpleName=UserLogon OR #event_simpleName=SSOLogin\n| UserPrincipal=/(${cqlPat(arr)})/i\n| table([@timestamp, ComputerName, UserPrincipal, LogonType])`;
+    default: return null;
+  }
+};
+
+const huntSPL = (cat, arr) => {
+  const quoted = arr.map((v) => `"${v}"`).join(", ");
+  switch (cat) {
+    case "IPV4": case "IPV6":
+      return `index=* (dest_ip IN (${quoted}) OR src_ip IN (${quoted}))\n| table _time, host, src_ip, dest_ip, dest_port, process_name, app`;
+    case "DOMAIN":
+      return `index=* sourcetype=stream:dns OR sourcetype=dns\n| search query IN (${arr.map((d) => `"*${d}*"`).join(", ")})\n| table _time, host, query, answer, src_ip`;
+    case "URL":
+      return `index=* sourcetype=proxy OR sourcetype=web\n| search url IN (${arr.map((u) => `"*${u}*"`).join(", ")})\n| table _time, host, url, dest_ip, status, user`;
+    case "MD5":
+      return `index=* (file_hash IN (${quoted}) OR MD5 IN (${quoted}))\n| table _time, host, file_name, file_path, file_hash, process_name`;
+    case "SHA1":
+      return `index=* (file_hash IN (${quoted}) OR SHA1 IN (${quoted}))\n| table _time, host, file_name, file_path, file_hash, process_name`;
+    case "SHA256":
+      return `index=* (file_hash IN (${quoted}) OR SHA256 IN (${quoted}))\n| table _time, host, file_name, file_path, file_hash, process_name`;
+    case "FILE": case "FILE_PATH":
+      return `index=* source="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"\n| search (TargetFilename IN (${arr.map((f) => `"*${f}*"`).join(", ")}) OR Image IN (${arr.map((f) => `"*${f}*"`).join(", ")}))\n| table _time, host, Image, TargetFilename, EventCode`;
+    case "EMAIL":
+      return `index=* sourcetype=ms:o365:management:activity OR sourcetype=exchange\n| search (SenderAddress IN (${quoted}) OR UserId IN (${quoted}))\n| table _time, SenderAddress, RecipientAddress, Subject, Operation`;
+    case "CVE":
+      return `index=* sourcetype=tenable:sc:vuln OR sourcetype=qualys\n| search cve IN (${quoted})\n| table _time, host, cve, severity, plugin_name`;
+    default: return null;
+  }
+};
+
+// Categories that support hunt queries
+const HUNT_CATS = new Set(["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","FILE","FILE_PATH","EMAIL","CVE"]);
+
+// ============================================================
+//  Page scrape helpers
+// ============================================================
+// Extract just the article body from raw HTML, stripping navigation chrome,
+// footers, sidebars, cookie banners etc. so the AI summarizer gets clean
+// prose instead of menu text. IOC extraction still uses the full-page text.
 const extractArticleBody = (html) => {
   let h = html;
+  // 1) Strip elements that are never article content
   h = h.replace(/<(script|style|noscript|iframe|svg|form|button|input|select|textarea|label)\b[\s\S]*?<\/\1>/gi, " ");
   h = h.replace(/<(nav|header|footer|aside|menu|menuitem)\b[\s\S]*?<\/\1>/gi, " ");
+  // 2) Strip common non-content class/id patterns (cookie banners, share widgets, nav bars)
   h = h.replace(/<[^>]+(?:class|id)=["'][^"']*(?:cookie|consent|gdpr|banner|popup|modal|sidebar|widget|share|social|newsletter|subscribe|comment|ad-|advertisement|masthead|top-bar|site-header|site-footer|breadcrumb|pagination|related-post|recommended)[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/gi, " ");
-
-  const articleMatch = h.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i);
-  if (articleMatch && articleMatch[1].length > 500) return htmlToText(articleMatch[1]);
-
-  const mainMatch = h.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i);
-  if (mainMatch && mainMatch[1].length > 500) return htmlToText(mainMatch[1]);
-
+  // 3) Find ALL <article> blocks and pick the LONGEST. The old lazy *? grabbed the
+  // shortest match — on sites with nested <article> cards (related posts, sidebars)
+  // that returned a tiny blurb, which produced < 300 chars and no API call fired.
+  const articleAll = [...h.matchAll(/<article\b[^>]*>([\s\S]*?)<\/article>/gi)];
+  if (articleAll.length) {
+    const longest = articleAll.reduce((a, b) => (a[1].length >= b[1].length ? a : b));
+    if (longest[1].length > 500) return htmlToText(longest[1]);
+  }
+  // 4) Same for <main>
+  const mainAll = [...h.matchAll(/<main\b[^>]*>([\s\S]*?)<\/main>/gi)];
+  if (mainAll.length) {
+    const longest = mainAll.reduce((a, b) => (a[1].length >= b[1].length ? a : b));
+    if (longest[1].length > 500) return htmlToText(longest[1]);
+  }
+  // 5) Try role="main" or role="article"
   const roleMatch = h.match(/<[^>]+role=["'](?:main|article)["'][^>]*>([\s\S]*?)<\/[^>]+>/i);
   if (roleMatch && roleMatch[1].length > 500) return htmlToText(roleMatch[1]);
-
+  // 6) Fallback: return the stripped HTML (nav/header/footer already removed above)
   return htmlToText(h);
 };
 
@@ -527,7 +670,9 @@ const filterScraped = (data, articleUrl) => {
   return out;
 };
 
-// Export helpers (your original)
+// ============================================================
+//  Export helpers
+// ============================================================
 const csvCell = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
 const toCSV = (rows) => rows.map((r) => r.map(csvCell).join(",")).join("\n");
 const downloadBlob = (blob, filename) => {
@@ -560,19 +705,19 @@ export default function App() {
   const [jsonText, setJsonText] = useState("");
   const [rawText, setRawText] = useState("");
   const [iocData, setIocData] = useState(null);
-  const [originData, setOriginData] = useState(null);
-  const [registryDetails, setRegistryDetails] = useState([]);
-  const [meta, setMeta] = useState(null);
-  const [aiSummary, setAiSummary] = useState(null);
-  const [aiState, setAiState] = useState("idle");
+  const [originData, setOriginData] = useState(null);           // cat → { value: "api"|"eng"|"both" }
+  const [registryDetails, setRegistryDetails] = useState([]);   // [{ key, valueName?, valueType?, data? }]
+  const [meta, setMeta] = useState(null);                       // { title, description, url, tags[] }
+  const [aiSummary, setAiSummary] = useState(null);             // { headline, summary, recommendations[] }
+  const [aiState, setAiState] = useState("idle");               // idle | loading | done | error
   const [aiOpen, setAiOpen] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
-  const [cooldown, setCooldown] = useState(0);
+  const [cooldown, setCooldown] = useState(0);                  // seconds until retry re-enabled
   const [sourceUrl, setSourceUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [rawArticle, setRawArticle] = useState("");
-  const [articleClean, setArticleClean] = useState("");
+  const [articleClean, setArticleClean] = useState("");           // nav-stripped body for AI summary
   const [defangMap, setDefangMap] = useState({});
   const [defangAll, setDefangAll] = useState(false);
   const [copied, setCopied] = useState("");
@@ -583,7 +728,7 @@ export default function App() {
 
   const toggleTags = () =>
     setShowTags((v) => {
-      try { localStorage.setItem("ioc_show_tags", v ? "0" : "1"); } catch {}
+      try { localStorage.setItem("ioc_show_tags", v ? "0" : "1"); } catch { /* ignore */ }
       return !v;
     });
 
@@ -595,6 +740,8 @@ export default function App() {
   );
   const total = useMemo(() => entries.reduce((s, [, v]) => s + v.length, 0), [entries]);
 
+  // Registry details visible under the current scraped filter — hunt queries
+  // regenerate from exactly these, so toggling off garbage rebuilds the query
   const visibleRegDetails = useMemo(() => {
     if (!registryDetails.length || !displayData?.REGISTRY) return [];
     const vis = new Set(displayData.REGISTRY);
@@ -634,6 +781,8 @@ export default function App() {
   const proc = (arr, cat) => ((defangAll || defangMap[cat]) ? arr.map(defang) : arr);
   const toggleDefang = (cat) => setDefangMap((m) => ({ ...m, [cat]: !m[cat] }));
 
+  // Discard a bogus IOC. Copy formats, CSV/XLSX exports and hunt queries all
+  // derive from iocData, so removal propagates everywhere automatically.
   const removeIoc = (cat, value) => {
     setIocData((prev) => {
       if (!prev?.[cat]) return prev;
@@ -659,7 +808,7 @@ export default function App() {
       const ta = document.createElement("textarea");
       ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
       document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); flash(key); } catch {}
+      try { document.execCommand("copy"); flash(key); } catch { /* ignore */ }
       document.body.removeChild(ta);
     }
   };
@@ -670,6 +819,11 @@ export default function App() {
     setRetryCount(0); setCooldown(0); setRawArticle(""); setArticleClean(""); setDefangAll(false);
   };
 
+  // ---- URL mode: API call AND page fetch in parallel ----
+  // API is authoritative for its supported categories; the local engine only
+  // contributes the types the API can't return (registry+values, file paths,
+  // sha512, ssdeep, asn, mac, btc/xmr/eth). If the API fails, the engine runs in
+  // full as a fallback.
   const runFetch = async () => {
     resetResults();
     setLoading(true);
@@ -690,25 +844,30 @@ export default function App() {
     const apiData = apiJson ? (() => { const d = parseIocs(apiJson); return Object.keys(d).length ? d : null; })() : null;
     const apiMeta = apiJson && apiJson.meta && typeof apiJson.meta === "object" ? apiJson.meta : null;
 
+    // Local engine over the fetched page text
     let engFull = null, engDetails = [], articleText = "", articleBody = "";
     if (pRes.status === "fulfilled" && pRes.value && pRes.value.length >= 50) {
-      articleText = htmlToText(pRes.value);
-      articleBody = extractArticleBody(pRes.value);
-      if (articleBody.length < 800) articleBody = articleText;
-
+      articleText = htmlToText(pRes.value);       // full page text for IOC extraction
+      articleBody = extractArticleBody(pRes.value); // clean article prose for AI summary
+      if (articleBody.length < 800) articleBody = articleText; // fallback to full page if extraction is too short
       const ex = extractIocs(articleText);
       engFull = ex.data;
       engDetails = ex.registryDetails;
     }
 
     if (!apiData && (!engFull || !Object.keys(filterScraped(engFull, url)).length)) {
-      setError(`The API call and page fetch both returned no IOCs. Try the "Paste IOCs" tab.`);
+      const why = [
+        aRes.status === "rejected" ? (aRes.reason?.message || "API call failed") : "no API IOCs",
+        pRes.status === "rejected" ? (pRes.reason?.message || "page fetch failed") : "no page IOCs",
+      ].join("; ");
+      setError(`The API call and page fetch both returned no IOCs (${why}). Try the "Paste IOCs" tab, or check the URL.`);
       setLoading(false);
       return;
     }
 
     let data, origin, usedDetails = [];
     if (apiData) {
+      // Keep only the engine categories the API can't produce
       const engExtra = {};
       if (engFull) {
         Object.entries(engFull).forEach(([cat, arr]) => {
@@ -724,6 +883,7 @@ export default function App() {
         Object.entries(data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "api"; }); });
       }
     } else {
+      // API failed → full local extraction fallback
       data = filterScraped(engFull, url);
       origin = {};
       Object.entries(data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "eng"; }); });
@@ -740,6 +900,8 @@ export default function App() {
     setLoading(false);
   };
 
+  // ---- On-demand AI summary: fires only when the user opens the dropdown,
+  // preserving free-tier API calls. Retry is rate-limited below.
   const summarizeNow = () => {
     const text = articleClean || rawArticle;
     if (!text || text.trim().length < 300) { setAiState("error"); return; }
@@ -754,6 +916,7 @@ export default function App() {
         if (j && typeof j.headline === "string" && typeof j.summary === "string") {
           setAiSummary({
             headline: j.headline,
+            executive_summary: typeof j.executive_summary === "string" ? j.executive_summary : "",
             summary: j.summary,
             recommendations: Array.isArray(j.recommendations) ? j.recommendations : [],
           });
@@ -771,11 +934,13 @@ export default function App() {
     if (opening && aiState === "idle") summarizeNow();
   };
 
+  // Retry limiter: first 3 retries are free; from the 3rd press onward each
+  // press starts a cooldown of 20s + 5s per extra press (20, 25, 30, …).
   const retryAi = () => {
     if (cooldown > 0 || aiState === "loading") return;
     const n = retryCount + 1;
     setRetryCount(n);
-    if (n >= 3) setCooldown(25 + 5 * (n - 3));
+    if (n >= 3) setCooldown(20 + 5 * (n - 3));
     summarizeNow();
   };
 
@@ -812,7 +977,7 @@ export default function App() {
     resetResults();
     const ex = extractIocs(rawText);
     if (!Object.keys(ex.data).length) {
-      setError("No recognizable IOCs found.");
+      setError("No recognizable IOCs found. Handles markdown reports, defanged & messy text — IPs, domains, URLs, emails, hashes, ssdeep, CVEs, MITRE IDs, ASNs, BTC/XMR/ETH, MACs, registry keys (with values), file names & file paths.");
       return;
     }
     const origin = {};
@@ -832,7 +997,6 @@ export default function App() {
     });
     downloadBlob(new Blob([toCSV(rows)], { type: "text/csv;charset=utf-8" }), "all_iocs.csv");
   };
-
   const exportAllXLSX = () => {
     const all = [["Type", "IOC", "Source"]];
     entries.forEach(([cat, arr]) => {
@@ -846,13 +1010,11 @@ export default function App() {
     });
     downloadBlob(buildWorkbook(sheets), "all_iocs.xlsx");
   };
-
   const exportTypeCSV = (cat, arr) => {
     const shown = proc(arr, cat);
     const rows = [["Type", "IOC", "Source"], ...arr.map((orig, i) => [cat, shown[i], tagFor(cat, orig)])];
     downloadBlob(new Blob([toCSV(rows)], { type: "text/csv;charset=utf-8" }), `${cat.toLowerCase()}_iocs.csv`);
   };
-
   const exportTypeXLSX = (cat, arr) => {
     const shown = proc(arr, cat);
     const rows = [["IOC", "Source"], ...arr.map((orig, i) => [shown[i], tagFor(cat, orig)])];
@@ -910,11 +1072,13 @@ export default function App() {
                 <Linkedin size={13} /> LinkedIn
               </a>
               <a href="https://github.com/Aamir-Muhammad/CrowdStrike-Queries" target="_blank" rel="noreferrer noopener"
+                title="CrowdStrike hunting queries on GitHub"
                 className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold"
                 style={{ color: "#ff4d4d", border: "1px solid rgba(255,77,77,0.4)", backgroundColor: "rgba(255,77,77,0.08)" }}>
                 <Github size={13} /><Target size={13} /> CrowdStrike Queries
               </a>
               <a href="https://github.com/Aamir-Muhammad/KQL-Queries" target="_blank" rel="noreferrer noopener"
+                title="Defender XDR hunting queries on GitHub"
                 className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold"
                 style={{ color: "#00b7ff", border: "1px solid rgba(0,183,255,0.4)", backgroundColor: "rgba(0,183,255,0.08)" }}>
                 <Github size={13} /><ShieldCheck size={13} /> Defender XDR Queries
@@ -928,7 +1092,10 @@ export default function App() {
             <div className="flex items-baseline gap-2 rounded-lg px-3 py-1.5"
               style={{ border: "1px solid rgba(0,255,156,0.5)", backgroundColor: "rgba(0,255,156,0.08)", boxShadow: "0 0 18px rgba(0,255,156,0.15)" }}>
               <span className="text-lg font-extrabold leading-none" style={{ color: "#00ff9c" }}>IOCs:</span>
-              <span className="text-lg font-extrabold tabular-nums leading-none" style={{ color: "#00ff9c" }}>{total}</span>
+              <span className="text-lg font-extrabold tabular-nums leading-none" style={{ color: "#00ff9c", textShadow: "0 0 12px rgba(0,255,156,0.5)" }}>{total}</span>
+              <span className="text-lg font-extrabold leading-none" style={{ color: "#2a4a3f" }}>·</span>
+              <span className="text-lg font-extrabold leading-none" style={{ color: "#00e5ff" }}>Types:</span>
+              <span className="text-lg font-extrabold tabular-nums leading-none" style={{ color: "#00e5ff", textShadow: "0 0 12px rgba(0,229,255,0.5)" }}>{entries.length}</span>
             </div>
           )}
           <span className="text-xs uppercase tracking-widest mr-1" style={{ color: "#7f95a3" }}>Export all</span>
@@ -936,11 +1103,13 @@ export default function App() {
           <GButton onClick={exportAllXLSX} disabled={!total} color="#00e5ff" icon={<Download size={15} />}>All IOCs · XLSX</GButton>
           {total > 0 && (
             <button onClick={() => setDefangAll((v) => !v)}
+              title="Defang every IOC type at once — applies to display, all copy buttons and all CSV/XLSX exports"
               className="ml-auto flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold"
               style={{
                 color: defangAll ? "#04111a" : "#ffb84d",
                 backgroundColor: defangAll ? "#ffb84d" : "rgba(255,184,77,0.10)",
                 border: "1px solid rgba(255,184,77,0.5)",
+                boxShadow: defangAll ? "0 0 14px rgba(255,184,77,0.4)" : "none",
               }}>
               <ShieldOff size={13} /> {defangAll ? "Defang All: On" : "Defang All: Off"}
             </button>
@@ -1005,6 +1174,9 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <GButton onClick={runRaw} disabled={!rawText.trim()} color="#c084fc" solid icon={<Wand2 size={16} />}>Refang &amp; Parse</GButton>
                 {rawText && <GButton onClick={() => setRawText("")} color="#94a3b8" icon={<Trash2 size={15} />}>Clear</GButton>}
+                <span className="text-xs ml-auto" style={{ color: "#5d7382" }}>
+                  Handles <span style={{ color: "#8aa0ad" }}>[md](links)</span>, defang, reg add &amp; paths with spaces
+                </span>
               </div>
             </div>
           )}
@@ -1059,6 +1231,12 @@ export default function App() {
                   <Sparkles size={14} style={{ color: "#c084fc" }} />
                 </span>
                 <span className="text-sm font-bold tracking-wide" style={{ color: "#c084fc" }}>AI Summary</span>
+                {aiState === "idle" && (
+                  <span className="text-[10px] uppercase tracking-widest rounded-full px-2 py-0.5 hidden sm:inline"
+                    style={{ color: "#8aa0ad", border: "1px solid rgba(120,160,180,0.3)" }}>
+                    click to generate
+                  </span>
+                )}
               </span>
               <ChevronDown size={18} className="shrink-0 transition-transform"
                 style={{ color: "#c084fc", transform: aiOpen ? "rotate(180deg)" : "rotate(0deg)" }} />
@@ -1068,14 +1246,21 @@ export default function App() {
               <div className="px-4 pb-4 pt-1" style={{ borderTop: "1px solid rgba(192,132,252,0.2)" }}>
                 {aiState === "loading" && (
                   <p className="text-xs sm:text-sm animate-pulse pt-2" style={{ color: "#9fb3bd" }}>
-                    Analyzing article and generating technical summary…
+                    Analyzing article and generating summary…
                   </p>
                 )}
 
                 {aiState === "done" && aiSummary && (
                   <div className="pt-2">
                     <h2 className="text-sm sm:text-base font-bold leading-snug" style={{ color: "#eafcff" }}>{aiSummary.headline}</h2>
-                    <p className="text-xs sm:text-sm mt-1.5 leading-relaxed" style={{ color: "#b8c9d1" }}>{aiSummary.summary}</p>
+                    {aiSummary.executive_summary && (
+                      <div className="mt-2 rounded-lg px-3 py-2" style={{ backgroundColor: "rgba(0,229,255,0.05)", border: "1px solid rgba(0,229,255,0.18)" }}>
+                        <p className="text-[10px] uppercase tracking-widest mb-1" style={{ color: "#00e5ff" }}>Executive Summary</p>
+                        <p className="text-xs sm:text-sm leading-relaxed" style={{ color: "#d4e3ea" }}>{aiSummary.executive_summary}</p>
+                      </div>
+                    )}
+                    <p className="text-[10px] uppercase tracking-widest mt-2.5 mb-0.5" style={{ color: "#8aa0ad" }}>Technical Analysis</p>
+                    <p className="text-xs sm:text-sm leading-relaxed" style={{ color: "#b8c9d1" }}>{aiSummary.summary}</p>
                     {aiSummary.recommendations.length > 0 && (
                       <div className="mt-2.5">
                         <p className="text-[10px] uppercase tracking-widest mb-1" style={{ color: "#8aa0ad" }}>Recommendations</p>
@@ -1092,7 +1277,7 @@ export default function App() {
                 {aiState === "error" && (
                   <div className="pt-2">
                     <p className="text-xs sm:text-sm leading-relaxed" style={{ color: "#ffb4b4" }}>
-                      Failed to generate summary. This can happen on protected pages.
+                      The AI engines are experiencing high traffic right now, so a summary couldn't be generated. Please give it a moment and retry.
                     </p>
                     <button onClick={retryAi} disabled={cooldown > 0}
                       className="mt-2.5 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold"
@@ -1100,11 +1285,18 @@ export default function App() {
                         color: cooldown > 0 ? "#5d7382" : "#c084fc",
                         border: `1px solid ${cooldown > 0 ? "rgba(120,160,180,0.25)" : "rgba(192,132,252,0.45)"}`,
                         backgroundColor: cooldown > 0 ? "rgba(120,160,180,0.06)" : "rgba(192,132,252,0.10)",
+                        cursor: cooldown > 0 ? "not-allowed" : "pointer",
                       }}>
                       <RefreshCw size={13} />
-                      {cooldown > 0 ? `Retry in ${cooldown}s` : "Retry AI Summary"}
+                      {cooldown > 0 ? `Retry available in ${cooldown}s` : "Retry AI Summary"}
                     </button>
                   </div>
+                )}
+
+                {aiState === "idle" && (
+                  <p className="text-xs sm:text-sm pt-2 animate-pulse" style={{ color: "#9fb3bd" }}>
+                    Initializing…
+                  </p>
                 )}
               </div>
             )}
@@ -1224,6 +1416,17 @@ export default function App() {
                   </div>
                 )}
 
+                {!isReg && HUNT_CATS.has(cat) && (
+                  <div className="px-3 py-2 flex flex-wrap items-center gap-1.5" style={{ borderTop: `1px solid ${c}22`, backgroundColor: `${c}08` }}>
+                    <span className="text-[10px] uppercase tracking-wider flex items-center gap-1 mr-1" style={{ color: "#8aa0ad" }}>
+                      <Crosshair size={11} /> Hunt
+                    </span>
+                    {huntKQL(cat, arr) && <CopyBtn label="Defender KQL" copied={copied === `${cat}-hunt-kql`} onClick={() => copyText(huntKQL(cat, arr), `${cat}-hunt-kql`)} color={c} />}
+                    {huntCQL(cat, arr) && <CopyBtn label="CrowdStrike CQL" copied={copied === `${cat}-hunt-cql`} onClick={() => copyText(huntCQL(cat, arr), `${cat}-hunt-cql`)} color={c} />}
+                    {huntSPL(cat, arr) && <CopyBtn label="Splunk SPL" copied={copied === `${cat}-hunt-spl`} onClick={() => copyText(huntSPL(cat, arr), `${cat}-hunt-spl`)} color={c} />}
+                  </div>
+                )}
+
                 <div className="px-3 py-2.5 flex flex-wrap gap-1.5" style={{ borderTop: `1px solid ${c}22` }}>
                   <CopyBtn label="Lines" copied={copied === `${cat}-lines`} onClick={() => copyText(fmt.lines, `${cat}-lines`)} color={c} />
                   <CopyBtn label="Comma" copied={copied === `${cat}-comma`} onClick={() => copyText(fmt.comma, `${cat}-comma`)} color={c} />
@@ -1275,9 +1478,9 @@ function Tab({ children, active, onClick, icon }) {
   );
 }
 
-function ToggleBtn({ children, on, onClick, icon }) {
+function ToggleBtn({ children, on, onClick, icon, title }) {
   return (
-    <button onClick={onClick} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
+    <button onClick={onClick} title={title} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
       style={{
         color: on ? "#04111a" : "#8aa0ad",
         backgroundColor: on ? "#8aa0ad" : "rgba(138,160,173,0.08)",
