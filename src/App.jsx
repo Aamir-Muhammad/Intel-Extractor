@@ -45,7 +45,7 @@ const applyWhitelist = (data) => {
     if (cat === "IPV4") filtered = arr.filter(v => !isPrivateIP(v));
     else if (cat === "IPV6") filtered = arr.filter(v => !WL_IPS6.has(v.toLowerCase()));
     else if (cat === "DOMAIN") filtered = arr.filter(v => !WL_DOMAINS.has(v.toLowerCase()));
-    else if (cat === "FILE") filtered = arr.filter(v => !WL_FILES.has(v.toLowerCase()));
+    else if (cat === "FILE_NAME") filtered = arr.filter(v => !WL_FILES.has(v.toLowerCase()));
     if (filtered.length) out[cat] = filtered;
   });
   return out;
@@ -62,7 +62,7 @@ const TYPE_COLORS = {
   SSDEEP: "#f472b6", IMPHASH: "#f59e0b",
   CVE: "#ff3b3b", BTC: "#f7931a", XMR: "#ff6600", ETH: "#8a92b2",
   ASN: "#2dd4bf", MAC_ADDRESS: "#a3e635",
-  REGISTRY: "#e879f9", FILE: "#94a3b8", FILE_PATH: "#a5b4fc",
+  REGISTRY: "#e879f9", FILE_NAME: "#94a3b8", FILE_PATH: "#a5b4fc",
   MITRE_ATTACK: "#f43f5e", YARA: "#38bdf8",
 };
 const FALLBACK_PALETTE = ["#00e5ff","#00ff9c","#c084fc","#fbbf24","#ff4d6d","#2dd4bf","#a3e635","#7c9cff","#f59e0b","#e879f9"];
@@ -73,6 +73,14 @@ const colorFor = (cat) => {
   for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
   return FALLBACK_PALETTE[h % FALLBACK_PALETTE.length];
 };
+
+// Smart defang: only defangs IOC-like patterns (IPs, URLs, domains) in prose text,
+// leaving normal sentences untouched (no replacing every . with [.])
+const defangProse = (s) =>
+  String(s)
+    .replace(/https?:\/\/[^\s<>"]+/gi, (m) => defang(m))
+    .replace(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d+)?\b/g, (m) => defang(m))
+    .replace(/\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|ru|cn|top|xyz|info|biz|cc|tk|pw|ml|ga|cf|gq|co|me|pro|dev|app|cloud|online|site|live|store|tech|space|fun|icu|one|click)\b/gi, (m) => defang(m));
 
 const defang = (s) =>
   String(s)
@@ -333,12 +341,12 @@ const classify = (t) => {
   if (/^ASN?\d{2,}$/i.test(t)) return ["ASN", t.toUpperCase().replace(/^ASN/, "AS")];
   if (/^(HKLM|HKCU|HKCR|HKU|HKCC|HKEY_[A-Z_]+)[\\/]/i.test(t)) return ["REGISTRY", t];
   if (/\\/.test(t)) return ["FILE_PATH", t];
-  if (FILE_EXT.test(t)) return ["FILE", t];
+  if (FILE_EXT.test(t)) return ["FILE_NAME", t];
   if (/^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(t)) return ["DOMAIN", t.toLowerCase()];
   return null;
 };
 
-const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","YARA","ASN","MAC_ADDRESS","BTC","XMR","ETH","REGISTRY","FILE","FILE_PATH"];
+const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","YARA","ASN","MAC_ADDRESS","BTC","XMR","ETH","REGISTRY","FILE_NAME","FILE_PATH"];
 
 // Fixed on-screen card order: Domain, URL, IPs, all hashes first — then the rest.
 // Static (not count-based) so discarding IOCs never shuffles box positions.
@@ -394,7 +402,7 @@ const extractIocs = (text) => {
     if (!s) continue;
 
     const tokens = s.split(/[\s"'`<>]+/).map(trimTok).filter(Boolean);
-    const hasOtherIoc = tokens.some((t) => { const r = classify(t); return r && r[0] !== "FILE" && r[0] !== "FILE_PATH"; });
+    const hasOtherIoc = tokens.some((t) => { const r = classify(t); return r && r[0] !== "FILE_NAME" && r[0] !== "FILE_PATH"; });
     const extTokens = tokens.filter((t) => FILE_EXT.test(t));
 
     // A filename containing spaces (e.g. "Financial Reports.vbs"). Rejects
@@ -405,7 +413,7 @@ const extractIocs = (text) => {
       tokens.length <= 4 &&
       FILE_EXT.test(s) && !hasOtherIoc && extTokens.length === 1;
 
-    if (spacedFilename) { add("FILE", s); continue; }
+    if (spacedFilename) { add("FILE_NAME", s); continue; }
 
     for (const t of tokens) {
       const r = classify(t);
@@ -426,7 +434,7 @@ const extractIocs = (text) => {
 const API_KEY_MAP = {
   "FILE_HASH_MD5": "MD5", "FILE_HASH_SHA1": "SHA1", "FILE_HASH_SHA256": "SHA256", "FILE_HASH_SHA512": "SHA512",
   "MITRE_ATT&CK": "MITRE_ATTACK", "BITCOIN_ADDRESS": "BTC", "EMAIL_ADDRESS": "EMAIL",
-  "YARA_RULE": "YARA", "FILE_NAME": "FILE",
+  "YARA_RULE": "YARA", "FILE_NAME": "FILE_NAME",
 };
 const normCat = (k) => {
   const u = String(k).toUpperCase().trim();
@@ -579,7 +587,7 @@ const huntKQL = (cat, arr) => {
       return `DeviceFileEvents\n| where SHA1 in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, FolderPath, SHA1, SHA256, InitiatingProcessFileName`;
     case "SHA256":
       return `DeviceFileEvents\n| where SHA256 in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, FolderPath, SHA256, InitiatingProcessFileName\nunion DeviceProcessEvents\n| where SHA256 in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, ProcessCommandLine, SHA256`;
-    case "FILE":
+    case "FILE_NAME":
       return `DeviceFileEvents\n| where FileName in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, FolderPath, SHA256, ActionType, InitiatingProcessFileName\nunion DeviceProcessEvents\n| where FileName in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, ProcessCommandLine, SHA256`;
     case "FILE_PATH":
       return `DeviceFileEvents\n| where ${arr.map((p) => `FolderPath has @"${p.replace(/"/g, '\\"')}"`).join("\n    or ")}\n| project Timestamp, DeviceName, FileName, FolderPath, SHA256, InitiatingProcessFileName`;
@@ -607,7 +615,7 @@ const huntCQL = (cat, arr) => {
       return `#event_simpleName=ProcessRollup2\n| SHA1HashData=in(${kqlList(arr)})\n| table([@timestamp, ComputerName, ImageFileName, CommandLine, SHA1HashData])`;
     case "SHA256":
       return `#event_simpleName=ProcessRollup2\n| SHA256HashData=in(${kqlList(arr)})\n| table([@timestamp, ComputerName, ImageFileName, CommandLine, SHA256HashData])`;
-    case "FILE": case "FILE_PATH":
+    case "FILE_NAME": case "FILE_PATH":
       return `#event_simpleName=ProcessRollup2 OR #event_simpleName=NewExecutableWritten\n| ImageFileName=/(${cqlPat(arr)})/i\n| table([@timestamp, ComputerName, ImageFileName, CommandLine, SHA256HashData])`;
     case "EMAIL":
       return `#event_simpleName=UserLogon OR #event_simpleName=SSOLogin\n| UserPrincipal=/(${cqlPat(arr)})/i\n| table([@timestamp, ComputerName, UserPrincipal, LogonType])`;
@@ -630,7 +638,7 @@ const huntSPL = (cat, arr) => {
       return `index=* (file_hash IN (${quoted}) OR SHA1 IN (${quoted}))\n| table _time, host, file_name, file_path, file_hash, process_name`;
     case "SHA256":
       return `index=* (file_hash IN (${quoted}) OR SHA256 IN (${quoted}))\n| table _time, host, file_name, file_path, file_hash, process_name`;
-    case "FILE": case "FILE_PATH":
+    case "FILE_NAME": case "FILE_PATH":
       return `index=* source="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"\n| search (TargetFilename IN (${arr.map((f) => `"*${f}*"`).join(", ")}) OR Image IN (${arr.map((f) => `"*${f}*"`).join(", ")}))\n| table _time, host, Image, TargetFilename, EventCode`;
     case "EMAIL":
       return `index=* sourcetype=ms:o365:management:activity OR sourcetype=exchange\n| search (SenderAddress IN (${quoted}) OR UserId IN (${quoted}))\n| table _time, SenderAddress, RecipientAddress, Subject, Operation`;
@@ -641,7 +649,7 @@ const huntSPL = (cat, arr) => {
 };
 
 // Categories that support hunt queries
-const HUNT_CATS = new Set(["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","FILE","FILE_PATH","EMAIL","CVE"]);
+const HUNT_CATS = new Set(["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","FILE_NAME","FILE_PATH","EMAIL","CVE"]);
 
 // ============================================================
 //  Page scrape helpers
@@ -760,8 +768,10 @@ export default function App() {
     if (enrichCache[key]) return;
     setEnrichCache((c) => ({ ...c, [key]: { loading: true } }));
     const results = {};
-    const callEnrich = async (api, otxType) => {
-      const body = otxType ? { api, value, otx_type: otxType } : { api, value };
+    const callEnrich = async (api, otxType, otxSection) => {
+      const body = { api, value };
+      if (otxType) body.otx_type = otxType;
+      if (otxSection) body.otx_section = otxSection;
       const r = await fetch(`${WORKER_BASE}/enrich`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -769,6 +779,12 @@ export default function App() {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.json();
     };
+
+    // Generic OTX tags to filter out (low signal)
+    const GENERIC_TAGS = new Set(["malware","threat","ioc","indicator","phishing","spam","suspicious",
+      "malicious","trojan","virus","botnet","c2","cnc","rat","apt","exploit","attack","campaign",
+      "cybercrime","hacking","intel","osint","scan","scanner","scanning"]);
+
     try {
       // ThreatFox — IPs, domains, URLs, hashes
       if (["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512"].includes(cat)) {
@@ -781,7 +797,7 @@ export default function App() {
               threat: d.threat_type_desc || d.threat_type || "—",
               confidence: d.confidence_level,
               first: d.first_seen ? d.first_seen.split(" ")[0] : null,
-              tags: Array.isArray(d.tags) ? d.tags.slice(0, 4).join(", ") : null,
+              tags: Array.isArray(d.tags) ? d.tags.filter((t) => t && !GENERIC_TAGS.has(t.toLowerCase())).slice(0, 4).join(", ") : null,
             };
           }
         } catch {}
@@ -796,7 +812,7 @@ export default function App() {
             results.urlhaus = {
               urls_total: j.urls.length, online, offline,
               status: online > 0 ? "online" : "offline",
-              tags: [...new Set(j.urls.flatMap((u) => u.tags || []))].slice(0, 4).join(", ") || null,
+              tags: [...new Set(j.urls.flatMap((u) => u.tags || []).filter((t) => t && !GENERIC_TAGS.has(t.toLowerCase())))].slice(0, 4).join(", ") || null,
             };
           }
         } catch {}
@@ -809,51 +825,126 @@ export default function App() {
             results.urlhaus = {
               status: j.url_status || "unknown",
               threat: j.threat || null,
-              tags: Array.isArray(j.tags) ? j.tags.slice(0, 4).join(", ") : null,
+              tags: Array.isArray(j.tags) ? j.tags.filter((t) => t && !GENERIC_TAGS.has(t.toLowerCase())).slice(0, 4).join(", ") : null,
               payloads: Array.isArray(j.payloads) ? j.payloads.length : 0,
             };
           }
         } catch {}
       }
-      // MalwareBazaar — hashes only
+      // MalwareBazaar — hashes (includes vendor_intel for detection names)
       if (["MD5","SHA1","SHA256","SHA512"].includes(cat)) {
         try {
           const j = await callEnrich("malwarebazaar");
           if (j.query_status === "ok" && Array.isArray(j.data) && j.data.length > 0) {
             const d = j.data[0];
+            // Extract detection names from vendor_intel (e.g. Trojan.Win32.Agentb.tpwa)
+            let detections = [], mbVerdict = null;
+            if (d.vendor_intel && typeof d.vendor_intel === "object") {
+              Object.entries(d.vendor_intel).forEach(([vendor, info]) => {
+                if (info && typeof info === "object") {
+                  if (info.verdict && info.verdict.toUpperCase() !== "UNKNOWN") mbVerdict = info.verdict;
+                  if (Array.isArray(info.detections)) detections.push(...info.detections);
+                  else if (typeof info.detection === "string") detections.push(info.detection);
+                  // Kaspersky-style: detections array at top level
+                  if (Array.isArray(info.detections)) detections.push(...info.detections);
+                }
+              });
+            }
+            detections = [...new Set(detections.filter(Boolean))].slice(0, 3);
             results.malwarebazaar = {
               family: d.signature || "unknown",
               type: d.file_type || "—",
               size: d.file_size ? `${Math.round(d.file_size / 1024)}KB` : null,
               first: d.first_seen ? d.first_seen.split(" ")[0] : null,
               delivery: d.delivery_method || null,
-              tags: Array.isArray(d.tags) ? d.tags.slice(0, 4).join(", ") : null,
+              tags: Array.isArray(d.tags) ? d.tags.filter((t) => t && !GENERIC_TAGS.has(t.toLowerCase())).slice(0, 4).join(", ") : null,
+              detections: detections.length ? detections.join(" | ") : null,
+              verdict: mbVerdict,
             };
           }
         } catch {}
       }
-      // AlienVault OTX — IPs, domains, hashes, URLs, CVEs
+      // AlienVault OTX — general (pulses, reputation, ASN, country, high-fidelity tags)
       if (["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat)) {
         try {
           const otxTypeMap = { IPV4: "IPv4", IPV6: "IPv6", DOMAIN: "domain", URL: "url", CVE: "cve",
             MD5: "file", SHA1: "file", SHA256: "file", SHA512: "file" };
           const j = await callEnrich("otx", otxTypeMap[cat]);
           if (j && !j.error) {
+            // High-fidelity tags: collect from pulses, filter generics
+            const pulseTags = (j.pulse_info?.pulses || [])
+              .flatMap((p) => [...(p.tags || []), ...(p.targeted_countries || []), p.name || ""])
+              .filter(Boolean);
+            const hiFiTags = [...new Set(pulseTags)]
+              .filter((t) => t.length > 2 && !GENERIC_TAGS.has(t.toLowerCase()))
+              .slice(0, 5);
+
             results.otx = {
               pulses: j.pulse_info?.count ?? 0,
               reputation: j.reputation ?? null,
               country: j.country_name || j.country_code || null,
               asn: j.asn ? `AS${j.asn}` : null,
               asnName: typeof j.as === "string" ? j.as : null,
+              tags: hiFiTags.length ? hiFiTags.join(", ") : null,
+              whitelisted: j.whitelisted ?? null,
             };
           }
         } catch {}
       }
+      // OTX WHOIS for domains — registrant org, country, registration age
+      if (cat === "DOMAIN") {
+        try {
+          const w = await callEnrich("otx", "domain", "whois");
+          if (w && w.data && Array.isArray(w.data) && w.data.length > 0) {
+            const rec = w.data[0];
+            const regOrg = rec.registrant_org || rec.admin_org || null;
+            const regCountry = rec.registrant_country || rec.admin_country || null;
+            const created = rec.creation_date || rec.create_date || null;
+            let ageDays = null;
+            if (created) {
+              const d = new Date(created);
+              if (!isNaN(d)) ageDays = Math.floor((Date.now() - d.getTime()) / 86400000);
+            }
+            if (regOrg || regCountry || ageDays !== null) {
+              results.whois = { org: regOrg, country: regCountry, ageDays };
+            }
+          }
+        } catch {}
+      }
+
+      // ---- Derive combined verdict ----
+      let verdict = "Unknown";
+      if (results.threatfox) verdict = "Malicious";
+      else if (results.urlhaus?.status === "online") verdict = "Malicious";
+      else if (results.malwarebazaar) {
+        verdict = results.malwarebazaar.verdict || "Malicious"; // MalBazaar only indexes malware
+      }
+      else if (results.urlhaus?.status === "offline") verdict = "Suspicious";
+      else if (results.otx?.whitelisted === true) verdict = "Whitelisted";
+      else if ((results.otx?.pulses || 0) > 20) verdict = "Malicious";
+      else if ((results.otx?.pulses || 0) > 5) verdict = "Suspicious";
+      else if ((results.otx?.pulses || 0) > 0) verdict = "Suspicious";
+
+      // OTX-only with 0 pulses → Unknown
+      const hasNonOtx = results.threatfox || results.urlhaus || results.malwarebazaar || results.whois;
+      if (!hasNonOtx && results.otx && results.otx.pulses === 0) verdict = "Unknown";
+
       const hasData = Object.keys(results).length > 0;
+      if (hasData) results._verdict = verdict;
       setEnrichCache((c) => ({ ...c, [key]: { loading: false, data: hasData ? results : null, error: !hasData } }));
     } catch {
       setEnrichCache((c) => ({ ...c, [key]: { loading: false, data: null, error: true } }));
     }
+  };
+
+  // VT link builder (opens VirusTotal page for the IOC — no API key needed)
+  const vtLink = (cat, value) => {
+    const v = encodeURIComponent(value);
+    if (["MD5","SHA1","SHA256","SHA512"].includes(cat)) return `https://www.virustotal.com/gui/file/${v}`;
+    if (cat === "IPV4" || cat === "IPV6") return `https://www.virustotal.com/gui/ip-address/${v}`;
+    if (cat === "DOMAIN") return `https://www.virustotal.com/gui/domain/${v}`;
+    if (cat === "URL") return `https://www.virustotal.com/gui/url/${btoa(value).replace(/=/g, "")}`;
+    return null;
   };
   const [sourceUrl, setSourceUrl] = useState("");
   const [loading, setLoading] = useState(false);
@@ -1367,16 +1458,19 @@ export default function App() {
                   <div className="pt-2">
                     <h2 className="text-sm sm:text-base font-extrabold leading-snug" style={{ color: "#eafcff" }}>{aiSummary.headline}</h2>
                     {aiSummary.executive_summary && (
-                      <p className="text-xs sm:text-sm mt-2 font-semibold leading-relaxed" style={{ color: "#d4e3ea" }}>{defang(aiSummary.executive_summary)}</p>
+                      <>
+                        <p className="text-xs sm:text-sm uppercase tracking-widest font-bold mt-2.5 mb-1" style={{ color: "#00e5ff" }}>Executive Summary</p>
+                        <p className="text-xs sm:text-sm leading-relaxed" style={{ color: "#d4e3ea" }}>{defangProse(aiSummary.executive_summary)}</p>
+                      </>
                     )}
                     <p className="text-[10px] uppercase tracking-widest mt-3 mb-0.5" style={{ color: "#8aa0ad" }}>Technical Analysis</p>
-                    <p className="text-xs sm:text-sm font-medium leading-relaxed" style={{ color: "#b8c9d1" }}>{defang(aiSummary.summary)}</p>
+                    <p className="text-xs sm:text-sm font-medium leading-relaxed" style={{ color: "#b8c9d1" }}>{defangProse(aiSummary.summary)}</p>
                     {aiSummary.recommendations.length > 0 && (
                       <div className="mt-2.5">
                         <p className="text-[10px] uppercase tracking-widest mb-1" style={{ color: "#8aa0ad" }}>Recommendations</p>
                         {aiSummary.recommendations.map((rec, i) => (
                           <div key={i} className="flex items-start gap-1.5 text-xs sm:text-sm py-0.5 leading-relaxed font-medium" style={{ color: "#9fb3bd" }}>
-                            <span className="shrink-0" style={{ color: "#c084fc" }}>▸</span> <span>{defang(rec)}</span>
+                            <span className="shrink-0" style={{ color: "#c084fc" }}>▸</span> <span>{defangProse(rec)}</span>
                           </div>
                         ))}
                       </div>
@@ -1448,6 +1542,13 @@ export default function App() {
                     <span className="font-bold tracking-wide truncate" style={{ color: c, textShadow: `0 0 12px ${c}55` }}>{cat}</span>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
+                    {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat) && (
+                      <button onClick={() => { arr.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 300)); }}
+                        className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
+                        style={{ color: "#2dd4bf", backgroundColor: "rgba(45,212,191,0.10)", border: "1px solid rgba(45,212,191,0.4)" }}>
+                        <Search size={12} /> Enrich All
+                      </button>
+                    )}
                     <button onClick={() => toggleDefang(cat)} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
                       title="Defang this type for safe sharing (display, copy & export)"
                       style={{ color: isDefanged ? "#04111a" : "#ffb84d", backgroundColor: isDefanged ? "#ffb84d" : "rgba(255,184,77,0.10)", border: "1px solid rgba(255,184,77,0.5)" }}>
@@ -1479,11 +1580,19 @@ export default function App() {
                           </span>
                           {enrichable && (
                             <button onClick={() => enrichIOC(cat, arr[i])}
-                              title="Enrich via ThreatFox / URLhaus / MalwareBazaar"
+                              title="Enrich via ThreatFox / URLhaus / MalwareBazaar / OTX"
                               className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
                               style={{ color: enr?.data ? "#00ff9c" : enr?.error ? "#ff6b6b" : "#c084fc" }}>
                               {enr?.loading ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
                             </button>
+                          )}
+                          {vtLink(cat, arr[i]) && (
+                            <a href={vtLink(cat, arr[i])} target="_blank" rel="noreferrer noopener"
+                              title="Open in VirusTotal"
+                              className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
+                              style={{ color: "#4d8af0" }}>
+                              <Globe size={14} />
+                            </a>
                           )}
                           <button onClick={() => copyText(ioc, rowKey)}
                             title="Copy this indicator"
@@ -1500,6 +1609,15 @@ export default function App() {
                         </div>
                         {enr?.data && (
                           <div className="ml-4 mb-1.5 flex flex-wrap gap-1 text-[10px]">
+                            {enr.data._verdict && (
+                              <span className="rounded-full px-2 py-0.5 font-bold" style={{
+                                color: enr.data._verdict === "Malicious" ? "#ff4d6d" : enr.data._verdict === "Suspicious" ? "#fbbf24" : enr.data._verdict === "Whitelisted" ? "#00ff9c" : "#8aa0ad",
+                                backgroundColor: enr.data._verdict === "Malicious" ? "rgba(255,77,109,0.15)" : enr.data._verdict === "Suspicious" ? "rgba(251,191,36,0.15)" : enr.data._verdict === "Whitelisted" ? "rgba(0,255,156,0.15)" : "rgba(138,160,173,0.15)",
+                                border: `1px solid ${enr.data._verdict === "Malicious" ? "rgba(255,77,109,0.4)" : enr.data._verdict === "Suspicious" ? "rgba(251,191,36,0.4)" : enr.data._verdict === "Whitelisted" ? "rgba(0,255,156,0.4)" : "rgba(138,160,173,0.3)"}`,
+                              }}>
+                                {enr.data._verdict === "Malicious" ? "🔴" : enr.data._verdict === "Suspicious" ? "🟡" : enr.data._verdict === "Whitelisted" ? "🟢" : "⚪"} {enr.data._verdict}
+                              </span>
+                            )}
                             {enr.data.threatfox && (
                               <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.12)", border: "1px solid rgba(255,77,109,0.3)" }}>
                                 ThreatFox · {enr.data.threatfox.malware} · {enr.data.threatfox.threat}{enr.data.threatfox.confidence ? ` · ${enr.data.threatfox.confidence}%` : ""}{enr.data.threatfox.tags ? ` · ${enr.data.threatfox.tags}` : ""}
@@ -1511,23 +1629,33 @@ export default function App() {
                                 backgroundColor: enr.data.urlhaus.status === "online" ? "rgba(255,77,109,0.12)" : "rgba(251,191,36,0.12)",
                                 border: `1px solid ${enr.data.urlhaus.status === "online" ? "rgba(255,77,109,0.3)" : "rgba(251,191,36,0.3)"}`,
                               }}>
-                                URLhaus · {enr.data.urlhaus.status === "online" ? "🔴 Online" : "⚫ Offline"}{enr.data.urlhaus.urls_total ? ` · ${enr.data.urlhaus.urls_total} URLs` : ""}{enr.data.urlhaus.online > 0 ? ` (${enr.data.urlhaus.online} active)` : ""}{enr.data.urlhaus.tags ? ` · ${enr.data.urlhaus.tags}` : ""}{enr.data.urlhaus.threat ? ` · ${enr.data.urlhaus.threat}` : ""}{enr.data.urlhaus.payloads ? ` · ${enr.data.urlhaus.payloads} payloads` : ""}
+                                URLhaus · {enr.data.urlhaus.status === "online" ? "🔴 Online" : "⚫ Offline"}{enr.data.urlhaus.urls_total ? ` · ${enr.data.urlhaus.urls_total} URLs` : ""}{enr.data.urlhaus.tags ? ` · ${enr.data.urlhaus.tags}` : ""}
                               </span>
                             )}
                             {enr.data.malwarebazaar && (
                               <span className="rounded-full px-2 py-0.5" style={{ color: "#00e5ff", backgroundColor: "rgba(0,229,255,0.12)", border: "1px solid rgba(0,229,255,0.3)" }}>
-                                MalBazaar · {enr.data.malwarebazaar.family} · {enr.data.malwarebazaar.type}{enr.data.malwarebazaar.size ? ` · ${enr.data.malwarebazaar.size}` : ""}{enr.data.malwarebazaar.delivery ? ` · ${enr.data.malwarebazaar.delivery}` : ""}{enr.data.malwarebazaar.tags ? ` · ${enr.data.malwarebazaar.tags}` : ""}
+                                MalBazaar · {enr.data.malwarebazaar.family} · {enr.data.malwarebazaar.type}{enr.data.malwarebazaar.size ? ` · ${enr.data.malwarebazaar.size}` : ""}{enr.data.malwarebazaar.delivery ? ` · via ${enr.data.malwarebazaar.delivery}` : ""}{enr.data.malwarebazaar.tags ? ` · ${enr.data.malwarebazaar.tags}` : ""}
                               </span>
                             )}
-                            {enr.data.otx && (
+                            {enr.data.malwarebazaar?.detections && (
+                              <span className="rounded-full px-2 py-0.5" style={{ color: "#f59e0b", backgroundColor: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.3)" }}>
+                                {enr.data.malwarebazaar.detections}
+                              </span>
+                            )}
+                            {enr.data.otx && (enr.data.otx.pulses > 0 || Object.keys(enr.data).length > 2) && (
                               <span className="rounded-full px-2 py-0.5" style={{ color: "#2dd4bf", backgroundColor: "rgba(45,212,191,0.12)", border: "1px solid rgba(45,212,191,0.3)" }}>
-                                OTX · {enr.data.otx.pulses} pulses{enr.data.otx.reputation !== null ? ` · rep: ${enr.data.otx.reputation}` : ""}{enr.data.otx.country ? ` · ${enr.data.otx.country}` : ""}{enr.data.otx.asnName ? ` · ${enr.data.otx.asnName}` : enr.data.otx.asn ? ` · ${enr.data.otx.asn}` : ""}
+                                OTX · {enr.data.otx.pulses} pulses{enr.data.otx.country ? ` · ${enr.data.otx.country}` : ""}{enr.data.otx.asnName ? ` · ${enr.data.otx.asnName}` : enr.data.otx.asn ? ` · ${enr.data.otx.asn}` : ""}{enr.data.otx.tags ? ` · ${enr.data.otx.tags}` : ""}
+                              </span>
+                            )}
+                            {enr.data.whois && (
+                              <span className="rounded-full px-2 py-0.5" style={{ color: "#a78bfa", backgroundColor: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)" }}>
+                                WHOIS{enr.data.whois.org ? ` · ${enr.data.whois.org}` : ""}{enr.data.whois.country ? ` · ${enr.data.whois.country}` : ""}{enr.data.whois.ageDays !== null ? ` · ${enr.data.whois.ageDays}d old` : ""}
                               </span>
                             )}
                           </div>
                         )}
                         {enr && !enr.loading && !enr.data && enr.error && (
-                          <p className="ml-4 mb-1 text-[10px]" style={{ color: "#5d7382" }}>Unknown — not found in threat databases</p>
+                          <p className="ml-4 mb-1 text-[10px]" style={{ color: "#5d7382" }}>⚪ Unknown — not found in threat databases</p>
                         )}
                       </div>
                     );
