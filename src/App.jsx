@@ -1529,7 +1529,7 @@ export default function App() {
         )}
 
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {entries.map(([cat, arr]) => {
             const c = colorFor(cat);
             const isDefanged = defangAll || !!defangMap[cat];
@@ -1568,7 +1568,7 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="px-4 py-2 overflow-y-auto" style={{ maxHeight: 260 }}>
+                <div className="px-4 py-2 overflow-y-auto flex-1" style={{ maxHeight: 260 }}>
                   {shown.map((ioc, i) => {
                     const huntReady = isReg && huntReadySet.has(arr[i]);
                     const rowKey = `${cat}-i-${i}`;
