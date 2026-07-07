@@ -588,7 +588,7 @@ const huntKQL = (cat, arr) => {
     case "SHA256":
       return `DeviceFileEvents\n| where SHA256 in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, FolderPath, SHA256, InitiatingProcessFileName\nunion DeviceProcessEvents\n| where SHA256 in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, ProcessCommandLine, SHA256`;
     case "FILE_NAME":
-      return `DeviceFileEvents\n| where FileName in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, FolderPath, SHA256, ActionType, InitiatingProcessFileName\nunion DeviceProcessEvents\n| where FileName in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, ProcessCommandLine, SHA256`;
+      return `DeviceFileEvents\n| where FileName in~ (${kqlList(arr)})\n| project-reorder Timestamp, DeviceName, FileName, FolderPath, SHA256, ActionType, InitiatingProcessFileName\nunion DeviceProcessEvents\n| where FileName in~ (${kqlList(arr)}) or ProcessCommandLine has_any (${kqlList(arr)})\n| project-reorder Timestamp, DeviceName, FileName, ProcessCommandLine, SHA256`;
     case "FILE_PATH":
       return `DeviceFileEvents\n| where ${arr.map((p) => `FolderPath has @"${p.replace(/"/g, '\\"')}"`).join("\n    or ")}\n| project Timestamp, DeviceName, FileName, FolderPath, SHA256, InitiatingProcessFileName`;
     case "EMAIL":
@@ -615,7 +615,9 @@ const huntCQL = (cat, arr) => {
       return `#event_simpleName=ProcessRollup2\n| SHA1HashData=in(${kqlList(arr)})\n| table([@timestamp, ComputerName, ImageFileName, CommandLine, SHA1HashData])`;
     case "SHA256":
       return `#event_simpleName=ProcessRollup2\n| SHA256HashData=in(${kqlList(arr)})\n| table([@timestamp, ComputerName, ImageFileName, CommandLine, SHA256HashData])`;
-    case "FILE_NAME": case "FILE_PATH":
+    case "FILE_NAME":
+      return `#event_simpleName=/ProcessRollup2|Written/iF\n|case{\n\t#event_simpleName=/Written/iF| FileName=/(${cqlPat(arr)})/iF |HuntObject:= FileName |HuntLogic:= "File written to disk";\n\t#event_simpleName=/ProcessRollup2/iF| CommandLine=/(${cqlPat(arr)})/iF |HuntObject:= CommandLine |HuntLogic:= "File / Payload execution via commandline";\n}\n|groupBy([@timetamp,ComputerName,UserName,HuntLogic,HuntObject,ContextBaseFileName,IsOnRemovableDisk,ZoneIdentifier,ParentBaseFileName])`;
+    case "FILE_PATH":
       return `#event_simpleName=ProcessRollup2 OR #event_simpleName=NewExecutableWritten\n| ImageFileName=/(${cqlPat(arr)})/i\n| table([@timestamp, ComputerName, ImageFileName, CommandLine, SHA256HashData])`;
     case "EMAIL":
       return `#event_simpleName=UserLogon OR #event_simpleName=SSOLogin\n| UserPrincipal=/(${cqlPat(arr)})/i\n| table([@timestamp, ComputerName, UserPrincipal, LogonType])`;
@@ -1291,6 +1293,7 @@ export default function App() {
           </div>
         </div>
 
+        {total > 0 && (
         <div className="rounded-xl p-3 mb-4 flex flex-wrap items-center gap-2" style={panel}>
           {total > 0 && (
             <div className="flex items-baseline gap-2 rounded-lg px-3 py-1.5"
@@ -1302,13 +1305,10 @@ export default function App() {
               <span className="text-lg font-extrabold tabular-nums leading-none" style={{ color: "#00e5ff", textShadow: "0 0 12px rgba(0,229,255,0.5)" }}>{entries.length}</span>
             </div>
           )}
-          <span className="text-xs uppercase tracking-widest mr-1" style={{ color: "#7f95a3" }}>Export all</span>
-          <GButton onClick={exportAllCSV} disabled={!total} color="#00ff9c" icon={<Download size={15} />}>All IOCs · CSV</GButton>
-          <GButton onClick={exportAllXLSX} disabled={!total} color="#00e5ff" icon={<Download size={15} />}>All IOCs · XLSX</GButton>
           {total > 0 && (
             <button onClick={() => setDefangAll((v) => !v)}
               title="Defang every IOC type at once — applies to display, all copy buttons and all CSV/XLSX exports"
-              className="ml-auto flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold"
+              className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold"
               style={{
                 color: defangAll ? "#04111a" : "#ffb84d",
                 backgroundColor: defangAll ? "#ffb84d" : "rgba(255,184,77,0.10)",
@@ -1318,7 +1318,14 @@ export default function App() {
               <ShieldOff size={13} /> {defangAll ? "Defang All: On" : "Defang All: Off"}
             </button>
           )}
+          {total > 0 && (
+            <div className="ml-auto flex items-center gap-2">
+              <GButton onClick={exportAllCSV} disabled={!total} color="#00ff9c" icon={<Download size={15} />}>All IOCs · CSV</GButton>
+              <GButton onClick={exportAllXLSX} disabled={!total} color="#00e5ff" icon={<Download size={15} />}>All IOCs · XLSX</GButton>
+            </div>
+          )}
         </div>
+        )}
 
         <div className="rounded-xl p-4 mb-5" style={panel}>
           <div className="flex flex-wrap gap-1 mb-3">
@@ -1463,11 +1470,11 @@ export default function App() {
                         <p className="text-xs sm:text-sm leading-relaxed" style={{ color: "#d4e3ea" }}>{defangProse(aiSummary.executive_summary)}</p>
                       </>
                     )}
-                    <p className="text-[10px] uppercase tracking-widest mt-3 mb-0.5" style={{ color: "#8aa0ad" }}>Technical Analysis</p>
+                    <p className="text-xs sm:text-sm uppercase tracking-widest font-bold mt-3 mb-1" style={{ color: "#00e5ff" }}>Technical Analysis</p>
                     <p className="text-xs sm:text-sm font-medium leading-relaxed" style={{ color: "#b8c9d1" }}>{defangProse(aiSummary.summary)}</p>
                     {aiSummary.recommendations.length > 0 && (
                       <div className="mt-2.5">
-                        <p className="text-[10px] uppercase tracking-widest mb-1" style={{ color: "#8aa0ad" }}>Recommendations</p>
+                        <p className="text-xs sm:text-sm uppercase tracking-widest font-bold mb-1" style={{ color: "#00e5ff" }}>Recommendations</p>
                         {aiSummary.recommendations.map((rec, i) => (
                           <div key={i} className="flex items-start gap-1.5 text-xs sm:text-sm py-0.5 leading-relaxed font-medium" style={{ color: "#9fb3bd" }}>
                             <span className="shrink-0" style={{ color: "#c084fc" }}>▸</span> <span>{defangProse(rec)}</span>
@@ -1522,7 +1529,7 @@ export default function App() {
         )}
 
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
           {entries.map(([cat, arr]) => {
             const c = colorFor(cat);
             const isDefanged = defangAll || !!defangMap[cat];
