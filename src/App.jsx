@@ -757,13 +757,14 @@ export default function App() {
   // ---- IOC Enrichment: ThreatFox + URLhaus + MalwareBazaar via Worker proxy ----
   const enrichIOC = async (cat, value) => {
     const key = `${cat}::${value}`;
-    if (enrichCache[key]) return; // already enriched or in-progress
+    if (enrichCache[key]) return;
     setEnrichCache((c) => ({ ...c, [key]: { loading: true } }));
     const results = {};
-    const callEnrich = async (api) => {
+    const callEnrich = async (api, otxType) => {
+      const body = otxType ? { api, value, otx_type: otxType } : { api, value };
       const r = await fetch(`${WORKER_BASE}/enrich`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api, value }),
+        body: JSON.stringify(body),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.json();
@@ -775,24 +776,42 @@ export default function App() {
           const j = await callEnrich("threatfox");
           if (j.query_status === "ok" && Array.isArray(j.data) && j.data.length > 0) {
             const d = j.data[0];
-            results.threatfox = { malware: d.malware_printable || d.malware, threat: d.threat_type_desc || d.threat_type, confidence: d.confidence_level, first: d.first_seen };
+            results.threatfox = {
+              malware: d.malware_printable || d.malware || "—",
+              threat: d.threat_type_desc || d.threat_type || "—",
+              confidence: d.confidence_level,
+              first: d.first_seen ? d.first_seen.split(" ")[0] : null,
+              tags: Array.isArray(d.tags) ? d.tags.slice(0, 4).join(", ") : null,
+            };
           }
         } catch {}
       }
-      // URLhaus — IPs, domains (host lookup), URLs (url lookup)
+      // URLhaus — host lookup (IPs, domains)
       if (["IPV4","DOMAIN"].includes(cat)) {
         try {
           const j = await callEnrich("urlhaus_host");
-          if (j.query_status === "ok" || j.query_status === "no_results") {
-            results.urlhaus = { urls_total: j.urls?.length || 0, status: j.query_status === "ok" ? "listed" : "clean" };
+          if (j.query_status === "ok" && j.urls && j.urls.length > 0) {
+            const online = j.urls.filter((u) => u.url_status === "online").length;
+            const offline = j.urls.filter((u) => u.url_status === "offline").length;
+            results.urlhaus = {
+              urls_total: j.urls.length, online, offline,
+              status: online > 0 ? "online" : "offline",
+              tags: [...new Set(j.urls.flatMap((u) => u.tags || []))].slice(0, 4).join(", ") || null,
+            };
           }
         } catch {}
       }
+      // URLhaus — URL lookup
       if (cat === "URL") {
         try {
           const j = await callEnrich("urlhaus_url");
           if (j.query_status !== "no_results" && j.id) {
-            results.urlhaus = { status: j.threat || "listed", tags: (j.tags || []).join(", ") };
+            results.urlhaus = {
+              status: j.url_status || "unknown",
+              threat: j.threat || null,
+              tags: Array.isArray(j.tags) ? j.tags.slice(0, 4).join(", ") : null,
+              payloads: Array.isArray(j.payloads) ? j.payloads.length : 0,
+            };
           }
         } catch {}
       }
@@ -802,7 +821,31 @@ export default function App() {
           const j = await callEnrich("malwarebazaar");
           if (j.query_status === "ok" && Array.isArray(j.data) && j.data.length > 0) {
             const d = j.data[0];
-            results.malwarebazaar = { family: d.signature || "unknown", type: d.file_type, size: d.file_size, first: d.first_seen };
+            results.malwarebazaar = {
+              family: d.signature || "unknown",
+              type: d.file_type || "—",
+              size: d.file_size ? `${Math.round(d.file_size / 1024)}KB` : null,
+              first: d.first_seen ? d.first_seen.split(" ")[0] : null,
+              delivery: d.delivery_method || null,
+              tags: Array.isArray(d.tags) ? d.tags.slice(0, 4).join(", ") : null,
+            };
+          }
+        } catch {}
+      }
+      // AlienVault OTX — IPs, domains, hashes, URLs, CVEs
+      if (["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat)) {
+        try {
+          const otxTypeMap = { IPV4: "IPv4", IPV6: "IPv6", DOMAIN: "domain", URL: "url", CVE: "cve",
+            MD5: "file", SHA1: "file", SHA256: "file", SHA512: "file" };
+          const j = await callEnrich("otx", otxTypeMap[cat]);
+          if (j && !j.error) {
+            results.otx = {
+              pulses: j.pulse_info?.count ?? 0,
+              reputation: j.reputation ?? null,
+              country: j.country_name || j.country_code || null,
+              asn: j.asn ? `AS${j.asn}` : null,
+              asnName: typeof j.as === "string" ? j.as : null,
+            };
           }
         } catch {}
       }
@@ -1424,7 +1467,7 @@ export default function App() {
                     const isCopied = copied === rowKey;
                     const eKey = `${cat}::${arr[i]}`;
                     const enr = enrichCache[eKey];
-                    const enrichable = ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512"].includes(cat);
+                    const enrichable = ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat);
                     return (
                       <div key={i}>
                         <div className="group flex items-start gap-1.5 py-0.5 leading-relaxed"
@@ -1459,23 +1502,32 @@ export default function App() {
                           <div className="ml-4 mb-1.5 flex flex-wrap gap-1 text-[10px]">
                             {enr.data.threatfox && (
                               <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.12)", border: "1px solid rgba(255,77,109,0.3)" }}>
-                                ThreatFox: {enr.data.threatfox.malware} · {enr.data.threatfox.threat}
+                                ThreatFox · {enr.data.threatfox.malware} · {enr.data.threatfox.threat}{enr.data.threatfox.confidence ? ` · ${enr.data.threatfox.confidence}%` : ""}{enr.data.threatfox.tags ? ` · ${enr.data.threatfox.tags}` : ""}
                               </span>
                             )}
                             {enr.data.urlhaus && (
-                              <span className="rounded-full px-2 py-0.5" style={{ color: "#fbbf24", backgroundColor: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.3)" }}>
-                                URLhaus: {enr.data.urlhaus.status}{enr.data.urlhaus.urls_total ? ` · ${enr.data.urlhaus.urls_total} URLs` : ""}{enr.data.urlhaus.tags ? ` · ${enr.data.urlhaus.tags}` : ""}
+                              <span className="rounded-full px-2 py-0.5" style={{
+                                color: enr.data.urlhaus.status === "online" ? "#ff4d6d" : "#fbbf24",
+                                backgroundColor: enr.data.urlhaus.status === "online" ? "rgba(255,77,109,0.12)" : "rgba(251,191,36,0.12)",
+                                border: `1px solid ${enr.data.urlhaus.status === "online" ? "rgba(255,77,109,0.3)" : "rgba(251,191,36,0.3)"}`,
+                              }}>
+                                URLhaus · {enr.data.urlhaus.status === "online" ? "🔴 Online" : "⚫ Offline"}{enr.data.urlhaus.urls_total ? ` · ${enr.data.urlhaus.urls_total} URLs` : ""}{enr.data.urlhaus.online > 0 ? ` (${enr.data.urlhaus.online} active)` : ""}{enr.data.urlhaus.tags ? ` · ${enr.data.urlhaus.tags}` : ""}{enr.data.urlhaus.threat ? ` · ${enr.data.urlhaus.threat}` : ""}{enr.data.urlhaus.payloads ? ` · ${enr.data.urlhaus.payloads} payloads` : ""}
                               </span>
                             )}
                             {enr.data.malwarebazaar && (
                               <span className="rounded-full px-2 py-0.5" style={{ color: "#00e5ff", backgroundColor: "rgba(0,229,255,0.12)", border: "1px solid rgba(0,229,255,0.3)" }}>
-                                MalBazaar: {enr.data.malwarebazaar.family} · {enr.data.malwarebazaar.type}
+                                MalBazaar · {enr.data.malwarebazaar.family} · {enr.data.malwarebazaar.type}{enr.data.malwarebazaar.size ? ` · ${enr.data.malwarebazaar.size}` : ""}{enr.data.malwarebazaar.delivery ? ` · ${enr.data.malwarebazaar.delivery}` : ""}{enr.data.malwarebazaar.tags ? ` · ${enr.data.malwarebazaar.tags}` : ""}
+                              </span>
+                            )}
+                            {enr.data.otx && (
+                              <span className="rounded-full px-2 py-0.5" style={{ color: "#2dd4bf", backgroundColor: "rgba(45,212,191,0.12)", border: "1px solid rgba(45,212,191,0.3)" }}>
+                                OTX · {enr.data.otx.pulses} pulses{enr.data.otx.reputation !== null ? ` · rep: ${enr.data.otx.reputation}` : ""}{enr.data.otx.country ? ` · ${enr.data.otx.country}` : ""}{enr.data.otx.asnName ? ` · ${enr.data.otx.asnName}` : enr.data.otx.asn ? ` · ${enr.data.otx.asn}` : ""}
                               </span>
                             )}
                           </div>
                         )}
                         {enr && !enr.loading && !enr.data && enr.error && (
-                          <p className="ml-4 mb-1 text-[10px]" style={{ color: "#5d7382" }}>No threat data found</p>
+                          <p className="ml-4 mb-1 text-[10px]" style={{ color: "#5d7382" }}>Unknown — not found in threat databases</p>
                         )}
                       </div>
                     );
