@@ -574,19 +574,26 @@ const kqlList = (arr) => arr.map((v) => `"${v.replace(/"/g, '\\"')}"`).join(", "
 const cqlPat = (arr) => arr.map((v) => reEsc(v)).join("|");
 
 const huntKQL = (cat, arr) => {
+  const dyn = `dynamic([${kqlList(arr)}])`;
   switch (cat) {
     case "IPV4": case "IPV6":
       return `DeviceNetworkEvents\n| where RemoteIP in (${kqlList(arr)})\n| project Timestamp, DeviceName, RemoteIP, RemotePort, RemoteUrl, InitiatingProcessFileName, InitiatingProcessCommandLine`;
     case "DOMAIN":
-      return `let domains = dynamic([${kqlList(arr)}]);\nDeviceNetworkEvents\n| where RemoteUrl has_any (domains)\n| project Timestamp, DeviceName, RemoteUrl, RemoteIP, RemotePort, InitiatingProcessFileName`;
-    case "URL":
-      return `DeviceNetworkEvents\n| where RemoteUrl has_any (${kqlList(arr)})\n| project Timestamp, DeviceName, RemoteUrl, RemoteIP, InitiatingProcessFileName, InitiatingProcessCommandLine`;
+      return `let IOCs=${dyn};\nDeviceNetworkEvents\n| where RemoteUrl has_any (IOCs) or AdditionalFields has_any (IOCs)\n| where ActionType has_any (\n    "HttpConnectionInspected",\n    "SslConnectionInspected",\n    "DnsConnectionInspected",\n    "ConnectionSuccess",\n    "ConnectionFailed"\n  )\n| extend AF = parse_json(AdditionalFields)\n| extend Host = case(\n    ActionType == "HttpConnectionInspected",  tostring(AF["host"]),\n    ActionType == "SslConnectionInspected",   tostring(AF["server_name"]),\n    ActionType == "DnsConnectionInspected",   tostring(AF["query"]),\n    ""\n  )\n| extend URI = case(\n      ActionType == "HttpConnectionInspected",   tostring(AF["uri"]),\n    ""\n  )\n| extend HTTPMethod = case(\n      ActionType == "HttpConnectionInspected",   tostring(AF["method"]),\n    ""\n  )\n| extend Direction = case(\n      ActionType == "HttpConnectionInspected",   tostring(AF["direction"]),\n    ""\n  )\n|extend RemoteUrl=coalesce(RemoteUrl,Host)\n| summarize AntionType=make_set(ActionType),URI=make_set(URI),FirstTime=min(Timestamp), LastTime=max(Timestamp),Direction=make_set(Direction),HTTPMethod=make_set(HTTPMethod) by DeviceName,RemoteUrl`;
+    case "URL": {
+      const hostExtract = arr.map((u) => { try { const h = u.replace(/^https?:\/\//i, "").split("/")[0].split(":")[0]; return h; } catch { return u; } });
+      const hosts = [...new Set(hostExtract)];
+      const hostsDyn = `dynamic([${hosts.map((h) => `"${h}"`).join(", ")}])`;
+      return `let IOCs = ${dyn};\nlet IOC_Hosts = ${hostsDyn};\nDeviceNetworkEvents\n| where Timestamp > ago(30d)\n| where ActionType has_any (\n    "HttpConnectionInspected",\n    "SslConnectionInspected",\n    "DnsConnectionInspected",\n    "ConnectionSuccess",\n    "ConnectionFailed"\n  )\n| where RemoteUrl has_any (IOC_Hosts)\n    or AdditionalFields has_any (IOC_Hosts)\n| extend AF = parse_json(AdditionalFields)\n| extend\n    Host       = case(\n        ActionType == "HttpConnectionInspected", tostring(AF["host"]),\n        ActionType == "SslConnectionInspected",  tostring(AF["server_name"]),\n        ActionType == "DnsConnectionInspected",  tostring(AF["query"]),\n        ""),\n    URI        = tostring(AF["uri"]),\n    HTTPMethod = tostring(AF["method"]),\n    Direction  = tostring(AF["direction"])\n| extend ReconstructedURL = strcat(Host, URI)\n| extend EffectiveURL = iff(isnotempty(RemoteUrl), RemoteUrl, ReconstructedURL)\n| where EffectiveURL has_any (IOCs)\n    or (EffectiveURL has_any (IOC_Hosts))\n| project\n    Timestamp,\n    DeviceName,\n    AccountName              = InitiatingProcessAccountName,\n    ActionType,\n    EffectiveURL,\n    ReconstructedURL,\n    Host,\n    URI,\n    HTTPMethod,\n    Direction,\n    RemoteIP,\n    RemotePort,\n    InitiatingProcessFileName,\n    InitiatingProcessCommandLine`;
+    }
     case "MD5":
       return `DeviceFileEvents\n| where MD5 in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, FolderPath, MD5, SHA256, InitiatingProcessFileName\nunion DeviceProcessEvents\n| where MD5 in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, ProcessCommandLine, MD5`;
     case "SHA1":
       return `DeviceFileEvents\n| where SHA1 in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, FolderPath, SHA1, SHA256, InitiatingProcessFileName`;
-    case "SHA256":
-      return `DeviceFileEvents\n| where SHA256 in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, FolderPath, SHA256, InitiatingProcessFileName\nunion DeviceProcessEvents\n| where SHA256 in~ (${kqlList(arr)})\n| project Timestamp, DeviceName, FileName, ProcessCommandLine, SHA256`;
+    case "SHA256": {
+      const sha = `dynamic([${kqlList(arr)}])`;
+      return `let SHA256_IOCs = ${sha};\nlet ProcEvents =\n    DeviceProcessEvents\n    | where Timestamp > ago(30d)\n    | where SHA256 in~ (SHA256_IOCs) or InitiatingProcessSHA256 in~ (SHA256_IOCs)\n    | extend\n        MatchedHash  = iff(SHA256 in~ (SHA256_IOCs), SHA256, InitiatingProcessSHA256),\n        MatchedField = iff(SHA256 in~ (SHA256_IOCs), "SHA256", "InitiatingProcessSHA256"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName, " > ", FileName)\n    | project Timestamp, DeviceName, AccountName, SourceTable="DeviceProcessEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = ProcessCommandLine;\nlet FileEvents =\n    DeviceFileEvents\n    | where Timestamp > ago(30d)\n    | where SHA256 in~ (SHA256_IOCs) or InitiatingProcessSHA256 in~ (SHA256_IOCs)\n    | extend\n        MatchedHash  = iff(SHA256 in~ (SHA256_IOCs), SHA256, InitiatingProcessSHA256),\n        MatchedField = iff(SHA256 in~ (SHA256_IOCs), "SHA256", "InitiatingProcessSHA256"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceFileEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet ImageLoadEvents =\n    DeviceImageLoadEvents\n    | where Timestamp > ago(30d)\n    | where SHA256 in~ (SHA256_IOCs) or InitiatingProcessSHA256 in~ (SHA256_IOCs)\n    | extend\n        MatchedHash  = iff(SHA256 in~ (SHA256_IOCs), SHA256, InitiatingProcessSHA256),\n        MatchedField = iff(SHA256 in~ (SHA256_IOCs), "SHA256", "InitiatingProcessSHA256"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceImageLoadEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet NetworkEvents =\n    DeviceNetworkEvents\n    | where Timestamp > ago(30d)\n    | where InitiatingProcessSHA256 in~ (SHA256_IOCs)\n    | extend\n        MatchedHash  = InitiatingProcessSHA256,\n        MatchedField = "InitiatingProcessSHA256",\n        Detail       = strcat(RemoteIP, ":", tostring(RemotePort), " ", RemoteUrl),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceNetworkEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet RegistryEvents =\n    DeviceRegistryEvents\n    | where Timestamp > ago(30d)\n    | where InitiatingProcessSHA256 in~ (SHA256_IOCs)\n    | extend\n        MatchedHash  = InitiatingProcessSHA256,\n        MatchedField = "InitiatingProcessSHA256",\n        Detail       = strcat(RegistryKey, " \\\\ ", RegistryValueName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceRegistryEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet LogonEvents =\n    DeviceLogonEvents\n    | where Timestamp > ago(30d)\n    | where InitiatingProcessSHA256 in~ (SHA256_IOCs)\n    | extend\n        MatchedHash  = InitiatingProcessSHA256,\n        MatchedField = "InitiatingProcessSHA256",\n        Detail       = strcat(LogonType, " | ", RemoteIP),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, AccountName, SourceTable="DeviceLogonEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet MiscEvents =\n    DeviceEvents\n    | where Timestamp > ago(30d)\n    | where InitiatingProcessSHA256 in~ (SHA256_IOCs)\n    | extend\n        MatchedHash  = InitiatingProcessSHA256,\n        MatchedField = "InitiatingProcessSHA256",\n        Detail       = ActionType,\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, AccountName, SourceTable="DeviceEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nunion\n    ProcEvents,\n    FileEvents,\n    ImageLoadEvents,\n    NetworkEvents,\n    RegistryEvents,\n    LogonEvents,\n    MiscEvents\n| summarize\n    FirstSeen    = min(Timestamp),\n    LastSeen     = max(Timestamp),\n    EventCount   = count(),\n    Accounts     = make_set(AccountName),\n    Details      = make_set(Detail),\n    ProcessTrees = make_set(ProcessTree),\n    CommandLines = make_set(CommandLine)\n    by DeviceName, SourceTable, MatchedHash, MatchedField\n| sort by FirstSeen desc`;
+    }
     case "FILE_NAME":
       return `DeviceFileEvents\n| where FileName in~ (${kqlList(arr)})\n| project-reorder Timestamp, DeviceName, FileName, FolderPath, SHA256, ActionType, InitiatingProcessFileName\nunion DeviceProcessEvents\n| where FileName in~ (${kqlList(arr)}) or ProcessCommandLine has_any (${kqlList(arr)})\n| project-reorder Timestamp, DeviceName, FileName, ProcessCommandLine, SHA256`;
     case "FILE_PATH":
@@ -600,27 +607,29 @@ const huntKQL = (cat, arr) => {
 };
 
 const huntCQL = (cat, arr) => {
+  const cqlIn = (field) => `in(field="${field}", values=[${arr.map((v) => `"${v}"`).join(",")}], ignoreCase=true)`;
+  const cqlInWild = (field) => `in(field="${field}", values=[${arr.map((v) => `"*${v}*"`).join(",")}], ignoreCase=true)`;
   switch (cat) {
     case "IPV4":
-      return `#event_simpleName=NetworkConnectIP4\n| RemoteAddressIP4=in(${kqlList(arr)})\n| table([@timestamp, ComputerName, RemoteAddressIP4, RemotePort, ImageFileName])`;
+      return `#event_simpleName=NetworkConnectIP4\n| ${cqlIn("RemoteAddressIP4")}\n| groupBy([ComputerName, RemoteAddressIP4, RemotePort, ImageFileName], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
     case "IPV6":
-      return `#event_simpleName=NetworkConnectIP6\n| RemoteAddressIP6=in(${kqlList(arr)})\n| table([@timestamp, ComputerName, RemoteAddressIP6, RemotePort, ImageFileName])`;
+      return `#event_simpleName=NetworkConnectIP6\n| ${cqlIn("RemoteAddressIP6")}\n| groupBy([ComputerName, RemoteAddressIP6, RemotePort, ImageFileName], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
     case "DOMAIN":
-      return `#event_simpleName=DnsRequest\n| DomainName=/(${cqlPat(arr)})$/i\n| table([@timestamp, ComputerName, DomainName, RespondingDnsServer, ImageFileName])`;
+      return `#event_simpleName=DnsRequest\n| ${cqlInWild("DomainName")}\n| groupBy([ComputerName, DomainName, RespondingDnsServer, ImageFileName], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
     case "URL":
-      return `#event_simpleName=DnsRequest OR #event_simpleName=HttpRequest\n| /(${cqlPat(arr)})/i\n| table([@timestamp, ComputerName, DomainName, HttpUrl, ImageFileName])`;
+      return `#event_simpleName=DnsRequest OR #event_simpleName=HttpRequest\n| /(${cqlPat(arr)})/i\n| groupBy([ComputerName, DomainName, HttpUrl, ImageFileName], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
     case "MD5":
-      return `#event_simpleName=ProcessRollup2\n| MD5HashData=in(${kqlList(arr)})\n| table([@timestamp, ComputerName, ImageFileName, CommandLine, MD5HashData, SHA256HashData])`;
+      return `#event_simpleName=ProcessRollup2\n| ${cqlIn("MD5HashData")}\n| groupBy([ComputerName, ImageFileName, CommandLine, MD5HashData, SHA256HashData], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
     case "SHA1":
-      return `#event_simpleName=ProcessRollup2\n| SHA1HashData=in(${kqlList(arr)})\n| table([@timestamp, ComputerName, ImageFileName, CommandLine, SHA1HashData])`;
+      return `#event_simpleName=ProcessRollup2\n| ${cqlIn("SHA1HashData")}\n| groupBy([ComputerName, ImageFileName, CommandLine, SHA1HashData], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
     case "SHA256":
-      return `#event_simpleName=ProcessRollup2\n| SHA256HashData=in(${kqlList(arr)})\n| table([@timestamp, ComputerName, ImageFileName, CommandLine, SHA256HashData])`;
+      return `#event_simpleName=ProcessRollup2\n| ${cqlIn("SHA256HashData")}\n| groupBy([ComputerName, ImageFileName, CommandLine, SHA256HashData], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
     case "FILE_NAME":
-      return `#event_simpleName=/ProcessRollup2|Written/iF\n|case{\n\t#event_simpleName=/Written/iF| FileName=/(${cqlPat(arr)})/iF |HuntObject:= FileName |HuntLogic:= "File written to disk";\n\t#event_simpleName=/ProcessRollup2/iF| CommandLine=/(${cqlPat(arr)})/iF |HuntObject:= CommandLine |HuntLogic:= "File / Payload execution via commandline";\n}\n|groupBy([@timetamp,ComputerName,UserName,HuntLogic,HuntObject,ContextBaseFileName,IsOnRemovableDisk,ZoneIdentifier,ParentBaseFileName])`;
+      return `#event_simpleName=/ProcessRollup2|Written/iF\n|case{\n\t#event_simpleName=/Written/iF| FileName=/(${cqlPat(arr)})/iF |HuntObject:= FileName |HuntLogic:= "File written to disk";\n\t#event_simpleName=/ProcessRollup2/iF| CommandLine=/(${cqlPat(arr)})/iF |HuntObject:= CommandLine |HuntLogic:= "File / Payload execution via commandline";\n}\n|groupBy([@timetamp,ComputerName,UserName,HuntLogic,HuntObject,ContextBaseFileName,IsOnRemovableDisk,ZoneIdentifier,ParentBaseFileName], limit=max)`;
     case "FILE_PATH":
-      return `#event_simpleName=ProcessRollup2 OR #event_simpleName=NewExecutableWritten\n| ImageFileName=/(${cqlPat(arr)})/i\n| table([@timestamp, ComputerName, ImageFileName, CommandLine, SHA256HashData])`;
+      return `#event_simpleName=ProcessRollup2 OR #event_simpleName=NewExecutableWritten\n| ImageFileName=/(${cqlPat(arr)})/i\n| groupBy([ComputerName, ImageFileName, CommandLine, SHA256HashData], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
     case "EMAIL":
-      return `#event_simpleName=UserLogon OR #event_simpleName=SSOLogin\n| UserPrincipal=/(${cqlPat(arr)})/i\n| table([@timestamp, ComputerName, UserPrincipal, LogonType])`;
+      return `#event_simpleName=UserLogon OR #event_simpleName=SSOLogin\n| ${cqlIn("UserPrincipal")}\n| groupBy([ComputerName, UserPrincipal, LogonType], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
     default: return null;
   }
 };
@@ -785,7 +794,9 @@ export default function App() {
     // Generic OTX tags to filter out (low signal)
     const GENERIC_TAGS = new Set(["malware","threat","ioc","indicator","phishing","spam","suspicious",
       "malicious","trojan","virus","botnet","c2","cnc","rat","apt","exploit","attack","campaign",
-      "cybercrime","hacking","intel","osint","scan","scanner","scanning"]);
+      "cybercrime","hacking","intel","osint","scan","scanner","scanning",
+      "nothreats","no_threats","clean","safe","benign","legitimate","whitelisted","trusted",
+      "harmless","undetected","not_malicious","false_positive","good","allowed"]);
 
     try {
       // ThreatFox — IPs, domains, URLs, hashes
@@ -1662,7 +1673,7 @@ export default function App() {
                           </div>
                         )}
                         {enr && !enr.loading && !enr.data && enr.error && (
-                          <p className="ml-4 mb-1 text-[10px]" style={{ color: "#5d7382" }}>⚪ Unknown — not found in threat databases</p>
+                          <p className="ml-4 mb-1 text-[10px]" style={{ color: "#5d7382" }}>⚪ Unknown to our integrated Engines, CHECK ON VIRUSTOTAL</p>
                         )}
                       </div>
                     );
