@@ -787,7 +787,10 @@ export default function App() {
         body: JSON.stringify(body),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return r.json();
+      const text = await r.text();
+      try { return JSON.parse(text); } catch {
+        throw new Error(text.slice(0, 100)); // Surface the raw error (e.g. "ERROR: invalid auth key")
+      }
     };
 
     // Generic OTX tags to filter out (low signal)
