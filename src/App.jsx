@@ -812,7 +812,7 @@ export default function App() {
               tags: Array.isArray(d.tags) ? d.tags.filter((t) => t && !GENERIC_TAGS.has(t.toLowerCase())).slice(0, 4).join(", ") : null,
             };
           }
-        } catch {}
+        } catch (e) { console.warn("Enrich ThreatFox failed:", e.message); }
       }
       // URLhaus — host lookup (IPs, domains)
       if (["IPV4","DOMAIN"].includes(cat)) {
@@ -827,7 +827,7 @@ export default function App() {
               tags: [...new Set(j.urls.flatMap((u) => u.tags || []).filter((t) => t && !GENERIC_TAGS.has(t.toLowerCase())))].slice(0, 4).join(", ") || null,
             };
           }
-        } catch {}
+        } catch (e) { console.warn("Enrich URLhaus failed:", e.message); }
       }
       // URLhaus — URL lookup
       if (cat === "URL") {
@@ -841,7 +841,7 @@ export default function App() {
               payloads: Array.isArray(j.payloads) ? j.payloads.length : 0,
             };
           }
-        } catch {}
+        } catch (e) { console.warn("Enrich URLhaus URL failed:", e.message); }
       }
       // MalwareBazaar — hashes (includes vendor_intel for detection names)
       if (["MD5","SHA1","SHA256","SHA512"].includes(cat)) {
@@ -874,7 +874,7 @@ export default function App() {
               verdict: mbVerdict,
             };
           }
-        } catch {}
+        } catch (e) { console.warn("Enrich MalwareBazaar failed:", e.message); }
       }
       // AlienVault OTX — general (pulses, reputation, ASN, country, high-fidelity tags)
       if (["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat)) {
@@ -901,7 +901,7 @@ export default function App() {
               whitelisted: j.whitelisted ?? null,
             };
           }
-        } catch {}
+        } catch (e) { console.warn("Enrich OTX failed:", e.message); }
       }
       // OTX WHOIS for domains — registrant org, country, registration age
       if (cat === "DOMAIN") {
@@ -921,7 +921,7 @@ export default function App() {
               results.whois = { org: regOrg, country: regCountry, ageDays };
             }
           }
-        } catch {}
+        } catch (e) { console.warn("Enrich OTX WHOIS failed:", e.message); }
       }
 
       // ---- Derive combined verdict ----
@@ -1268,7 +1268,7 @@ export default function App() {
         *::-webkit-scrollbar-thumb:hover { background: #00e5ffaa; }
         *::-webkit-scrollbar-corner { background: #070b10; }
       `}</style>
-      <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
         <div className="flex items-start gap-3 mb-5 flex-wrap">
           <div className="flex h-11 w-11 items-center justify-center rounded-lg shrink-0"
             style={{ backgroundColor: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.35)", boxShadow: "0 0 22px rgba(0,229,255,0.25)" }}>
@@ -1319,16 +1319,16 @@ export default function App() {
           <div className="ml-auto flex items-center gap-2">
             <button onClick={() => setDefangAll((v) => !v)}
               title="Defang every IOC type at once"
-              className="flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[11px]"
+              className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold"
               style={{
                 color: defangAll ? "#04111a" : "#ffb84d",
-                backgroundColor: defangAll ? "#ffb84d" : "rgba(255,184,77,0.06)",
-                border: "1px solid rgba(255,184,77,0.25)",
+                backgroundColor: defangAll ? "#ffb84d" : "rgba(255,184,77,0.14)",
+                border: `1px solid rgba(255,184,77,${defangAll ? "1" : "0.55"})`,
               }}>
-              <ShieldOff size={12} /> {defangAll ? "Defanged" : "Defang"}
+              <ShieldOff size={15} /> {defangAll ? "Defanged" : "Defang"}
             </button>
-            <GButton onClick={exportAllCSV} disabled={!total} color="#00ff9c" icon={<Download size={13} />}>CSV</GButton>
-            <GButton onClick={exportAllXLSX} disabled={!total} color="#00e5ff" icon={<Download size={13} />}>XLSX</GButton>
+            <GButton onClick={exportAllCSV} disabled={!total} color="#00ff9c" icon={<Download size={15} />}>CSV</GButton>
+            <GButton onClick={exportAllXLSX} disabled={!total} color="#00e5ff" icon={<Download size={15} />}>XLSX</GButton>
           </div>
         </div>
         )}
@@ -1665,7 +1665,7 @@ export default function App() {
                           </div>
                         )}
                         {enr && !enr.loading && !enr.data && enr.error && (
-                          <p className="ml-4 mb-1 text-[10px]" style={{ color: "#5d7382" }}>⚪ Unknown to our integrated Engines, CHECK ON VIRUSTOTAL</p>
+                          <p className="ml-4 mb-1 text-[10px]" style={{ color: "#5d7382" }}>⚪ Unknown to our integrated Enrichment Engines. Please check on VirusTotal</p>
                         )}
                       </div>
                     );
