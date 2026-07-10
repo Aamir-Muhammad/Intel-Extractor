@@ -881,7 +881,42 @@ export default function App() {
         try {
           const otxTypeMap = { IPV4: "IPv4", IPV6: "IPv6", DOMAIN: "domain", URL: "url", CVE: "cve",
             MD5: "file", SHA1: "file", SHA256: "file", SHA512: "file" };
-          const j = await callEnrich("otx", otxTypeMap[cat]);
+          let j = await callEnrich("otx", otxTypeMap[cat]);
+
+          // For subdomains with 0 pulses, query the parent/base domain as fallback
+          // (OTX often has data on the parent but not the subdomain)
+          if (cat === "DOMAIN" && j && !j.error && (j.pulse_info?.count ?? 0) === 0) {
+            const parts = value.split(".");
+            if (parts.length > 2) {
+              const parentDomain = parts.slice(-2).join(".");
+              try {
+                const pj = await callEnrich("otx", "domain");
+                // Use parent data if it has more pulses
+                if (pj && !pj.error && (pj.pulse_info?.count ?? 0) > 0) {
+                  // Keep the original response but merge parent pulse data
+                  j = { ...j, pulse_info: pj.pulse_info, _parentFallback: parentDomain };
+                }
+              } catch {}
+              // Also try querying the base domain directly
+              if ((j.pulse_info?.count ?? 0) === 0) {
+                try {
+                  const body = { api: "otx", value: parentDomain, otx_type: "domain" };
+                  const r = await fetch(`${WORKER_BASE}/enrich`, {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                  });
+                  if (r.ok) {
+                    const pj = await r.json();
+                    if (pj && !pj.error && (pj.pulse_info?.count ?? 0) > 0) {
+                      j = { ...j, pulse_info: pj.pulse_info, country_name: pj.country_name || j.country_name,
+                        asn: pj.asn || j.asn, as: pj.as || j.as, _parentFallback: parentDomain };
+                    }
+                  }
+                } catch {}
+              }
+            }
+          }
+
           if (j && !j.error) {
             // High-fidelity tags: collect from pulses, filter generics
             const pulseTags = (j.pulse_info?.pulses || [])
@@ -891,6 +926,11 @@ export default function App() {
               .filter((t) => t.length > 2 && !GENERIC_TAGS.has(t.toLowerCase()))
               .slice(0, 5);
 
+            // Check validation array for malicious indicators (DGA, blocklist, etc.)
+            const valFlags = Array.isArray(j.validation)
+              ? j.validation.map((v) => typeof v === "string" ? v : v?.source || "").filter(Boolean)
+              : [];
+
             results.otx = {
               pulses: j.pulse_info?.count ?? 0,
               reputation: j.reputation ?? null,
@@ -899,6 +939,8 @@ export default function App() {
               asnName: typeof j.as === "string" ? j.as : null,
               tags: hiFiTags.length ? hiFiTags.join(", ") : null,
               whitelisted: j.whitelisted ?? null,
+              validation: valFlags.length ? valFlags.join(", ") : null,
+              parentDomain: j._parentFallback || null,
             };
           }
         } catch (e) { console.warn("Enrich OTX failed:", e.message); }
@@ -907,11 +949,19 @@ export default function App() {
       if (cat === "DOMAIN") {
         try {
           const w = await callEnrich("otx", "domain", "whois");
+          // OTX WHOIS returns data in varying formats — check multiple field names
+          let whoisData = null;
           if (w && w.data && Array.isArray(w.data) && w.data.length > 0) {
-            const rec = w.data[0];
-            const regOrg = rec.registrant_org || rec.admin_org || null;
-            const regCountry = rec.registrant_country || rec.admin_country || null;
-            const created = rec.creation_date || rec.create_date || null;
+            whoisData = w.data[0];
+          } else if (w && typeof w === "object" && (w.registrar || w.creation_date || w.registrant)) {
+            whoisData = w;
+          }
+          if (whoisData) {
+            const regOrg = whoisData.registrant_org || whoisData.admin_org || whoisData.registrar ||
+              whoisData.registrant?.organization || whoisData.registrant?.name || null;
+            const regCountry = whoisData.registrant_country || whoisData.admin_country ||
+              whoisData.registrant?.country || null;
+            const created = whoisData.creation_date || whoisData.create_date || whoisData.created || null;
             let ageDays = null;
             if (created) {
               const d = new Date(created);
@@ -933,18 +983,24 @@ export default function App() {
       }
       else if (results.urlhaus?.status === "offline") verdict = "Suspicious";
       else if (results.otx?.whitelisted === true) verdict = "Whitelisted";
+      else if (results.otx?.validation) verdict = "Suspicious"; // OTX flagged (DGA, blocklist, etc.)
       else if ((results.otx?.pulses || 0) > 20) verdict = "Malicious";
       else if ((results.otx?.pulses || 0) > 5) verdict = "Suspicious";
       else if ((results.otx?.pulses || 0) > 0) verdict = "Suspicious";
+      // Recently registered domain with OTX data = suspicious
+      else if (results.whois?.ageDays !== null && results.whois.ageDays < 90 && results.otx) verdict = "Suspicious";
+      // Parent domain had pulses (subdomain fallback hit) 
+      else if (results.otx?.parentDomain && results.otx.pulses > 0) verdict = "Suspicious";
 
-      // OTX-only with 0 pulses → Unknown
+      // OTX-only with 0 pulses and no other signals → Unknown
       const hasNonOtx = results.threatfox || results.urlhaus || results.malwarebazaar || results.whois;
-      if (!hasNonOtx && results.otx && results.otx.pulses === 0) verdict = "Unknown";
+      if (!hasNonOtx && results.otx && results.otx.pulses === 0 && !results.otx.validation) verdict = "Unknown";
 
       const hasData = Object.keys(results).length > 0;
       if (hasData) results._verdict = verdict;
       setEnrichCache((c) => ({ ...c, [key]: { loading: false, data: hasData ? results : null, error: !hasData } }));
-    } catch {
+    } catch (e) {
+      console.warn("Enrich overall failed:", e.message);
       setEnrichCache((c) => ({ ...c, [key]: { loading: false, data: null, error: true } }));
     }
   };
@@ -1652,9 +1708,9 @@ export default function App() {
                                 {enr.data.malwarebazaar.detections}
                               </span>
                             )}
-                            {enr.data.otx && (enr.data.otx.pulses > 0 || Object.keys(enr.data).length > 2) && (
+                            {enr.data.otx && (
                               <span className="rounded-full px-2 py-0.5" style={{ color: "#2dd4bf", backgroundColor: "rgba(45,212,191,0.12)", border: "1px solid rgba(45,212,191,0.3)" }}>
-                                OTX · {enr.data.otx.pulses} pulses{enr.data.otx.country ? ` · ${enr.data.otx.country}` : ""}{enr.data.otx.asnName ? ` · ${enr.data.otx.asnName}` : enr.data.otx.asn ? ` · ${enr.data.otx.asn}` : ""}{enr.data.otx.tags ? ` · ${enr.data.otx.tags}` : ""}
+                                OTX · {enr.data.otx.pulses} pulses{enr.data.otx.validation ? ` · ${enr.data.otx.validation}` : ""}{enr.data.otx.country ? ` · ${enr.data.otx.country}` : ""}{enr.data.otx.asnName ? ` · ${enr.data.otx.asnName}` : enr.data.otx.asn ? ` · ${enr.data.otx.asn}` : ""}{enr.data.otx.tags ? ` · ${enr.data.otx.tags}` : ""}{enr.data.otx.parentDomain ? ` (via ${enr.data.otx.parentDomain})` : ""}
                               </span>
                             )}
                             {enr.data.whois && (
