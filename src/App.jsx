@@ -991,7 +991,7 @@ export default function App() {
       else if ((results.otx?.pulses || 0) > 5) verdict = "Suspicious";
       else if ((results.otx?.pulses || 0) > 0) verdict = "Suspicious";
       // Recently registered domain with OTX data = suspicious
-      else if (results.whois?.ageDays !== null && results.whois.ageDays < 90 && results.otx) verdict = "Suspicious";
+      else if (results.whois && results.whois.ageDays !== null && results.whois.ageDays < 90 && results.otx) verdict = "Suspicious";
       // Parent domain had pulses (subdomain fallback hit) 
       else if (results.otx?.parentDomain && results.otx.pulses > 0) verdict = "Suspicious";
 
@@ -1612,7 +1612,7 @@ export default function App() {
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat) && (
-                      <button onClick={() => { arr.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 300)); }}
+                      <button onClick={() => { arr.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 1500)); }}
                         className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
                         style={{ color: "#2dd4bf", backgroundColor: "rgba(45,212,191,0.10)", border: "1px solid rgba(45,212,191,0.4)" }}>
                         <Search size={12} /> Enrich All
