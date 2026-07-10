@@ -1065,12 +1065,18 @@ export default function App() {
     // Local engine over the fetched page text
     let engFull = null, engDetails = [], articleText = "", articleBody = "";
     if (pRes.status === "fulfilled" && pRes.value && pRes.value.length >= 50) {
-      articleText = htmlToText(pRes.value);       // full page text for IOC extraction
-      articleBody = extractArticleBody(pRes.value); // clean article prose for AI summary
-      if (articleBody.length < 800) articleBody = articleText; // fallback to full page if extraction is too short
-      const ex = extractIocs(articleText);
-      engFull = ex.data;
-      engDetails = ex.registryDetails;
+      // Detect PDF binary content — htmlToText on raw PDF produces garbage strings
+      // that the IOC engine misinterprets as file paths. Skip local extraction for PDFs;
+      // the API call (/parse via iocparser) handles PDFs correctly on its own.
+      const isPDF = pRes.value.trimStart().startsWith("%PDF") || /\.pdf(\?|#|$)/i.test(url);
+      if (!isPDF) {
+        articleText = htmlToText(pRes.value);       // full page text for IOC extraction
+        articleBody = extractArticleBody(pRes.value); // clean article prose for AI summary
+        if (articleBody.length < 800) articleBody = articleText; // fallback to full page if extraction is too short
+        const ex = extractIocs(articleText);
+        engFull = ex.data;
+        engDetails = ex.registryDetails;
+      }
     }
 
     if (!apiData && (!engFull || !Object.keys(filterScraped(engFull, url)).length)) {
@@ -1270,10 +1276,10 @@ export default function App() {
           </div>
           <div className="min-w-0">
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight" style={{ color: "#eafcff", textShadow: "0 0 18px rgba(0,229,255,0.35)" }}>
-              Threat Intel Article IOC Extractor
+              Intel Extractor
             </h1>
-            <p className="text-xs sm:text-sm" style={{ color: "#7f95a3" }}>
-              Extract IOCs, Capture Hunt Artifacts, Generate Ready-To-Run Queries.
+            <p className="text-[11px]" style={{ color: "#5d7382", letterSpacing: "2px", marginTop: "2px" }}>
+              EXTRACT · ENRICH · HUNT
             </p>
           </div>
           <div className="sm:ml-auto flex flex-col sm:items-end gap-1.5">
@@ -1304,36 +1310,26 @@ export default function App() {
         </div>
 
         {total > 0 && (
-        <div className="rounded-xl p-3 mb-4 flex flex-wrap items-center gap-2" style={panel}>
-          {total > 0 && (
-            <div className="flex items-baseline gap-2 rounded-lg px-3 py-1.5"
-              style={{ border: "1px solid rgba(0,255,156,0.5)", backgroundColor: "rgba(0,255,156,0.08)", boxShadow: "0 0 18px rgba(0,255,156,0.15)" }}>
-              <span className="text-lg font-extrabold leading-none" style={{ color: "#00ff9c" }}>IOCs:</span>
-              <span className="text-lg font-extrabold tabular-nums leading-none" style={{ color: "#00ff9c", textShadow: "0 0 12px rgba(0,255,156,0.5)" }}>{total}</span>
-              <span className="text-lg font-extrabold leading-none" style={{ color: "#2a4a3f" }}>·</span>
-              <span className="text-lg font-extrabold leading-none" style={{ color: "#00e5ff" }}>Types:</span>
-              <span className="text-lg font-extrabold tabular-nums leading-none" style={{ color: "#00e5ff", textShadow: "0 0 12px rgba(0,229,255,0.5)" }}>{entries.length}</span>
-            </div>
-          )}
-          {total > 0 && (
+        <div className="flex items-center gap-3 mb-4 py-3" style={{ borderBottom: "1px solid rgba(120,160,180,0.08)" }}>
+          <span className="text-3xl font-medium tabular-nums" style={{ color: "#00ff9c", letterSpacing: "-1px" }}>{total}</span>
+          <span className="text-[10px] uppercase" style={{ color: "#5d7382", letterSpacing: "1.5px" }}>indicators</span>
+          <div className="shrink-0" style={{ width: "1px", height: "28px", background: "rgba(120,160,180,0.15)" }}></div>
+          <span className="text-3xl font-medium tabular-nums" style={{ color: "#00e5ff", letterSpacing: "-1px" }}>{entries.length}</span>
+          <span className="text-[10px] uppercase" style={{ color: "#5d7382", letterSpacing: "1.5px" }}>types</span>
+          <div className="ml-auto flex items-center gap-2">
             <button onClick={() => setDefangAll((v) => !v)}
-              title="Defang every IOC type at once — applies to display, all copy buttons and all CSV/XLSX exports"
-              className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold"
+              title="Defang every IOC type at once"
+              className="flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[11px]"
               style={{
                 color: defangAll ? "#04111a" : "#ffb84d",
-                backgroundColor: defangAll ? "#ffb84d" : "rgba(255,184,77,0.10)",
-                border: "1px solid rgba(255,184,77,0.5)",
-                boxShadow: defangAll ? "0 0 14px rgba(255,184,77,0.4)" : "none",
+                backgroundColor: defangAll ? "#ffb84d" : "rgba(255,184,77,0.06)",
+                border: "1px solid rgba(255,184,77,0.25)",
               }}>
-              <ShieldOff size={13} /> {defangAll ? "Defang All: On" : "Defang All: Off"}
+              <ShieldOff size={12} /> {defangAll ? "Defanged" : "Defang"}
             </button>
-          )}
-          {total > 0 && (
-            <div className="ml-auto flex items-center gap-2">
-              <GButton onClick={exportAllCSV} disabled={!total} color="#00ff9c" icon={<Download size={15} />}>All IOCs · CSV</GButton>
-              <GButton onClick={exportAllXLSX} disabled={!total} color="#00e5ff" icon={<Download size={15} />}>All IOCs · XLSX</GButton>
-            </div>
-          )}
+            <GButton onClick={exportAllCSV} disabled={!total} color="#00ff9c" icon={<Download size={13} />}>CSV</GButton>
+            <GButton onClick={exportAllXLSX} disabled={!total} color="#00e5ff" icon={<Download size={13} />}>XLSX</GButton>
+          </div>
         </div>
         )}
 
@@ -1410,29 +1406,26 @@ export default function App() {
         </div>
 
         {meta && (meta.title || meta.description) && (
-          <div className="rounded-xl p-4 mb-3 flex gap-3" style={{ ...panel, borderColor: "rgba(0,229,255,0.28)", boxShadow: "0 0 24px rgba(0,229,255,0.08)" }}>
-            <div className="mt-0.5 shrink-0 flex h-9 w-9 items-center justify-center rounded-lg"
-              style={{ backgroundColor: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.3)" }}>
-              <FileText size={17} style={{ color: "#00e5ff" }} />
-            </div>
+          <div className="flex items-start gap-3 mb-3 py-3" style={{ borderBottom: "1px solid rgba(120,160,180,0.06)" }}>
+            <FileText size={16} className="shrink-0 mt-0.5" style={{ color: "#5d7382" }} />
             <div className="min-w-0 flex-1">
               {meta.title && (
-                <h2 className="text-sm sm:text-base font-bold leading-snug" style={{ color: "#eafcff" }}>{meta.title}</h2>
+                <h2 className="text-sm font-medium leading-snug" style={{ color: "#eafcff" }}>{meta.title}</h2>
               )}
               {meta.description && (
-                <p className="text-xs sm:text-sm mt-1 leading-relaxed" style={{ color: "#9fb3bd" }}>{meta.description}</p>
+                <p className="text-xs mt-1 leading-relaxed overflow-hidden" style={{ color: "#7f95a3", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{meta.description}</p>
               )}
-              <div className="flex flex-wrap items-center gap-2 mt-2">
-                {meta.url && (
-                  <a href={meta.url} target="_blank" rel="noreferrer noopener"
-                    className="inline-flex items-center gap-1 text-xs rounded-md px-2 py-0.5 truncate max-w-full"
-                    style={{ color: "#00e5ff", border: "1px solid rgba(0,229,255,0.3)", backgroundColor: "rgba(0,229,255,0.06)" }}>
-                    <Globe size={11} className="shrink-0" /> <span className="truncate">{stripScheme(meta.url)}</span>
+              <div className="flex flex-wrap items-center gap-2 mt-1.5">
+                {sourceUrl && sourceUrl !== "(pasted JSON)" && sourceUrl !== "(raw paste)" && (
+                  <a href={sourceUrl} target="_blank" rel="noreferrer noopener"
+                    className="inline-flex items-center gap-1 text-[11px] truncate max-w-full"
+                    style={{ color: "#5d7382" }}>
+                    <Globe size={10} className="shrink-0" /> <span className="truncate">{defang(stripScheme(sourceUrl))}</span>
                   </a>
                 )}
                 {Array.isArray(meta.tags) && meta.tags.filter(Boolean).map((t, i) => (
-                  <span key={i} className="text-[11px] rounded-full px-2 py-0.5"
-                    style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.35)", backgroundColor: "rgba(192,132,252,0.08)" }}>
+                  <span key={i} className="text-[10px] rounded-full px-2 py-0.5"
+                    style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.2)", backgroundColor: "rgba(192,132,252,0.04)" }}>
                     #{String(t)}
                   </span>
                 ))}
@@ -1728,8 +1721,8 @@ export default function App() {
           </div>
         )}
 
-        <p className="text-center text-xs mt-8" style={{ color: "#3a4a54" }}>
-          IOC Extraction · Threat Hunting Artifacts · Hunting Query Generation
+        <p className="text-center mt-8" style={{ color: "#2a3a42", fontSize: "10px", letterSpacing: "1.5px" }}>
+          IOC EXTRACTION · THREAT HUNTING ARTIFACTS · HUNTING QUERY GENERATION
         </p>
       </div>
     </div>
