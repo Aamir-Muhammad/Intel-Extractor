@@ -224,7 +224,7 @@ const PS_SCHEDTASK_RE = /\bRegister-ScheduledTask\b([^\r\n]*)/gi;
 const TASK_LABEL_PAIR_RE = /Task\s*Name\s*:\s*([^\r\n,;]{2,150})[\s\S]{0,80}?Task\s*Action\s*:\s*([^\r\n]{2,300})/gi;
 const TASK_NAME_LABEL_RE = /\b(?:Scheduled\s+)?Task\s*Name\s*:\s*([^\r\n,;]{2,150})/gi;
 const TASK_ACTION_LABEL_RE = /\bTask\s*Action\s*:\s*([^\r\n]{2,300})/gi;
-const TASK_PROSE_RE = /\bscheduled\s+task\s+(?:named|called|titled)\s+["\u201c]([^"\u201d\r\n]{2,100})["\u201d]/gi;
+const TASK_PROSE_RE = /\bscheduled\s+task\s+(?:named|called|titled)\s+(?:"([^"\r\n]{2,100})"|“([^”\r\n]{2,100})”|([A-Za-z0-9][A-Za-z0-9 ._()\-]{1,80}?))(?=\s+(?:by|that|which|to|and|before|after|configured|runs?|running|is|was)\b|[.,;:]|$)/gi;
 
 const cleanTaskField = (s) => unquote(String(s).trim()).replace(/[.,;:!?)'"`\]]+$/, "");
 
@@ -275,7 +275,11 @@ const extractScheduledTasks = (text) => {
 
   work = work.replace(TASK_NAME_LABEL_RE, (m, name) => { pushTask({ name: cleanTaskField(name) }); return blank(m); });
   work = work.replace(TASK_ACTION_LABEL_RE, (m, action) => { pushTask({ action: cleanTaskField(action) }); return blank(m); });
-  work = work.replace(TASK_PROSE_RE, (m, name) => { pushTask({ name: cleanTaskField(name) }); return blank(m); });
+  work = work.replace(TASK_PROSE_RE, (m, q1, q2, bare) => {
+  const name = q1 || q2 || bare;
+  pushTask({ name: cleanTaskField(name) });
+  return blank(m);
+});
 
   return tasks;
 };
