@@ -64,6 +64,7 @@ const TYPE_COLORS = {
   ASN: "#2dd4bf", MAC_ADDRESS: "#a3e635",
   REGISTRY: "#e879f9", FILE_NAME: "#94a3b8", FILE_PATH: "#a5b4fc",
   MITRE_ATTACK: "#f43f5e", YARA: "#38bdf8",
+  SCHEDULED_TASK: "#ffcc00",
 };
 const FALLBACK_PALETTE = ["#00e5ff","#00ff9c","#c084fc","#fbbf24","#ff4d6d","#2dd4bf","#a3e635","#7c9cff","#f59e0b","#e879f9"];
 const colorFor = (cat) => {
@@ -213,6 +214,72 @@ const maybeFileFromData = (v, files) => {
 // Extracts registry keys (incl. values) and file paths from full text BEFORE
 // whitespace tokenization, blanking consumed matches so the tokenizer doesn't
 // shred multi-word paths like `C:\Program Files\...` or `...\Windows NT\...`.
+
+// ============================================================
+//  Scheduled Task extraction (schtasks.exe, PowerShell cmdlets,
+//  and prose/report-style "Task Name:" / "Task Action:" labels)
+// ============================================================
+const SCHTASKS_CREATE_RE = /\bschtasks(?:\.exe)?\s+\/create\b([^\r\n]*)/gi;
+const PS_SCHEDTASK_RE = /\bRegister-ScheduledTask\b([^\r\n]*)/gi;
+const TASK_LABEL_PAIR_RE = /Task\s*Name\s*:\s*([^\r\n,;]{2,150})[\s\S]{0,80}?Task\s*Action\s*:\s*([^\r\n]{2,300})/gi;
+const TASK_NAME_LABEL_RE = /\b(?:Scheduled\s+)?Task\s*Name\s*:\s*([^\r\n,;]{2,150})/gi;
+const TASK_ACTION_LABEL_RE = /\bTask\s*Action\s*:\s*([^\r\n]{2,300})/gi;
+const TASK_PROSE_RE = /\bscheduled\s+task\s+(?:named|called|titled)\s+["\u201c]([^"\u201d\r\n]{2,100})["\u201d]/gi;
+
+const cleanTaskField = (s) => unquote(String(s).trim()).replace(/[.,;:!?)'"`\]]+$/, "");
+
+const canonicalTask = (t) => {
+  let s = t.name ? `"${t.name}"` : "(unnamed task)";
+  if (t.action) s += ` → ${t.action}`;
+  if (t.trigger) s += ` [${t.trigger}]`;
+  return s;
+};
+
+const extractScheduledTasks = (text) => {
+  let work = text;
+  const tasks = [];
+  const seen = new Set();
+  const blank = (m) => " ".repeat(m.length);
+  const pushTask = (t) => {
+    const c = canonicalTask(t);
+    if (!seen.has(c)) { seen.add(c); tasks.push(t); }
+  };
+
+  work = work.replace(SCHTASKS_CREATE_RE, (m, rest) => {
+    const tn = rest.match(/\/tn\s+("[^"\r\n]+"|\S+)/i);
+    const tr = rest.match(/\/tr\s+("[^"\r\n]+"|\S+)/i);
+    const sc = rest.match(/\/sc\s+(\S+)/i);
+    if (!tn && !tr) return m;
+    pushTask({
+      name: tn ? cleanTaskField(tn[1]) : undefined,
+      action: tr ? cleanTaskField(tr[1]) : undefined,
+      trigger: sc ? cleanTaskField(sc[1]).toUpperCase() : undefined,
+    });
+    return blank(m);
+  });
+
+  work = work.replace(PS_SCHEDTASK_RE, (m, rest) => {
+    const tn = rest.match(/-TaskName\s+("[^"\r\n]+"|'[^'\r\n]+'|\S+)/i);
+    const ex = rest.match(/-Execute\s+("[^"\r\n]+"|'[^'\r\n]+'|\S+)/i);
+    const ar = rest.match(/-Argument\s+("[^"\r\n]+"|'[^'\r\n]+'|\S+)/i);
+    if (!tn && !ex) return m;
+    const action = [ex ? cleanTaskField(ex[1]) : "", ar ? cleanTaskField(ar[1]) : ""].filter(Boolean).join(" ");
+    pushTask({ name: tn ? cleanTaskField(tn[1]) : undefined, action: action || undefined });
+    return blank(m);
+  });
+
+  work = work.replace(TASK_LABEL_PAIR_RE, (m, name, action) => {
+    pushTask({ name: cleanTaskField(name), action: cleanTaskField(action) });
+    return blank(m);
+  });
+
+  work = work.replace(TASK_NAME_LABEL_RE, (m, name) => { pushTask({ name: cleanTaskField(name) }); return blank(m); });
+  work = work.replace(TASK_ACTION_LABEL_RE, (m, action) => { pushTask({ action: cleanTaskField(action) }); return blank(m); });
+  work = work.replace(TASK_PROSE_RE, (m, name) => { pushTask({ name: cleanTaskField(name) }); return blank(m); });
+
+  return tasks;
+};
+
 const extractStructured = (text) => {
   let work = text;
   const regs = [];
@@ -346,7 +413,7 @@ const classify = (t) => {
   return null;
 };
 
-const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","YARA","ASN","MAC_ADDRESS","BTC","XMR","ETH","REGISTRY","FILE_NAME","FILE_PATH"];
+const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","YARA","ASN","MAC_ADDRESS","BTC","XMR","ETH","SCHEDULED_TASK","REGISTRY","FILE_NAME","FILE_PATH"];
 
 // Fixed on-screen card order: Domain, URL, IPs, all hashes first — then the rest.
 // Static (not count-based) so discarding IOCs never shuffles box positions.
@@ -372,6 +439,9 @@ const extractIocs = (text) => {
   };
 
   let work = refangSoft(text);
+
+  const scheduledTasks = extractScheduledTasks(work);
+  scheduledTasks.forEach((t) => add("SCHEDULED_TASK", canonicalTask(t)));
 
   work = work.replace(/\[([^\]\n]+)\]\(([^)\n]*)\)/g, (_m, label) => {
     const t = trimTok(label.trim());
@@ -591,7 +661,7 @@ const huntKQL = (cat, arr) => {
       const initField = `InitiatingProcess${cat}`;
       const varName = `${cat}_IOCs`;
       const hashDyn = `dynamic([${kqlList(arr)}])`;
-      return `let ${varName} = ${hashDyn};\nlet ProcEvents =\n    DeviceProcessEvents\n    | where Timestamp > ago(30d)\n    | where ${hashField} in~ (${varName}) or ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = iff(${hashField} in~ (${varName}), ${hashField}, ${initField}),\n        MatchedField = iff(${hashField} in~ (${varName}), "${hashField}", "${initField}"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName, " > ", FileName)\n    | project Timestamp, DeviceName, AccountName, SourceTable="DeviceProcessEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = ProcessCommandLine;\nlet FileEvents =\n    DeviceFileEvents\n    | where Timestamp > ago(30d)\n    | where ${hashField} in~ (${varName}) or ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = iff(${hashField} in~ (${varName}), ${hashField}, ${initField}),\n        MatchedField = iff(${hashField} in~ (${varName}), "${hashField}", "${initField}"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceFileEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet ImageLoadEvents =\n    DeviceImageLoadEvents\n    | where Timestamp > ago(30d)\n    | where ${hashField} in~ (${varName}) or ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = iff(${hashField} in~ (${varName}), ${hashField}, ${initField}),\n        MatchedField = iff(${hashField} in~ (${varName}), "${hashField}", "${initField}"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceImageLoadEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet NetworkEvents =\n    DeviceNetworkEvents\n    | where Timestamp > ago(30d)\n    | where ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = ${initField},\n        MatchedField = "${initField}",\n        Detail       = strcat(RemoteIP, ":", tostring(RemotePort), " ", RemoteUrl),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceNetworkEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet RegistryEvents =\n    DeviceRegistryEvents\n    | where Timestamp > ago(30d)\n    | where ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = ${initField},\n        MatchedField = "${initField}",\n        Detail       = strcat(RegistryKey, " \\\\ ", RegistryValueName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceRegistryEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet LogonEvents =\n    DeviceLogonEvents\n    | where Timestamp > ago(30d)\n    | where ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = ${initField},\n        MatchedField = "${initField}",\n        Detail       = strcat(LogonType, " | ", RemoteIP),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, AccountName, SourceTable="DeviceLogonEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet MiscEvents =\n    DeviceEvents\n    | where Timestamp > ago(30d)\n    | where ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = ${initField},\n        MatchedField = "${initField}",\n        Detail       = ActionType,\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, AccountName, SourceTable="DeviceEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nunion ProcEvents, FileEvents, ImageLoadEvents,\n      NetworkEvents, RegistryEvents, LogonEvents, MiscEvents\n| summarize\n    FirstSeen    = min(Timestamp),\n    LastSeen     = max(Timestamp),\n    EventCount   = count(),\n    Accounts     = make_set(AccountName),\n    Details      = make_set(Detail),\n    ProcessTrees = make_set(ProcessTree),\n    CommandLines = make_set(CommandLine)\n    by DeviceName, SourceTable, MatchedHash, MatchedField\n| sort by FirstSeen desc`;
+      return `let ${varName} = ${hashDyn};\nlet ProcEvents =\n    DeviceProcessEvents\n    | where Timestamp > ago(30d)\n    | where ${hashField} in~ (${varName}) or ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = iff(${hashField} in~ (${varName}), ${hashField}, ${initField}),\n        MatchedField = iff(${hashField} in~ (${varName}), "${hashField}", "${initField}"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName, " > ", FileName)\n    | project Timestamp, DeviceName, AccountName, SourceTable="DeviceProcessEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = ProcessCommandLine;\nlet FileEvents =\n    DeviceFileEvents\n    | where Timestamp > ago(30d)\n    | where ${hashField} in~ (${varName}) or ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = iff(${hashField} in~ (${varName}), ${hashField}, ${initField}),\n        MatchedField = iff(${hashField} in~ (${varName}), "${hashField}", "${initField}"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceFileEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet ImageLoadEvents =\n    DeviceImageLoadEvents\n    | where Timestamp > ago(30d)\n    | where ${hashField} in~ (${varName}) or ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = iff(${hashField} in~ (${varName}), ${hashField}, ${initField}),\n        MatchedField = iff(${hashField} in~ (${varName}), "${hashField}", "${initField}"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceImageLoadEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nunion ProcEvents, FileEvents, ImageLoadEvents\n| order by Timestamp desc`;
     }
     case "FILE_NAME":
       return `DeviceFileEvents\n| where FileName in~ (${kqlList(arr)})\n| project-reorder Timestamp, DeviceName, FileName, FolderPath, SHA256, ActionType, InitiatingProcessFileName\nunion DeviceProcessEvents\n| where FileName in~ (${kqlList(arr)}) or ProcessCommandLine has_any (${kqlList(arr)})\n| project-reorder Timestamp, DeviceName, FileName, ProcessCommandLine, SHA256`;
