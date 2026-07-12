@@ -938,8 +938,6 @@ const loadPdfJs = () => {
   return pdfjsPromise;
 };
 
-};
-
 const extractPdfText = async (arrayBuffer) => {
   try {
     if (!arrayBuffer || arrayBuffer.byteLength < 1000) return null; // too small to be a real PDF
