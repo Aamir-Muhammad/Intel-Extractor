@@ -86,7 +86,7 @@ const TYPE_COLORS = {
   CVE: "#ff3b3b", BTC: "#f7931a", XMR: "#ff6600", ETH: "#8a92b2",
   ASN: "#2dd4bf", MAC_ADDRESS: "#a3e635",
   REGISTRY: "#e879f9", FILE_NAME: "#94a3b8", FILE_PATH: "#a5b4fc",
-  SCHEDULED_TASK: "#fb7185", SERVICE: "#c4b5fd",
+  SCHEDULED_TASK: "#fb7185", SERVICE: "#c4b5fd", COMMAND_LINE: "#fde047",
   MITRE_ATTACK: "#f43f5e", YARA: "#38bdf8",
 };
 const FALLBACK_PALETTE = ["#00e5ff","#00ff9c","#c084fc","#fbbf24","#ff4d6d","#2dd4bf","#a3e635","#7c9cff","#f59e0b","#e879f9"];
@@ -423,7 +423,7 @@ const classify = (t) => {
   return null;
 };
 
-const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","YARA","ASN","MAC_ADDRESS","BTC","XMR","ETH","REGISTRY","SCHEDULED_TASK","SERVICE","FILE_NAME","FILE_PATH"];
+const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","YARA","ASN","MAC_ADDRESS","BTC","XMR","ETH","REGISTRY","SCHEDULED_TASK","SERVICE","COMMAND_LINE","FILE_NAME","FILE_PATH"];
 
 // Fixed on-screen card order: Domain, URL, IPs, all hashes first — then the rest.
 // Static (not count-based) so discarding IOCs never shuffles box positions.
@@ -701,6 +701,23 @@ const huntKQL = (cat, arr) => {
       const names = arr.map((v) => v.split(" → ")[0].trim());
       return `let SvcNames = dynamic([${names.map((n) => `"${n.replace(/"/g, '\\"')}"`).join(", ")}]);\nDeviceProcessEvents\n| where FileName in~ ("sc.exe", "powershell.exe", "pwsh.exe", "services.exe")\n| where ProcessCommandLine has_any (SvcNames)\n| project Timestamp, DeviceName, AccountName, FileName, ProcessCommandLine, InitiatingProcessFileName\nunion (\n    DeviceRegistryEvents\n    | where RegistryKey has "SYSTEM\\\\CurrentControlSet\\\\Services"\n    | where RegistryKey has_any (SvcNames)\n    | project Timestamp, DeviceName, RegistryKey, RegistryValueName, RegistryValueData, ActionType, InitiatingProcessFileName\n)`;
     }
+    case "COMMAND_LINE": {
+      // Extract distinctive tokens: quoted strings, paths, flags after / or -
+      const tokens = new Set();
+      arr.forEach((cl) => {
+        const s = String(cl);
+        // Quoted strings
+        (s.match(/"[^"]{4,80}"/g) || []).forEach(m => tokens.add(m.slice(1, -1)));
+        // Paths
+        (s.match(/[A-Za-z]:\\[^\s"']{3,150}/g) || []).forEach(m => tokens.add(m));
+        (s.match(/%[A-Z_]+%\\[^\s"']{2,100}/gi) || []).forEach(m => tokens.add(m));
+        // Distinctive flags / suffixes
+        (s.match(/\/tn\s+\S+/gi) || []).forEach(m => tokens.add(m));
+      });
+      const distinctive = [...tokens].filter((t) => t.length > 3 && !/^\/?[a-z]+$/i.test(t)).slice(0, 20);
+      const search = distinctive.length ? distinctive : arr.slice(0, 10);
+      return `let CmdPatterns = dynamic([${search.map((t) => `"${String(t).replace(/"/g, '\\"')}"`).join(", ")}]);\nDeviceProcessEvents\n| where ProcessCommandLine has_any (CmdPatterns) or InitiatingProcessCommandLine has_any (CmdPatterns)\n| project Timestamp, DeviceName, AccountName, FileName, ProcessCommandLine, InitiatingProcessFileName, InitiatingProcessCommandLine`;
+    }
     default: return null;
   }
 };
@@ -739,6 +756,18 @@ const huntCQL = (cat, arr) => {
       const namePat = names.map(reEsc).join("|");
       return `#event_simpleName=/ProcessRollup2/iF\n|case{\n\tImageFileName=/(sc\\.exe|powershell\\.exe|pwsh\\.exe)/iF| CommandLine=/(${namePat})/iF |HuntObject:= CommandLine |HuntLogic:= "Service created/modified via commandline";\n}\n|groupBy([@timestamp,ComputerName,UserName,HuntLogic,HuntObject,ImageFileName,ParentBaseFileName], limit=max)`;
     }
+    case "COMMAND_LINE": {
+      // Extract distinctive tokens for regex hunting
+      const tokens = new Set();
+      arr.forEach((cl) => {
+        const s = String(cl);
+        (s.match(/"[^"]{4,80}"/g) || []).forEach(m => tokens.add(m.slice(1, -1)));
+        (s.match(/[A-Za-z]:\\[^\s"']{3,150}/g) || []).forEach(m => tokens.add(m));
+      });
+      const distinctive = [...tokens].filter((t) => t.length > 3).slice(0, 15);
+      const pat = (distinctive.length ? distinctive : arr.slice(0, 10)).map(reEsc).join("|");
+      return `#event_simpleName=/ProcessRollup2/iF\n| CommandLine=/(${pat})/iF\n|groupBy([@timestamp,ComputerName,UserName,ImageFileName,CommandLine,ParentBaseFileName], limit=max)`;
+    }
     default: return null;
   }
 };
@@ -772,12 +801,22 @@ const huntSPL = (cat, arr) => {
       const names = arr.map((v) => `"*${v.split(" → ")[0].trim()}*"`).join(", ");
       return `index=* source="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1\n| search (Image="*sc.exe" OR Image="*powershell.exe")\n| search CommandLine IN (${names})\n| table _time, host, Image, CommandLine, ParentImage, User`;
     }
+    case "COMMAND_LINE": {
+      const tokens = new Set();
+      arr.forEach((cl) => {
+        (String(cl).match(/"[^"]{4,80}"/g) || []).forEach(m => tokens.add(m.slice(1, -1)));
+        (String(cl).match(/[A-Za-z]:\\[^\s"']{3,150}/g) || []).forEach(m => tokens.add(m));
+      });
+      const distinctive = [...tokens].filter((t) => t.length > 3).slice(0, 15);
+      const patterns = (distinctive.length ? distinctive : arr.slice(0, 10)).map((t) => `"*${t}*"`).join(", ");
+      return `index=* source="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1\n| search CommandLine IN (${patterns})\n| table _time, host, Image, CommandLine, ParentImage, User`;
+    }
     default: return null;
   }
 };
 
 // Categories that support hunt queries
-const HUNT_CATS = new Set(["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","FILE_NAME","FILE_PATH","EMAIL","CVE","SCHEDULED_TASK","SERVICE"]);
+const HUNT_CATS = new Set(["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","FILE_NAME","FILE_PATH","EMAIL","CVE","SCHEDULED_TASK","SERVICE","COMMAND_LINE"]);
 
 // ============================================================
 //  Page scrape helpers
@@ -889,6 +928,120 @@ export default function App() {
   const [retryCount, setRetryCount] = useState(0);
   const [cooldown, setCooldown] = useState(0);                  // seconds until retry re-enabled
   const [enrichCache, setEnrichCache] = useState({});             // {iocKey: {loading,data,error}}
+  const [aiScanState, setAiScanState] = useState("idle");         // idle | loading | done | error
+  const [aiScanCounts, setAiScanCounts] = useState(null);         // {scheduled_tasks, services, registry_ops, command_lines, file_paths}
+  const [aiScanError, setAiScanError] = useState("");
+
+  // ---- AI Scan: on-demand deep artifact extraction ----
+  // Sends article text to Worker /artifacts which uses same 4-tier model chain as /summarize.
+  // Merges AI-found artifacts into existing IOC categories, deduped against regex-extracted ones.
+  const runAIScan = async () => {
+    const text = (articleClean || rawArticle || "").trim();
+    if (!text || text.length < 300) {
+      setAiScanError("Not enough article text to scan.");
+      setAiScanState("error");
+      return;
+    }
+    setAiScanState("loading");
+    setAiScanError("");
+    try {
+      const res = await fetch(`${WORKER_BASE}/artifacts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: text.slice(0, 16000) }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const j = await res.json();
+      if (j.error) throw new Error(j.error);
+
+      // Merge into iocData + registryDetails
+      let added = { scheduled_tasks: 0, services: 0, registry_ops: 0, command_lines: 0, file_paths: 0 };
+      setIocData((prev) => {
+        const out = { ...prev };
+        const push = (cat, val) => {
+          const existing = out[cat] || [];
+          if (!existing.some((e) => e.toLowerCase() === String(val).toLowerCase())) {
+            out[cat] = [...existing, val];
+            return true;
+          }
+          return false;
+        };
+
+        // Scheduled tasks: canonical string "name → target" or just "name"
+        (j.scheduled_tasks || []).forEach((t) => {
+          if (!t || !t.name) return;
+          let canon = String(t.name);
+          if (t.target) canon += ` → ${t.target}`;
+          if (t.trigger) canon += ` [${t.trigger}]`;
+          if (push("SCHEDULED_TASK", canon)) added.scheduled_tasks++;
+          if (t.command_line) push("COMMAND_LINE", String(t.command_line));
+        });
+
+        // Services
+        (j.services || []).forEach((s) => {
+          if (!s || !s.name) return;
+          let canon = String(s.name);
+          if (s.bin_path) canon += ` → ${s.bin_path}`;
+          if (push("SERVICE", canon)) added.services++;
+          if (s.command_line) push("COMMAND_LINE", String(s.command_line));
+        });
+
+        // Registry ops
+        (j.registry_ops || []).forEach((r) => {
+          if (!r || !r.key) return;
+          let canon = String(r.key);
+          if (r.value_name) canon += "\\" + r.value_name;
+          if (r.data !== undefined && r.data !== null && r.data !== "") canon += " = " + r.data;
+          if (r.value_type) canon += " (" + String(r.value_type).toUpperCase() + ")";
+          if (push("REGISTRY", canon)) added.registry_ops++;
+          if (r.command_line) push("COMMAND_LINE", String(r.command_line));
+        });
+
+        // Standalone command lines
+        (j.command_lines || []).forEach((cl) => {
+          if (typeof cl === "string" && cl.trim().length > 3) {
+            if (push("COMMAND_LINE", cl.trim())) added.command_lines++;
+          }
+        });
+
+        // File paths (only if legitimate — reject URL-like and short garbage)
+        (j.file_paths || []).forEach((fp) => {
+          if (typeof fp === "string" && fp.trim().length > 3) {
+            const s = fp.trim();
+            // Basic sanity: must look like a path
+            if (/^[A-Za-z]:\\/.test(s) || s.startsWith("\\\\") || s.startsWith("%") || /^\/[^/].+\/[^/]+/.test(s)) {
+              if (push("FILE_PATH", s)) added.file_paths++;
+            }
+          }
+        });
+
+        // Reorder by ORDER
+        const ordered = {};
+        ORDER.forEach((k) => { if (out[k]?.length) ordered[k] = out[k]; });
+        Object.keys(out).forEach((k) => { if (!ordered[k] && out[k]?.length) ordered[k] = out[k]; });
+        return applyWhitelist(ordered);
+      });
+
+      // Also merge structured registry details for hunt queries
+      setRegistryDetails((prev) => {
+        const seen = new Set(prev.map((d) => canonicalReg(d)));
+        const added = [];
+        (j.registry_ops || []).forEach((r) => {
+          if (!r || !r.key) return;
+          const det = { key: r.key, valueName: r.value_name || undefined, valueType: r.value_type || undefined, data: r.data !== undefined && r.data !== null ? String(r.data) : undefined };
+          const c = canonicalReg(det);
+          if (!seen.has(c)) { seen.add(c); added.push(det); }
+        });
+        return added.length ? [...prev, ...added] : prev;
+      });
+
+      setAiScanCounts(added);
+      setAiScanState("done");
+    } catch (e) {
+      setAiScanError(e.message || String(e));
+      setAiScanState("error");
+    }
+  };
 
   // ---- IOC Enrichment: ThreatFox + URLhaus + MalwareBazaar via Worker proxy ----
   const enrichIOC = async (cat, value) => {
@@ -1211,6 +1364,7 @@ export default function App() {
   const resetResults = () => {
     setError(""); setIocData(null); setOriginData(null); setRegistryDetails([]);
     setMeta(null); setAiSummary(null); setAiState("idle"); setAiOpen(false);
+    setAiScanState("idle"); setAiScanCounts(null); setAiScanError("");
     setRetryCount(0); setCooldown(0); setRawArticle(""); setArticleClean(""); setDefangAll(false);
   };
 
@@ -1696,6 +1850,55 @@ export default function App() {
                     Initializing…
                   </p>
                 )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {(articleClean || rawArticle) && sourceUrl && (
+          <div className="rounded-xl mb-4 overflow-hidden" style={{ ...panel, borderColor: "rgba(253,224,71,0.35)" }}>
+            <div className="flex items-center justify-between px-4 py-3 gap-3 flex-wrap">
+              <span className="flex items-center gap-2.5 min-w-0">
+                <span className="shrink-0 flex h-7 w-7 items-center justify-center rounded-lg"
+                  style={{ backgroundColor: "rgba(253,224,71,0.08)", border: "1px solid rgba(253,224,71,0.35)" }}>
+                  <span style={{ fontSize: 14 }}>🧠</span>
+                </span>
+                <span className="text-sm font-bold tracking-wide" style={{ color: "#fde047" }}>AI Scan Threat Hunting Artifacts</span>
+                {aiScanState === "idle" && (
+                  <span className="text-[10px] uppercase tracking-widest rounded-full px-2 py-0.5 hidden sm:inline"
+                    style={{ color: "#8aa0ad", border: "1px solid rgba(120,160,180,0.3)" }}>
+                    catches what regex missed
+                  </span>
+                )}
+                {aiScanState === "done" && aiScanCounts && (
+                  <span className="text-[10px] uppercase tracking-widest rounded-full px-2 py-0.5"
+                    style={{ color: "#00ff9c", border: "1px solid rgba(0,255,156,0.35)", backgroundColor: "rgba(0,255,156,0.06)" }}>
+                    +{aiScanCounts.scheduled_tasks + aiScanCounts.services + aiScanCounts.registry_ops + aiScanCounts.command_lines + aiScanCounts.file_paths} artifacts merged
+                  </span>
+                )}
+              </span>
+              <button onClick={runAIScan} disabled={aiScanState === "loading" || aiScanState === "done"}
+                className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold"
+                style={{
+                  color: aiScanState === "done" ? "#5d7382" : "#04111a",
+                  backgroundColor: aiScanState === "done" ? "rgba(120,160,180,0.06)" : "#fde047",
+                  border: `1px solid ${aiScanState === "done" ? "rgba(120,160,180,0.25)" : "rgba(253,224,71,0.6)"}`,
+                  cursor: (aiScanState === "loading" || aiScanState === "done") ? "not-allowed" : "pointer",
+                }}>
+                {aiScanState === "loading" ? <Loader2 size={13} className="animate-spin" /> : aiScanState === "done" ? <Check size={13} /> : <span style={{ fontSize: 12 }}>🧠</span>}
+                {aiScanState === "loading" ? "Scanning…" : aiScanState === "done" ? "Scan complete" : "Run AI Scan"}
+              </button>
+            </div>
+            {aiScanState === "error" && (
+              <div className="px-4 pb-3 pt-1 text-xs" style={{ color: "#ffb4b4", borderTop: "1px solid rgba(255,77,77,0.2)" }}>
+                {aiScanError || "AI scan failed. Please retry."}
+                <button onClick={() => { setAiScanState("idle"); setAiScanError(""); }}
+                  className="ml-2 underline" style={{ color: "#fde047" }}>reset</button>
+              </div>
+            )}
+            {aiScanState === "done" && aiScanCounts && (aiScanCounts.scheduled_tasks + aiScanCounts.services + aiScanCounts.registry_ops + aiScanCounts.command_lines + aiScanCounts.file_paths) === 0 && (
+              <div className="px-4 pb-3 pt-1 text-xs" style={{ color: "#8aa0ad", borderTop: "1px solid rgba(253,224,71,0.15)" }}>
+                No additional artifacts found beyond what regex already captured.
               </div>
             )}
           </div>
