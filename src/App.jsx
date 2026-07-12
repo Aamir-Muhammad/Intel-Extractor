@@ -918,27 +918,6 @@ const htmlToText = (html) =>
     .replace(/&#92;|&bsol;/gi, "\\")
     .replace(/[ \t]+\n/g, "\n");
 
-// PDF text extraction using pdf.js (lazy-loaded so it only adds bundle weight
-// when actually parsing a PDF). Decompresses FlateDecode streams and extracts
-// actual text — unlike ASCII scraping which can't see compressed content.
-// PDF text extraction using pdf.js loaded from CDN at runtime (no bundling —
-// Vite/Rollup never sees an import). Decompresses FlateDecode streams and
-// extracts actual text — unlike ASCII scraping which can't see compressed content.
-const PDFJS_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.7.76";
-let pdfjsPromise = null;
-const loadPdfJs = () => {
-  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
-  if (pdfjsPromise) return pdfjsPromise;
-  pdfjsPromise = import(/* @vite-ignore */ `${PDFJS_CDN}/pdf.min.mjs`)
-    .then((mod) => {
-      const lib = mod?.getDocument ? mod : window.pdfjsLib;
-      lib.GlobalWorkerOptions.workerSrc = `${PDFJS_CDN}/pdf.worker.min.mjs`;
-      return lib;
-    })
-    .catch(() => { pdfjsPromise = null; return null; });
-  return pdfjsPromise;
-};
-
 // PDF text extraction using pdf.js loaded from CDN at runtime (no bundling — the
 // dynamic import URL is resolved by the browser, never by Rollup, so the build
 // never tries to resolve a "pdfjs-dist" package). Extracts the PDF's real text
@@ -957,6 +936,10 @@ const loadPdfJs = () => {
     })
     .catch((e) => { pdfjsPromise = null; console.warn("pdf.js CDN load failed:", e.message || e); return null; });
   return pdfjsPromise;
+};
+
+const extractPdfText = async (arrayBuffer) => {
+  ...
 };
 
 const extractPdfText = async (arrayBuffer) => {
