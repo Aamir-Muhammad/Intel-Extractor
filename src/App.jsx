@@ -21,7 +21,9 @@ const isPrivateIP = (ip) => {
   return a === 10 || a === 127 || a === 0 || (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 255);
 };
-const WL_DOMAINS = new Set(["github.com","www.github.com","localhost","example.com","www.example.com","kaspersky.com","www.kaspersky.com","fbi.gov","www.fbi.gov"]);
+const WL_DOMAINS = new Set(["github.com","www.github.com","localhost","example.com","www.example.com","kaspersky.com","www.kaspersky.com","fbi.gov","www.fbi.gov","mitre.org","attack.mitre.org","www.mitre.org"]);
+// Domain suffixes to filter (any domain ending in these gets removed)
+const WL_DOMAIN_SUFFIXES = [".mitre.org"];
 const WL_EMAIL_SUFFIXES = ["@kaspersky.com"];
 const WL_FILES = new Set([
   "cmd.exe","powershell.exe","pwsh.exe","mshta.exe","certutil.exe","regsvr32.exe",
@@ -45,7 +47,20 @@ const applyWhitelist = (data) => {
     let filtered = arr;
     if (cat === "IPV4") filtered = arr.filter(v => !isPrivateIP(v));
     else if (cat === "IPV6") filtered = arr.filter(v => !WL_IPS6.has(v.toLowerCase()));
-    else if (cat === "DOMAIN") filtered = arr.filter(v => !WL_DOMAINS.has(v.toLowerCase()));
+    else if (cat === "DOMAIN") filtered = arr.filter(v => {
+      const vl = v.toLowerCase();
+      if (WL_DOMAINS.has(vl)) return false;
+      if (WL_DOMAIN_SUFFIXES.some(sfx => vl === sfx.slice(1) || vl.endsWith(sfx))) return false;
+      return true;
+    });
+    else if (cat === "URL") filtered = arr.filter(v => {
+      try {
+        const host = new URL(v.includes("://") ? v : "http://" + v).hostname.toLowerCase();
+        if (WL_DOMAINS.has(host)) return false;
+        if (WL_DOMAIN_SUFFIXES.some(sfx => host === sfx.slice(1) || host.endsWith(sfx))) return false;
+      } catch { /* keep on parse failure */ }
+      return true;
+    });
     else if (cat === "EMAIL") filtered = arr.filter(v => {
       const vl = v.toLowerCase();
       return !WL_EMAIL_SUFFIXES.some(sfx => vl.endsWith(sfx));
@@ -447,7 +462,7 @@ const classify = (t) => {
   if (/^[a-fA-F0-9]{64}$/.test(t)) return ["SHA256", t.toLowerCase()];
   if (/^[a-fA-F0-9]{128}$/.test(t)) return ["SHA512", t.toLowerCase()];
   if (isIPv4(t)) return ["IPV4", t];
-  if (/^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/i.test(t)) return ["MAC_ADDRESS", t.toLowerCase()];
+  if (/^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(t) || /^(?:[0-9a-f]{2}-){5}[0-9a-f]{2}$/i.test(t)) return ["MAC_ADDRESS", t.toLowerCase()];
   if (/^(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{0,4}$/i.test(t) && (t.match(/:/g) || []).length >= 2) return ["IPV6", t.toLowerCase()];
   if (/^4[0-9AB][1-9A-HJ-NP-Za-km-z]{93}(?:[1-9A-HJ-NP-Za-km-z]{11})?$/.test(t)) return ["XMR", t];
   if (/^(bc1[ac-hj-np-z02-9]{11,71}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$/.test(t)) return ["BTC", t];
@@ -902,6 +917,32 @@ const htmlToText = (html) =>
     .replace(/&#0?39;|&apos;/gi, "'").replace(/&quot;/gi, '"')
     .replace(/&#92;|&bsol;/gi, "\\")
     .replace(/[ \t]+\n/g, "\n");
+
+// PDF text extraction using pdf.js (lazy-loaded so it only adds bundle weight
+// when actually parsing a PDF). Decompresses FlateDecode streams and extracts
+// actual text — unlike ASCII scraping which can't see compressed content.
+const extractPdfText = async (arrayBuffer) => {
+  try {
+    // Dynamic import — bundle only loads pdf.js when a PDF is fetched
+    const pdfjs = await import("pdfjs-dist/build/pdf.mjs");
+    // Point worker to CDN so we don't have to bundle the worker file
+    pdfjs.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.7.76/pdf.worker.min.mjs";
+    const loadingTask = pdfjs.getDocument({ data: arrayBuffer, isEvalSupported: false });
+    const pdf = await loadingTask.promise;
+    const parts = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      const line = content.items.map((it) => (typeof it.str === "string" ? it.str : "")).join(" ");
+      if (line.trim()) parts.push(line);
+    }
+    return parts.join("\n\n");
+  } catch (e) {
+    console.warn("pdf.js extraction failed:", e.message || e);
+    return null;
+  }
+};
 
 const SCRAPE_DENY = ["w3.org","schema.org","googleapis.com","gstatic.com","google.com","google-analytics.com","googletagmanager.com","doubleclick.net","facebook.com","twitter.com","x.com","t.co","linkedin.com","youtube.com","youtu.be","instagram.com","cloudflare.com","cloudfront.net","jsdelivr.net","cdnjs.com","fontawesome.com","wordpress.org","wp.com","gravatar.com","cookiebot.com","onetrust.com","gmpg.org","bit.ly","gist.github.com"];
 const hostOf = (s) => {
@@ -1436,19 +1477,39 @@ export default function App() {
       // Detect PDF binary content
       const isPDF = pRes.value.trimStart().startsWith("%PDF") || /\.pdf(\?|#|$)/i.test(url);
       if (isPDF) {
-        // Extract readable ASCII strings from PDF binary
-        const printable = pRes.value.replace(/[^\x20-\x7E\n\r\t]/g, " ");
-        let clean = printable.replace(/[ \t]+/g, " ");
-        // PDFs frequently break long tokens across lines. Rejoin lines that end
-        // mid-token (e.g. mid-base64) so the engine and AI see complete strings.
-        clean = clean.replace(/([A-Za-z0-9+/=_-])\s*\n\s*([A-Za-z0-9+/=_-])/g, "$1$2");
-        clean = clean.replace(/\s+/g, " ").trim();
-        articleText = clean;
-        articleBody = clean;
-        // Skip local IOC engine — PDF binary produces garbage FILE_PATHs even
-        // through the junk filter (Unicode-like /BaseFont/, /Filter/FlateDecode/
-        // structural strings survive because they look path-like).
-        // AI Scan is the right tool for extracting artifacts from PDFs.
+        // Refetch as binary and extract text via pdf.js — proper PDF parsing
+        // decompresses FlateDecode streams to reveal the actual command lines,
+        // registry keys, and other artifacts that ASCII scraping cannot see.
+        let pdfText = null;
+        try {
+          const binRes = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(url)}`);
+          if (binRes.ok) {
+            const buf = await binRes.arrayBuffer();
+            pdfText = await extractPdfText(buf);
+          }
+        } catch (e) { console.warn("PDF binary fetch failed:", e.message || e); }
+
+        if (pdfText && pdfText.length > 200) {
+          // Clean up: rejoin base64-fragmented tokens, normalize whitespace
+          let clean = pdfText.replace(/[ \t]+/g, " ");
+          clean = clean.replace(/([A-Za-z0-9+/=_-])\s*\n\s*([A-Za-z0-9+/=_-])/g, "$1$2");
+          clean = clean.replace(/\s+/g, " ").trim();
+          articleText = clean;
+          articleBody = clean;
+          // With proper PDF text (not garbage), the local engine can run safely
+          const ex = extractIocs(articleText);
+          engFull = ex.data;
+          engDetails = ex.registryDetails;
+        } else {
+          // pdf.js failed — fall back to ASCII extraction for at least the AI Summary
+          const printable = pRes.value.replace(/[^\x20-\x7E\n\r\t]/g, " ");
+          let clean = printable.replace(/[ \t]+/g, " ");
+          clean = clean.replace(/([A-Za-z0-9+/=_-])\s*\n\s*([A-Za-z0-9+/=_-])/g, "$1$2");
+          clean = clean.replace(/\s+/g, " ").trim();
+          articleText = clean;
+          articleBody = clean;
+          // Skip local engine — ASCII fallback produces garbage FILE_PATHs
+        }
       } else {
         articleText = htmlToText(pRes.value);
         articleBody = extractArticleBody(pRes.value);
