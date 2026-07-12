@@ -395,7 +395,43 @@ const extractStructured = (text) => {
     return blank(m);
   });
 
-  return { cleaned: work, regs, files, tasks, services };
+  // High-value command lines: encoded PowerShell, LOLBin invocations, staging
+  // These are separate from scheduled task / service creation commands, which
+  // already get captured with their associated task/service above.
+  const commands = [];
+  const seenCmds = new Set();
+  const addCmd = (c) => {
+    const s = c.replace(/\s+/g, " ").trim();
+    if (s.length > 8 && s.length < 2500 && !seenCmds.has(s)) {
+      seenCmds.add(s);
+      commands.push(s);
+    }
+  };
+
+  // 1) Encoded PowerShell: powershell/pwsh with -enc / -encodedcommand / -e followed by base64
+  const PS_ENC_RE = /\b(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\s+[^\n]{0,300}?-(?:enc(?:odedcommand)?|e)\s+["']?([A-Za-z0-9+/=]{40,})/gi;
+  work = work.replace(PS_ENC_RE, (m) => { addCmd(m); return blank(m); });
+
+  // 2) PowerShell one-liners with download cradles (IEX + Net.WebClient / Invoke-WebRequest)
+  const PS_CRADLE_RE = /\b(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\s+[^\n]{0,50}?(?:IEX|Invoke-Expression|Invoke-WebRequest|Net\.WebClient|DownloadString|DownloadFile)[^\n]{0,400}/gi;
+  work = work.replace(PS_CRADLE_RE, (m) => { addCmd(m); return blank(m); });
+
+  // 3) cmd /c or cmd.exe /c with an executable invocation
+  const CMD_EXEC_RE = /\bcmd(?:\.exe)?\s+\/[cCkK]\s+[^\n]{5,400}/gi;
+  work = work.replace(CMD_EXEC_RE, (m) => {
+    // Only capture if it contains a meaningful pattern (path, LOLBin, PowerShell, etc.)
+    if (/(?:powershell|pwsh|certutil|bitsadmin|mshta|rundll32|regsvr32|wmic|schtasks|sc\.exe|reg\s+add|cscript|wscript|http|\.exe|\.dll|\.bat|\.ps1|\.vbs|\.js)/i.test(m)) {
+      addCmd(m);
+      return blank(m);
+    }
+    return m;
+  });
+
+  // 4) Common LOLBins invoked with args (certutil -urlcache, bitsadmin /transfer, etc.)
+  const LOLBIN_RE = /\b(?:certutil|bitsadmin|mshta|rundll32|regsvr32|wmic|installutil|msbuild|msdt|forfiles|cmstp)(?:\.exe)?\s+[-/][a-z]+[^\n]{5,300}/gi;
+  work = work.replace(LOLBIN_RE, (m) => { addCmd(m); return blank(m); });
+
+  return { cleaned: work, regs, files, tasks, services, commands };
 };
 
 const classify = (t) => {
@@ -481,6 +517,7 @@ const extractIocs = (text) => {
     const canon = s.binPath ? `${s.name} → ${s.binPath}` : s.name;
     if (!seenSvcs.has(canon)) { seenSvcs.add(canon); serviceDetails.push(s); add("SERVICE", canon); }
   });
+  (structured.commands || []).forEach((c) => add("COMMAND_LINE", c));
 
   const segments = work.replace(/[\[\]]/g, "").split(/[\n\r;,|]+/);
 
@@ -1399,14 +1436,23 @@ export default function App() {
       // Detect PDF binary content
       const isPDF = pRes.value.trimStart().startsWith("%PDF") || /\.pdf(\?|#|$)/i.test(url);
       if (isPDF) {
-        // Extract readable ASCII strings from PDF binary — enough for AI Summary
-        // even though full PDF parsing (PDF.js) isn't feasible client-side.
-        // Take runs of printable chars, drop the binary noise, then dedupe by line.
+        // Extract readable ASCII strings from PDF binary
         const printable = pRes.value.replace(/[^\x20-\x7E\n\r\t]/g, " ");
-        const clean = printable.replace(/\s+/g, " ").trim();
+        let clean = printable.replace(/[ \t]+/g, " ");
+        // PDFs frequently break long tokens across lines. Rejoin lines that end
+        // mid-token (e.g. mid-base64) so the engine and AI see complete strings.
+        // Rule: if a line ends with a base64-safe char and the next starts with one, join.
+        clean = clean.replace(/([A-Za-z0-9+/=_-])\s*\n\s*([A-Za-z0-9+/=_-])/g, "$1$2");
+        // Also collapse leftover newlines to single spaces
+        clean = clean.replace(/\s+/g, " ").trim();
         articleText = clean;
-        articleBody = clean; // AI gets the same cleaned text
-        // Skip local IOC engine — PDF binary produces garbage FILE_PATHs
+        articleBody = clean;
+        // Run the local engine on cleaned PDF text — the FILE_PATH junk filter
+        // now rejects the PDF binary noise (base64, URI fragments, etc.) so valid
+        // IOCs are extracted while garbage is filtered out.
+        const ex = extractIocs(articleText);
+        engFull = ex.data;
+        engDetails = ex.registryDetails;
       } else {
         articleText = htmlToText(pRes.value);
         articleBody = extractArticleBody(pRes.value);
