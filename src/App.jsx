@@ -1441,18 +1441,14 @@ export default function App() {
         let clean = printable.replace(/[ \t]+/g, " ");
         // PDFs frequently break long tokens across lines. Rejoin lines that end
         // mid-token (e.g. mid-base64) so the engine and AI see complete strings.
-        // Rule: if a line ends with a base64-safe char and the next starts with one, join.
         clean = clean.replace(/([A-Za-z0-9+/=_-])\s*\n\s*([A-Za-z0-9+/=_-])/g, "$1$2");
-        // Also collapse leftover newlines to single spaces
         clean = clean.replace(/\s+/g, " ").trim();
         articleText = clean;
         articleBody = clean;
-        // Run the local engine on cleaned PDF text — the FILE_PATH junk filter
-        // now rejects the PDF binary noise (base64, URI fragments, etc.) so valid
-        // IOCs are extracted while garbage is filtered out.
-        const ex = extractIocs(articleText);
-        engFull = ex.data;
-        engDetails = ex.registryDetails;
+        // Skip local IOC engine — PDF binary produces garbage FILE_PATHs even
+        // through the junk filter (Unicode-like /BaseFont/, /Filter/FlateDecode/
+        // structural strings survive because they look path-like).
+        // AI Scan is the right tool for extracting artifacts from PDFs.
       } else {
         articleText = htmlToText(pRes.value);
         articleBody = extractArticleBody(pRes.value);
