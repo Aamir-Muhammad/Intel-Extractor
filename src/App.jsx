@@ -938,8 +938,6 @@ const loadPdfJs = () => {
   return pdfjsPromise;
 };
 
-const extractPdfText = async (arrayBuffer) => {
-  ...
 };
 
 const extractPdfText = async (arrayBuffer) => {
