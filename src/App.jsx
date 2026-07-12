@@ -921,13 +921,28 @@ const htmlToText = (html) =>
 // PDF text extraction using pdf.js (lazy-loaded so it only adds bundle weight
 // when actually parsing a PDF). Decompresses FlateDecode streams and extracts
 // actual text — unlike ASCII scraping which can't see compressed content.
+// PDF text extraction using pdf.js loaded from CDN at runtime (no bundling —
+// Vite/Rollup never sees an import). Decompresses FlateDecode streams and
+// extracts actual text — unlike ASCII scraping which can't see compressed content.
+const PDFJS_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.7.76";
+let pdfjsPromise = null;
+const loadPdfJs = () => {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (pdfjsPromise) return pdfjsPromise;
+  pdfjsPromise = import(/* @vite-ignore */ `${PDFJS_CDN}/pdf.min.mjs`)
+    .then((mod) => {
+      const lib = mod?.getDocument ? mod : window.pdfjsLib;
+      lib.GlobalWorkerOptions.workerSrc = `${PDFJS_CDN}/pdf.worker.min.mjs`;
+      return lib;
+    })
+    .catch(() => { pdfjsPromise = null; return null; });
+  return pdfjsPromise;
+};
+
 const extractPdfText = async (arrayBuffer) => {
   try {
-    // Dynamic import — bundle only loads pdf.js when a PDF is fetched
-    const pdfjs = await import("pdfjs-dist/build/pdf.mjs");
-    // Point worker to CDN so we don't have to bundle the worker file
-    pdfjs.GlobalWorkerOptions.workerSrc =
-      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.7.76/pdf.worker.min.mjs";
+    const pdfjs = await loadPdfJs();
+    if (!pdfjs) throw new Error("pdf.js CDN load failed");
     const loadingTask = pdfjs.getDocument({ data: arrayBuffer, isEvalSupported: false });
     const pdf = await loadingTask.promise;
     const parts = [];
