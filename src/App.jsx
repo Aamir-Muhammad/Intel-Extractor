@@ -21,7 +21,8 @@ const isPrivateIP = (ip) => {
   return a === 10 || a === 127 || a === 0 || (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 255);
 };
-const WL_DOMAINS = new Set(["github.com","www.github.com","localhost","example.com","www.example.com"]);
+const WL_DOMAINS = new Set(["github.com","www.github.com","localhost","example.com","www.example.com","kaspersky.com","www.kaspersky.com","fbi.gov","www.fbi.gov"]);
+const WL_EMAIL_SUFFIXES = ["@kaspersky.com"];
 const WL_FILES = new Set([
   "cmd.exe","powershell.exe","pwsh.exe","mshta.exe","certutil.exe","regsvr32.exe",
   "rundll32.exe","wscript.exe","cscript.exe","msiexec.exe","bitsadmin.exe",
@@ -45,7 +46,29 @@ const applyWhitelist = (data) => {
     if (cat === "IPV4") filtered = arr.filter(v => !isPrivateIP(v));
     else if (cat === "IPV6") filtered = arr.filter(v => !WL_IPS6.has(v.toLowerCase()));
     else if (cat === "DOMAIN") filtered = arr.filter(v => !WL_DOMAINS.has(v.toLowerCase()));
+    else if (cat === "EMAIL") filtered = arr.filter(v => {
+      const vl = v.toLowerCase();
+      return !WL_EMAIL_SUFFIXES.some(sfx => vl.endsWith(sfx));
+    });
     else if (cat === "FILE_NAME") filtered = arr.filter(v => !WL_FILES.has(v.toLowerCase()));
+    else if (cat === "FILE_PATH") filtered = arr.filter(v => {
+      const vl = v.trim();
+      if (vl.length < 4) return false;
+      if (vl === "\\" || vl === "/" || vl === "\\\\") return false;
+      // Reject HTTP protocol fragments
+      if (/HTTP\/[\d.]/i.test(vl)) return false;
+      if (/\\r\\n|\r\n/.test(vl)) return false;
+      // Reject base64-like content (mostly consecutive base64 chars, no realistic path separators)
+      // Base64 is 60+ chars of [A-Za-z0-9+/=] with high entropy
+      if (vl.length > 40 && /^[A-Za-z0-9+/=_-]+$/.test(vl)) return false;
+      // Reject strings with high base64 density (>70% base64-safe chars in long strings without normal path separators)
+      if (vl.length > 30 && !vl.includes("\\") && !vl.includes(":\\") && !/\.\w{1,5}$/.test(vl)) return false;
+      // Reject web URI paths (contain URI-typical characters like ?, &, =, %)
+      if (/[?&=%#]/.test(vl) && !/^[A-Za-z]:\\/.test(vl) && !vl.startsWith("\\\\")) return false;
+      // Reject strings that look like URL paths (start with / and contain URL-like patterns)
+      if (/^\/[^/]*\/[^/]*\/.*[?&=]/.test(vl)) return false;
+      return true;
+    });
     if (filtered.length) out[cat] = filtered;
   });
   return out;
@@ -63,8 +86,8 @@ const TYPE_COLORS = {
   CVE: "#ff3b3b", BTC: "#f7931a", XMR: "#ff6600", ETH: "#8a92b2",
   ASN: "#2dd4bf", MAC_ADDRESS: "#a3e635",
   REGISTRY: "#e879f9", FILE_NAME: "#94a3b8", FILE_PATH: "#a5b4fc",
+  SCHEDULED_TASK: "#fb7185", SERVICE: "#c4b5fd",
   MITRE_ATTACK: "#f43f5e", YARA: "#38bdf8",
-  SCHEDULED_TASK: "#ffcc00",
 };
 const FALLBACK_PALETTE = ["#00e5ff","#00ff9c","#c084fc","#fbbf24","#ff4d6d","#2dd4bf","#a3e635","#7c9cff","#f59e0b","#e879f9"];
 const colorFor = (cat) => {
@@ -214,76 +237,6 @@ const maybeFileFromData = (v, files) => {
 // Extracts registry keys (incl. values) and file paths from full text BEFORE
 // whitespace tokenization, blanking consumed matches so the tokenizer doesn't
 // shred multi-word paths like `C:\Program Files\...` or `...\Windows NT\...`.
-
-// ============================================================
-//  Scheduled Task extraction (schtasks.exe, PowerShell cmdlets,
-//  and prose/report-style "Task Name:" / "Task Action:" labels)
-// ============================================================
-const SCHTASKS_CREATE_RE = /\bschtasks(?:\.exe)?\s+\/create\b([^\r\n]*)/gi;
-const PS_SCHEDTASK_RE = /\bRegister-ScheduledTask\b([^\r\n]*)/gi;
-const TASK_LABEL_PAIR_RE = /Task\s*Name\s*:\s*([^\r\n,;]{2,150})[\s\S]{0,80}?Task\s*Action\s*:\s*([^\r\n]{2,300})/gi;
-const TASK_NAME_LABEL_RE = /\b(?:Scheduled\s+)?Task\s*Name\s*:\s*([^\r\n,;]{2,150})/gi;
-const TASK_ACTION_LABEL_RE = /\bTask\s*Action\s*:\s*([^\r\n]{2,300})/gi;
-const TASK_PROSE_RE = /\bscheduled\s+task\s+(?:named|called|titled)\s+(?:"([^"\r\n]{2,100})"|“([^”\r\n]{2,100})”|([A-Za-z0-9][A-Za-z0-9 ._()\-]{1,80}?))(?=\s+(?:by|that|which|to|and|before|after|configured|runs?|running|is|was)\b|[.,;:]|$)/gi;
-
-const cleanTaskField = (s) => unquote(String(s).trim()).replace(/[.,;:!?)'"`\]]+$/, "");
-
-const canonicalTask = (t) => {
-  let s = t.name ? `"${t.name}"` : "(unnamed task)";
-  if (t.action) s += ` → ${t.action}`;
-  if (t.trigger) s += ` [${t.trigger}]`;
-  return s;
-};
-
-const extractScheduledTasks = (text) => {
-  let work = text;
-  const tasks = [];
-  const seen = new Set();
-  const blank = (m) => " ".repeat(m.length);
-  const pushTask = (t) => {
-    const c = canonicalTask(t);
-    if (!seen.has(c)) { seen.add(c); tasks.push(t); }
-  };
-
-  work = work.replace(SCHTASKS_CREATE_RE, (m, rest) => {
-    const tn = rest.match(/\/tn\s+("[^"\r\n]+"|\S+)/i);
-    const tr = rest.match(/\/tr\s+("[^"\r\n]+"|\S+)/i);
-    const sc = rest.match(/\/sc\s+(\S+)/i);
-    if (!tn && !tr) return m;
-    pushTask({
-      name: tn ? cleanTaskField(tn[1]) : undefined,
-      action: tr ? cleanTaskField(tr[1]) : undefined,
-      trigger: sc ? cleanTaskField(sc[1]).toUpperCase() : undefined,
-    });
-    return blank(m);
-  });
-
-  work = work.replace(PS_SCHEDTASK_RE, (m, rest) => {
-    const tn = rest.match(/-TaskName\s+("[^"\r\n]+"|'[^'\r\n]+'|\S+)/i);
-    const ex = rest.match(/-Execute\s+("[^"\r\n]+"|'[^'\r\n]+'|\S+)/i);
-    const ar = rest.match(/-Argument\s+("[^"\r\n]+"|'[^'\r\n]+'|\S+)/i);
-    if (!tn && !ex) return m;
-    const action = [ex ? cleanTaskField(ex[1]) : "", ar ? cleanTaskField(ar[1]) : ""].filter(Boolean).join(" ");
-    pushTask({ name: tn ? cleanTaskField(tn[1]) : undefined, action: action || undefined });
-    return blank(m);
-  });
-
-  work = work.replace(TASK_LABEL_PAIR_RE, (m, name, action) => {
-    pushTask({ name: cleanTaskField(name), action: cleanTaskField(action) });
-    return blank(m);
-  });
-
-  work = work.replace(TASK_NAME_LABEL_RE, (m, name) => { pushTask({ name: cleanTaskField(name) }); return blank(m); });
-  work = work.replace(TASK_ACTION_LABEL_RE, (m, action) => { pushTask({ action: cleanTaskField(action) }); return blank(m); });
-  work = work.replace(TASK_PROSE_RE, (m, q1, q2, bare) => {
-  const name = q1 || q2 || bare;
-  pushTask({ name: cleanTaskField(name) });
-  return blank(m);
-});
-
-  return tasks;
-};
-
 const extractStructured = (text) => {
   let work = text;
   const regs = [];
@@ -389,7 +342,60 @@ const extractStructured = (text) => {
     return m;
   });
 
-  return { cleaned: work, regs, files };
+  // 6) Scheduled tasks and services (EDR-telemetry-visible persistence)
+  const tasks = [];
+  const services = [];
+
+  // schtasks /create /tn "Name" [/tr "cmd"] [/sc daily] [/ru user]
+  const SCHTASKS_RE = /\bschtasks(?:\.exe)?\s+[^"\n]{0,50}?\/create\s+([^\n]{5,500})/gi;
+  work = work.replace(SCHTASKS_RE, (m, rest) => {
+    const tn = rest.match(/\/tn\s+("[^"]{1,120}"|'[^']{1,120}'|[^\s]+)/i);
+    const tr = rest.match(/\/tr\s+("[^"]{1,200}"|'[^']{1,200}'|[^\s]+)/i);
+    if (tn) {
+      const name = unquote(tn[1]);
+      const target = tr ? unquote(tr[1]) : null;
+      tasks.push({ name, target, source: "schtasks" });
+    }
+    return blank(m);
+  });
+
+  // PowerShell New-ScheduledTask, Register-ScheduledTask
+  const PS_TASK_RE = /\b(?:Register|New)-ScheduledTask\s+([^\n]{5,500})/gi;
+  work = work.replace(PS_TASK_RE, (m, rest) => {
+    const tn = rest.match(/-TaskName\s+("[^"]{1,120}"|'[^']{1,120}'|\S+)/i);
+    if (tn) {
+      tasks.push({ name: unquote(tn[1]), source: "powershell" });
+    }
+    return blank(m);
+  });
+
+  // Prose: "creates a scheduled task named 'X'" / "task named X" / "Task Scheduler entry X"
+  const PROSE_TASK_RE = /\b(?:scheduled\s+task|task\s+scheduler(?:\s+entry)?)\s+(?:named|called|entry)?\s*["'`]([^"'`\n]{3,120})["'`]/gi;
+  let ptm;
+  while ((ptm = PROSE_TASK_RE.exec(work))) {
+    tasks.push({ name: ptm[1], source: "prose" });
+  }
+
+  // sc create / sc.exe create ServiceName binPath= "..."
+  const SC_CREATE_RE = /\bsc(?:\.exe)?\s+create\s+(\S{3,80})\s+([^\n]{0,300})/gi;
+  work = work.replace(SC_CREATE_RE, (m, name, rest) => {
+    const bp = rest.match(/binPath\s*=\s*("[^"]{1,300}"|'[^']{1,300}'|\S+)/i);
+    services.push({ name: unquote(name), binPath: bp ? unquote(bp[1]) : null, source: "sc" });
+    return blank(m);
+  });
+
+  // PowerShell New-Service -Name X -BinaryPathName "..."
+  const PS_SVC_RE = /\bNew-Service\s+([^\n]{5,300})/gi;
+  work = work.replace(PS_SVC_RE, (m, rest) => {
+    const n = rest.match(/-Name\s+("[^"]{1,80}"|'[^']{1,80}'|\S+)/i);
+    if (n) {
+      const bp = rest.match(/-BinaryPathName\s+("[^"]{1,300}"|'[^']{1,300}'|\S+)/i);
+      services.push({ name: unquote(n[1]), binPath: bp ? unquote(bp[1]) : null, source: "powershell" });
+    }
+    return blank(m);
+  });
+
+  return { cleaned: work, regs, files, tasks, services };
 };
 
 const classify = (t) => {
@@ -417,7 +423,7 @@ const classify = (t) => {
   return null;
 };
 
-const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","YARA","ASN","MAC_ADDRESS","BTC","XMR","ETH","SCHEDULED_TASK","REGISTRY","FILE_NAME","FILE_PATH"];
+const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","YARA","ASN","MAC_ADDRESS","BTC","XMR","ETH","REGISTRY","SCHEDULED_TASK","SERVICE","FILE_NAME","FILE_PATH"];
 
 // Fixed on-screen card order: Domain, URL, IPs, all hashes first — then the rest.
 // Static (not count-based) so discarding IOCs never shuffles box positions.
@@ -444,9 +450,6 @@ const extractIocs = (text) => {
 
   let work = refangSoft(text);
 
-  const scheduledTasks = extractScheduledTasks(work);
-  scheduledTasks.forEach((t) => add("SCHEDULED_TASK", canonicalTask(t)));
-
   work = work.replace(/\[([^\]\n]+)\]\(([^)\n]*)\)/g, (_m, label) => {
     const t = trimTok(label.trim());
     if (t) {
@@ -464,6 +467,20 @@ const extractIocs = (text) => {
   work = structured.cleaned;
   structured.regs.forEach(pushReg);
   structured.files.forEach((f) => add("FILE_PATH", f));
+
+  // Scheduled tasks and services — structured artifacts for EDR hunting
+  const taskDetails = [];
+  const serviceDetails = [];
+  const seenTasks = new Set();
+  const seenSvcs = new Set();
+  (structured.tasks || []).forEach((t) => {
+    const canon = t.target ? `${t.name} → ${t.target}` : t.name;
+    if (!seenTasks.has(canon)) { seenTasks.add(canon); taskDetails.push(t); add("SCHEDULED_TASK", canon); }
+  });
+  (structured.services || []).forEach((s) => {
+    const canon = s.binPath ? `${s.name} → ${s.binPath}` : s.name;
+    if (!seenSvcs.has(canon)) { seenSvcs.add(canon); serviceDetails.push(s); add("SERVICE", canon); }
+  });
 
   const segments = work.replace(/[\[\]]/g, "").split(/[\n\r;,|]+/);
 
@@ -665,7 +682,7 @@ const huntKQL = (cat, arr) => {
       const initField = `InitiatingProcess${cat}`;
       const varName = `${cat}_IOCs`;
       const hashDyn = `dynamic([${kqlList(arr)}])`;
-      return `let ${varName} = ${hashDyn};\nlet ProcEvents =\n    DeviceProcessEvents\n    | where Timestamp > ago(30d)\n    | where ${hashField} in~ (${varName}) or ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = iff(${hashField} in~ (${varName}), ${hashField}, ${initField}),\n        MatchedField = iff(${hashField} in~ (${varName}), "${hashField}", "${initField}"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName, " > ", FileName)\n    | project Timestamp, DeviceName, AccountName, SourceTable="DeviceProcessEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = ProcessCommandLine;\nlet FileEvents =\n    DeviceFileEvents\n    | where Timestamp > ago(30d)\n    | where ${hashField} in~ (${varName}) or ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = iff(${hashField} in~ (${varName}), ${hashField}, ${initField}),\n        MatchedField = iff(${hashField} in~ (${varName}), "${hashField}", "${initField}"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceFileEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet ImageLoadEvents =\n    DeviceImageLoadEvents\n    | where Timestamp > ago(30d)\n    | where ${hashField} in~ (${varName}) or ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = iff(${hashField} in~ (${varName}), ${hashField}, ${initField}),\n        MatchedField = iff(${hashField} in~ (${varName}), "${hashField}", "${initField}"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceImageLoadEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nunion ProcEvents, FileEvents, ImageLoadEvents\n| order by Timestamp desc`;
+      return `let ${varName} = ${hashDyn};\nlet ProcEvents =\n    DeviceProcessEvents\n    | where Timestamp > ago(30d)\n    | where ${hashField} in~ (${varName}) or ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = iff(${hashField} in~ (${varName}), ${hashField}, ${initField}),\n        MatchedField = iff(${hashField} in~ (${varName}), "${hashField}", "${initField}"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName, " > ", FileName)\n    | project Timestamp, DeviceName, AccountName, SourceTable="DeviceProcessEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = ProcessCommandLine;\nlet FileEvents =\n    DeviceFileEvents\n    | where Timestamp > ago(30d)\n    | where ${hashField} in~ (${varName}) or ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = iff(${hashField} in~ (${varName}), ${hashField}, ${initField}),\n        MatchedField = iff(${hashField} in~ (${varName}), "${hashField}", "${initField}"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceFileEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet ImageLoadEvents =\n    DeviceImageLoadEvents\n    | where Timestamp > ago(30d)\n    | where ${hashField} in~ (${varName}) or ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = iff(${hashField} in~ (${varName}), ${hashField}, ${initField}),\n        MatchedField = iff(${hashField} in~ (${varName}), "${hashField}", "${initField}"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceImageLoadEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet NetworkEvents =\n    DeviceNetworkEvents\n    | where Timestamp > ago(30d)\n    | where ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = ${initField},\n        MatchedField = "${initField}",\n        Detail       = strcat(RemoteIP, ":", tostring(RemotePort), " ", RemoteUrl),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceNetworkEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet RegistryEvents =\n    DeviceRegistryEvents\n    | where Timestamp > ago(30d)\n    | where ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = ${initField},\n        MatchedField = "${initField}",\n        Detail       = strcat(RegistryKey, " \\\\ ", RegistryValueName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceRegistryEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet LogonEvents =\n    DeviceLogonEvents\n    | where Timestamp > ago(30d)\n    | where ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = ${initField},\n        MatchedField = "${initField}",\n        Detail       = strcat(LogonType, " | ", RemoteIP),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, AccountName, SourceTable="DeviceLogonEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet MiscEvents =\n    DeviceEvents\n    | where Timestamp > ago(30d)\n    | where ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = ${initField},\n        MatchedField = "${initField}",\n        Detail       = ActionType,\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, AccountName, SourceTable="DeviceEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nunion ProcEvents, FileEvents, ImageLoadEvents,\n      NetworkEvents, RegistryEvents, LogonEvents, MiscEvents\n| summarize\n    FirstSeen    = min(Timestamp),\n    LastSeen     = max(Timestamp),\n    EventCount   = count(),\n    Accounts     = make_set(AccountName),\n    Details      = make_set(Detail),\n    ProcessTrees = make_set(ProcessTree),\n    CommandLines = make_set(CommandLine)\n    by DeviceName, SourceTable, MatchedHash, MatchedField\n| sort by FirstSeen desc`;
     }
     case "FILE_NAME":
       return `DeviceFileEvents\n| where FileName in~ (${kqlList(arr)})\n| project-reorder Timestamp, DeviceName, FileName, FolderPath, SHA256, ActionType, InitiatingProcessFileName\nunion DeviceProcessEvents\n| where FileName in~ (${kqlList(arr)}) or ProcessCommandLine has_any (${kqlList(arr)})\n| project-reorder Timestamp, DeviceName, FileName, ProcessCommandLine, SHA256`;
@@ -675,6 +692,15 @@ const huntKQL = (cat, arr) => {
       return `EmailEvents\n| where SenderFromAddress in~ (${kqlList(arr)})\n| project Timestamp, Subject, SenderFromAddress, RecipientEmailAddress, DeliveryAction, NetworkMessageId`;
     case "CVE":
       return `DeviceTvmSoftwareVulnerabilities\n| where CveId in~ (${kqlList(arr)})\n| project DeviceName, SoftwareName, SoftwareVersion, CveId, VulnerabilitySeverityLevel`;
+    case "SCHEDULED_TASK": {
+      // Extract names from "Name" or "Name → target" canonical strings
+      const names = arr.map((v) => v.split(" → ")[0].trim());
+      return `let TaskNames = dynamic([${names.map((n) => `"${n.replace(/"/g, '\\"')}"`).join(", ")}]);\nDeviceProcessEvents\n| where FileName in~ ("schtasks.exe", "at.exe", "wmic.exe", "powershell.exe", "pwsh.exe")\n| where ProcessCommandLine has_any (TaskNames)\n| project Timestamp, DeviceName, AccountName, FileName, ProcessCommandLine, InitiatingProcessFileName, InitiatingProcessCommandLine\nunion (\n    DeviceRegistryEvents\n    | where RegistryKey has "Schedule\\\\TaskCache\\\\Tasks"\n    | where RegistryValueData has_any (TaskNames) or RegistryValueName has_any (TaskNames)\n    | project Timestamp, DeviceName, RegistryKey, RegistryValueName, RegistryValueData, InitiatingProcessFileName\n)`;
+    }
+    case "SERVICE": {
+      const names = arr.map((v) => v.split(" → ")[0].trim());
+      return `let SvcNames = dynamic([${names.map((n) => `"${n.replace(/"/g, '\\"')}"`).join(", ")}]);\nDeviceProcessEvents\n| where FileName in~ ("sc.exe", "powershell.exe", "pwsh.exe", "services.exe")\n| where ProcessCommandLine has_any (SvcNames)\n| project Timestamp, DeviceName, AccountName, FileName, ProcessCommandLine, InitiatingProcessFileName\nunion (\n    DeviceRegistryEvents\n    | where RegistryKey has "SYSTEM\\\\CurrentControlSet\\\\Services"\n    | where RegistryKey has_any (SvcNames)\n    | project Timestamp, DeviceName, RegistryKey, RegistryValueName, RegistryValueData, ActionType, InitiatingProcessFileName\n)`;
+    }
     default: return null;
   }
 };
@@ -703,6 +729,16 @@ const huntCQL = (cat, arr) => {
       return `#event_simpleName=ProcessRollup2 OR #event_simpleName=NewExecutableWritten\n| ImageFileName=/(${cqlPat(arr)})/i\n| groupBy([ComputerName, ImageFileName, CommandLine, SHA256HashData], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
     case "EMAIL":
       return `#event_simpleName=UserLogon OR #event_simpleName=SSOLogin\n| ${cqlIn("UserPrincipal")}\n| groupBy([ComputerName, UserPrincipal, LogonType], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
+    case "SCHEDULED_TASK": {
+      const names = arr.map((v) => v.split(" → ")[0].trim());
+      const namePat = names.map(reEsc).join("|");
+      return `#event_simpleName=/ProcessRollup2/iF\n|case{\n\tImageFileName=/(schtasks\\.exe|at\\.exe|wmic\\.exe|powershell\\.exe|pwsh\\.exe)/iF| CommandLine=/(${namePat})/iF |HuntObject:= CommandLine |HuntLogic:= "Scheduled task created/modified via commandline";\n}\n|groupBy([@timestamp,ComputerName,UserName,HuntLogic,HuntObject,ImageFileName,ParentBaseFileName], limit=max)`;
+    }
+    case "SERVICE": {
+      const names = arr.map((v) => v.split(" → ")[0].trim());
+      const namePat = names.map(reEsc).join("|");
+      return `#event_simpleName=/ProcessRollup2/iF\n|case{\n\tImageFileName=/(sc\\.exe|powershell\\.exe|pwsh\\.exe)/iF| CommandLine=/(${namePat})/iF |HuntObject:= CommandLine |HuntLogic:= "Service created/modified via commandline";\n}\n|groupBy([@timestamp,ComputerName,UserName,HuntLogic,HuntObject,ImageFileName,ParentBaseFileName], limit=max)`;
+    }
     default: return null;
   }
 };
@@ -728,12 +764,20 @@ const huntSPL = (cat, arr) => {
       return `index=* sourcetype=ms:o365:management:activity OR sourcetype=exchange\n| search (SenderAddress IN (${quoted}) OR UserId IN (${quoted}))\n| table _time, SenderAddress, RecipientAddress, Subject, Operation`;
     case "CVE":
       return `index=* sourcetype=tenable:sc:vuln OR sourcetype=qualys\n| search cve IN (${quoted})\n| table _time, host, cve, severity, plugin_name`;
+    case "SCHEDULED_TASK": {
+      const names = arr.map((v) => `"*${v.split(" → ")[0].trim()}*"`).join(", ");
+      return `index=* source="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1\n| search (Image="*schtasks.exe" OR Image="*at.exe" OR Image="*powershell.exe" OR Image="*wmic.exe")\n| search CommandLine IN (${names})\n| table _time, host, Image, CommandLine, ParentImage, User`;
+    }
+    case "SERVICE": {
+      const names = arr.map((v) => `"*${v.split(" → ")[0].trim()}*"`).join(", ");
+      return `index=* source="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1\n| search (Image="*sc.exe" OR Image="*powershell.exe")\n| search CommandLine IN (${names})\n| table _time, host, Image, CommandLine, ParentImage, User`;
+    }
     default: return null;
   }
 };
 
 // Categories that support hunt queries
-const HUNT_CATS = new Set(["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","FILE_NAME","FILE_PATH","EMAIL","CVE"]);
+const HUNT_CATS = new Set(["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","FILE_NAME","FILE_PATH","EMAIL","CVE","SCHEDULED_TASK","SERVICE"]);
 
 // ============================================================
 //  Page scrape helpers
@@ -1198,14 +1242,21 @@ export default function App() {
     // Local engine over the fetched page text
     let engFull = null, engDetails = [], articleText = "", articleBody = "";
     if (pRes.status === "fulfilled" && pRes.value && pRes.value.length >= 50) {
-      // Detect PDF binary content — htmlToText on raw PDF produces garbage strings
-      // that the IOC engine misinterprets as file paths. Skip local extraction for PDFs;
-      // the API call (/parse via iocparser) handles PDFs correctly on its own.
+      // Detect PDF binary content
       const isPDF = pRes.value.trimStart().startsWith("%PDF") || /\.pdf(\?|#|$)/i.test(url);
-      if (!isPDF) {
-        articleText = htmlToText(pRes.value);       // full page text for IOC extraction
-        articleBody = extractArticleBody(pRes.value); // clean article prose for AI summary
-        if (articleBody.length < 800) articleBody = articleText; // fallback to full page if extraction is too short
+      if (isPDF) {
+        // Extract readable ASCII strings from PDF binary — enough for AI Summary
+        // even though full PDF parsing (PDF.js) isn't feasible client-side.
+        // Take runs of printable chars, drop the binary noise, then dedupe by line.
+        const printable = pRes.value.replace(/[^\x20-\x7E\n\r\t]/g, " ");
+        const clean = printable.replace(/\s+/g, " ").trim();
+        articleText = clean;
+        articleBody = clean; // AI gets the same cleaned text
+        // Skip local IOC engine — PDF binary produces garbage FILE_PATHs
+      } else {
+        articleText = htmlToText(pRes.value);
+        articleBody = extractArticleBody(pRes.value);
+        if (articleBody.length < 800) articleBody = articleText;
         const ex = extractIocs(articleText);
         engFull = ex.data;
         engDetails = ex.registryDetails;
