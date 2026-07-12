@@ -939,10 +939,31 @@ const loadPdfJs = () => {
   return pdfjsPromise;
 };
 
+// PDF text extraction using pdf.js loaded from CDN at runtime (no bundling — the
+// dynamic import URL is resolved by the browser, never by Rollup, so the build
+// never tries to resolve a "pdfjs-dist" package). Extracts the PDF's real text
+// layer — unlike ASCII scraping which can't see compressed content.
+const PDFJS_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.7.76";
+let pdfjsPromise = null;
+const loadPdfJs = () => {
+  if (typeof window !== "undefined" && window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (pdfjsPromise) return pdfjsPromise;
+  pdfjsPromise = import(/* @vite-ignore */ `${PDFJS_CDN}/pdf.min.mjs`)
+    .then((mod) => {
+      const lib = mod && mod.getDocument ? mod : (typeof window !== "undefined" ? window.pdfjsLib : null);
+      if (!lib) throw new Error("pdf.js module has no getDocument");
+      lib.GlobalWorkerOptions.workerSrc = `${PDFJS_CDN}/pdf.worker.min.mjs`;
+      return lib;
+    })
+    .catch((e) => { pdfjsPromise = null; console.warn("pdf.js CDN load failed:", e.message || e); return null; });
+  return pdfjsPromise;
+};
+
 const extractPdfText = async (arrayBuffer) => {
   try {
+    if (!arrayBuffer || arrayBuffer.byteLength < 1000) return null; // too small to be a real PDF
     const pdfjs = await loadPdfJs();
-    if (!pdfjs) throw new Error("pdf.js CDN load failed");
+    if (!pdfjs) return null;
     const loadingTask = pdfjs.getDocument({ data: arrayBuffer, isEvalSupported: false });
     const pdf = await loadingTask.promise;
     const parts = [];
@@ -952,7 +973,10 @@ const extractPdfText = async (arrayBuffer) => {
       const line = content.items.map((it) => (typeof it.str === "string" ? it.str : "")).join(" ");
       if (line.trim()) parts.push(line);
     }
-    return parts.join("\n\n");
+    const out = parts.join("\n\n");
+    // Guard: a scanned/image-only PDF has no text layer — return null so the
+    // caller falls back cleanly instead of surfacing an empty result.
+    return out.trim().length > 40 ? out : null;
   } catch (e) {
     console.warn("pdf.js extraction failed:", e.message || e);
     return null;
@@ -1497,7 +1521,7 @@ export default function App() {
         // registry keys, and other artifacts that ASCII scraping cannot see.
         let pdfText = null;
         try {
-          const binRes = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(url)}`);
+          const binRes = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(url)}&raw=1`);
           if (binRes.ok) {
             const buf = await binRes.arrayBuffer();
             pdfText = await extractPdfText(buf);
