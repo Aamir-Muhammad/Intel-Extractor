@@ -21,7 +21,12 @@ const isPrivateIP = (ip) => {
   return a === 10 || a === 127 || a === 0 || (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 255);
 };
+// DOMAIN whitelist — github.com IS filtered here (bare github.com domain is noise)
 const WL_DOMAINS = new Set(["github.com","www.github.com","localhost","example.com","www.example.com","kaspersky.com","www.kaspersky.com","fbi.gov","www.fbi.gov","mitre.org","attack.mitre.org","www.mitre.org"]);
+// URL whitelist — github.com is intentionally NOT here: full GitHub URLs are
+// often real IOCs (payload hosting, raw.githubusercontent staging) and must
+// survive into the URL card. Only the bare DOMAIN entry gets filtered.
+const WL_URL_HOSTS = new Set(["localhost","example.com","www.example.com","kaspersky.com","www.kaspersky.com","fbi.gov","www.fbi.gov","mitre.org","attack.mitre.org","www.mitre.org"]);
 // Domain suffixes to filter (any domain ending in these gets removed)
 const WL_DOMAIN_SUFFIXES = [".mitre.org"];
 const WL_EMAIL_SUFFIXES = ["@kaspersky.com"];
@@ -56,7 +61,7 @@ const applyWhitelist = (data) => {
     else if (cat === "URL") filtered = arr.filter(v => {
       try {
         const host = new URL(v.includes("://") ? v : "http://" + v).hostname.toLowerCase();
-        if (WL_DOMAINS.has(host)) return false;
+        if (WL_URL_HOSTS.has(host)) return false;
         if (WL_DOMAIN_SUFFIXES.some(sfx => host === sfx.slice(1) || host.endsWith(sfx))) return false;
       } catch { /* keep on parse failure */ }
       return true;
@@ -87,6 +92,12 @@ const applyWhitelist = (data) => {
     if (filtered.length) out[cat] = filtered;
   });
   return out;
+};
+
+// Country code (ISO alpha-2) → flag emoji, e.g. "RU" → 🇷🇺
+const countryFlag = (cc) => {
+  if (!cc || !/^[A-Za-z]{2}$/.test(cc)) return "";
+  return String.fromCodePoint(...[...cc.toUpperCase()].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65));
 };
 
 // ============================================================
@@ -716,6 +727,13 @@ const buildSPL = (details) => {
 const kqlList = (arr) => arr.map((v) => `"${v.replace(/"/g, '\\"')}"`).join(", ");
 const cqlPat = (arr) => arr.map((v) => reEsc(v)).join("|");
 
+// CrowdStrike hash hunt template — coalesces written-file vs process image,
+// groups across event types, and renders First/Last seen in Asia/Dubai time.
+const cqlHashHunt = (field, arr) => {
+  const vals = arr.map((v) => `"${v}"`).join(",");
+  return `| in(field="${field}", values=[${vals}], ignoreCase=true)\n|ImageFileName:=coalesce(TargetFileName,ImageFileName)\n| groupBy([#event_simpleName,ComputerName,ContextImageFileName, ImageFileName, CommandLine, ${field}], function=stats([count(as=Total), min(@timestamp, as=FirstTime), max(@timestamp, as=LastTime)]), limit=max)\n| FirstTime := formatTime("%e %b %Y %r", field=FirstTime, locale=en_UAE, timezone="Asia/Dubai")\n| LastTime  := formatTime("%e %b %Y %r", field=LastTime, locale=en_UAE, timezone="Asia/Dubai")`;
+};
+
 const huntKQL = (cat, arr) => {
   const dyn = `dynamic([${kqlList(arr)}])`;
   switch (cat) {
@@ -751,7 +769,7 @@ const huntKQL = (cat, arr) => {
     }
     case "SERVICE": {
       const names = arr.map((v) => v.split(" → ")[0].trim());
-      return `let SvcNames = dynamic([${names.map((n) => `"${n.replace(/"/g, '\\"')}"`).join(", ")}]);\nDeviceProcessEvents\n| where FileName in~ ("sc.exe", "powershell.exe", "pwsh.exe", "services.exe")\n| where ProcessCommandLine has_any (SvcNames)\n| project Timestamp, DeviceName, AccountName, FileName, ProcessCommandLine, InitiatingProcessFileName\nunion (\n    DeviceRegistryEvents\n    | where RegistryKey has "SYSTEM\\\\CurrentControlSet\\\\Services"\n    | where RegistryKey has_any (SvcNames)\n    | project Timestamp, DeviceName, RegistryKey, RegistryValueName, RegistryValueData, ActionType, InitiatingProcessFileName\n)`;
+      return `let SvcNames = dynamic([${names.map((n) => `"${n.replace(/"/g, '\\"')}"`).join(", ")}]);\nDeviceProcessEvents\n| where FileName in~ ("sc.exe", "powershell.exe", "pwsh.exe","cmd.exe", "services.exe")\n| where ProcessCommandLine has_any (SvcNames)\n| project-reorder Timestamp, DeviceName, AccountName, FileName, ProcessCommandLine, InitiatingProcessFileName;\nunion (\n    DeviceRegistryEvents\n    | where RegistryKey has "SYSTEM\\\\CurrentControlSet\\\\Services"\n    | where RegistryKey has_any (SvcNames)\n    | project-reorder Timestamp, DeviceName, RegistryKey, RegistryValueName, RegistryValueData, ActionType, InitiatingProcessFileName\n)`;
     }
     case "COMMAND_LINE": {
       // Extract distinctive tokens: quoted strings, paths, flags after / or -
@@ -784,14 +802,20 @@ const huntCQL = (cat, arr) => {
       return `#event_simpleName=NetworkConnectIP6\n| ${cqlIn("RemoteAddressIP6")}\n| groupBy([ComputerName, RemoteAddressIP6, RemotePort, ImageFileName], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
     case "DOMAIN":
       return `#event_simpleName=DnsRequest\n| ${cqlInWild("DomainName")}\n| groupBy([ComputerName, DomainName, RespondingDnsServer, ImageFileName], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
-    case "URL":
-      return `#event_simpleName=DnsRequest OR #event_simpleName=HttpRequest\n| /(${cqlPat(arr)})/i\n| groupBy([ComputerName, DomainName, HttpUrl, ImageFileName], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
+    case "URL": {
+      // defineTable-based URL hunt: builds an in-memory URLHunt lookup from the
+      // IOC URLs, then correlates DnsRequest (domain match) and HttpRequest
+      // (full URL match, query string excluded) against it.
+      const withScheme = arr.map((u) => (u.includes("://") ? u : "https://" + u));
+      const urlList = withScheme.map((u) => `        "${u.replace(/"/g, '\\"')}"`).join(",\n");
+      return `defineTable(query={\n| createEvents([\n${urlList}\n      ])\n|parseUrl(@rawstring)\n|rename(field="@rawstring.host", as="DomainName")\n|rename(field="@rawstring.path", as="Uri")\n|rename(field="@rawstring", as="IOC-Reference")\n}, include=["IOC-Reference",DomainName,Uri], name="URLHunt")\n|#event_simpleName=/HttpRequest|DnsRequest/iF\n|case{\n  #event_simpleName=HttpRequest |rename(field="FileName", as="ContextBaseFileName")|FullURL:= format(format="htps://%s%s", field=[HttpHost,HttpPath])|parseUrl(FullURL);*\n}\n|case{\n  #event_simpleName=/DnsRequest/iF |match(file="URLHunt", field=[DomainName],column=[DomainName],ignoreCase=true,nrows=max,strict=true)|drop([Uri])|Hunt1:=" Domain Match ";\n  #event_simpleName=/HttpRequest/iF |match(file="URLHunt", field=[HttpHost,FullURL.path],column=[DomainName,Uri],ignoreCase=true,nrows=max,strict=true)|Hunt2:=" Full URL Match (except query) ";\n  // #event_simpleName=/HttpRequest/iF |match(file="URLHunt", field=[HttpHost],column=[DomainName],ignoreCase=true,nrows=max,strict=true)|Hunt3:="  Domain Match  "; //Uncomment for advanced Hunting (Only domain match for HttpRequest)\n}\n|Hunt:=concat(Hunt1,Hunt2,Hunt3)\n|DomainName:=coalesce(DomainName,HttpHost)\n|groupBy([@timestamp,ComputerName,ContextBaseFileName,#event_simpleName,DomainName,HttpPath,HttpMethod],function=collect([Hunt]),limit=max)`;
+    }
     case "MD5":
-      return `#event_simpleName=ProcessRollup2\n| ${cqlIn("MD5HashData")}\n| groupBy([ComputerName, ImageFileName, CommandLine, MD5HashData, SHA256HashData], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
+      return cqlHashHunt("MD5HashData", arr);
     case "SHA1":
-      return `#event_simpleName=ProcessRollup2\n| ${cqlIn("SHA1HashData")}\n| groupBy([ComputerName, ImageFileName, CommandLine, SHA1HashData], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
+      return cqlHashHunt("SHA1HashData", arr);
     case "SHA256":
-      return `#event_simpleName=ProcessRollup2\n| ${cqlIn("SHA256HashData")}\n| groupBy([ComputerName, ImageFileName, CommandLine, SHA256HashData], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
+      return cqlHashHunt("SHA256HashData", arr);
     case "FILE_NAME":
       return `#event_simpleName=/ProcessRollup2|Written/iF\n|case{\n\t#event_simpleName=/Written/iF| FileName=/(${cqlPat(arr)})/iF |HuntObject:= FileName |HuntLogic:= "File written to disk";\n\t#event_simpleName=/ProcessRollup2/iF| CommandLine=/(${cqlPat(arr)})/iF |HuntObject:= CommandLine |HuntLogic:= "File / Payload execution via commandline";\n}\n|groupBy([@timetamp,ComputerName,UserName,HuntLogic,HuntObject,ContextBaseFileName,IsOnRemovableDisk,ZoneIdentifier,ParentBaseFileName], limit=max)`;
     case "FILE_PATH":
@@ -1145,8 +1169,8 @@ export default function App() {
     if (enrichCache[key]) return;
     setEnrichCache((c) => ({ ...c, [key]: { loading: true } }));
     const results = {};
-    const callEnrich = async (api, otxType, otxSection) => {
-      const body = { api, value };
+    const callEnrich = async (api, otxType, otxSection, overrideValue) => {
+      const body = { api, value: overrideValue || value };
       if (otxType) body.otx_type = otxType;
       if (otxSection) body.otx_section = otxSection;
       const r = await fetch(`${WORKER_BASE}/enrich`, {
@@ -1260,30 +1284,15 @@ export default function App() {
             if (parts.length > 2) {
               const parentDomain = parts.slice(-2).join(".");
               try {
-                const pj = await callEnrich("otx", "domain");
+                const pj = await callEnrich("otx", "domain", null, parentDomain);
                 // Use parent data if it has more pulses
                 if (pj && !pj.error && (pj.pulse_info?.count ?? 0) > 0) {
                   // Keep the original response but merge parent pulse data
-                  j = { ...j, pulse_info: pj.pulse_info, _parentFallback: parentDomain };
+                  j = { ...j, pulse_info: pj.pulse_info, country_name: pj.country_name || j.country_name,
+                    country_code: pj.country_code || j.country_code,
+                    asn: pj.asn || j.asn, as: pj.as || j.as, _parentFallback: parentDomain };
                 }
               } catch {}
-              // Also try querying the base domain directly
-              if ((j.pulse_info?.count ?? 0) === 0) {
-                try {
-                  const body = { api: "otx", value: parentDomain, otx_type: "domain" };
-                  const r = await fetch(`${WORKER_BASE}/enrich`, {
-                    method: "POST", headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(body),
-                  });
-                  if (r.ok) {
-                    const pj = await r.json();
-                    if (pj && !pj.error && (pj.pulse_info?.count ?? 0) > 0) {
-                      j = { ...j, pulse_info: pj.pulse_info, country_name: pj.country_name || j.country_name,
-                        asn: pj.asn || j.asn, as: pj.as || j.as, _parentFallback: parentDomain };
-                    }
-                  }
-                } catch {}
-              }
             }
           }
 
@@ -1301,11 +1310,14 @@ export default function App() {
               ? j.validation.map((v) => typeof v === "string" ? v : v?.source || "").filter(Boolean)
               : [];
 
+            const cc = j.country_code2 || j.country_code || null;
             results.otx = {
               pulses: j.pulse_info?.count ?? 0,
               reputation: j.reputation ?? null,
-              country: j.country_name || j.country_code || null,
-              asn: j.asn ? `AS${j.asn}` : null,
+              country: j.country_name || cc || null,
+              countryCode: cc,
+              flag: countryFlag(cc),
+              asn: j.asn ? String(j.asn).startsWith("AS") ? String(j.asn) : `AS${j.asn}` : null,
               asnName: typeof j.as === "string" ? j.as : null,
               tags: hiFiTags.length ? hiFiTags.join(", ") : null,
               whitelisted: j.whitelisted ?? null,
@@ -1314,6 +1326,26 @@ export default function App() {
             };
           }
         } catch (e) { console.warn("Enrich OTX failed:", e.message); }
+      }
+      // Dedicated WHOIS/ASN + Geo lookup for IP addresses — OTX geo section
+      // returns country, city and the registered ASN/org for the IP.
+      if (["IPV4","IPV6"].includes(cat)) {
+        try {
+          const g = await callEnrich("otx", cat === "IPV4" ? "IPv4" : "IPv6", "geo");
+          if (g && !g.error) {
+            const cc = g.country_code2 || g.country_code || null;
+            const asnRaw = g.asn || null; // OTX geo asn is usually "AS15169 Google LLC"
+            if (cc || asnRaw || g.country_name || g.city) {
+              results.whoisASN = {
+                asn: asnRaw,
+                country: g.country_name || cc || null,
+                countryCode: cc,
+                flag: countryFlag(cc),
+                city: g.city || null,
+              };
+            }
+          }
+        } catch (e) { console.warn("Enrich Geo/ASN failed:", e.message); }
       }
       // OTX WHOIS for domains — registrant org, country, registration age
       if (cat === "DOMAIN") {
@@ -1359,7 +1391,7 @@ export default function App() {
       else if ((results.otx?.pulses || 0) > 0) verdict = "Suspicious";
       // Recently registered domain with OTX data = suspicious
       else if (results.whois && results.whois.ageDays !== null && results.whois.ageDays < 90 && results.otx) verdict = "Suspicious";
-      // Parent domain had pulses (subdomain fallback hit) 
+      // Parent domain had pulses (subdomain fallback hit)
       else if (results.otx?.parentDomain && results.otx.pulses > 0) verdict = "Suspicious";
 
       // OTX-only with 0 pulses and no other signals → Unknown
@@ -1495,9 +1527,10 @@ export default function App() {
       // Detect PDF binary content
       const isPDF = pRes.value.trimStart().startsWith("%PDF") || /\.pdf(\?|#|$)/i.test(url);
       if (isPDF) {
-        // Refetch as binary and extract text via pdf.js — proper PDF parsing
-        // decompresses FlateDecode streams to reveal the actual command lines,
-        // registry keys, and other artifacts that ASCII scraping cannot see.
+        // Refetch as binary (raw=1 = untouched bytes from the Worker) and extract
+        // text via pdf.js — proper PDF parsing decompresses FlateDecode streams to
+        // reveal the actual command lines, registry keys, and other artifacts
+        // that ASCII scraping cannot see.
         let pdfText = null;
         try {
           const binRes = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(url)}&raw=1`);
@@ -2162,7 +2195,12 @@ export default function App() {
                             )}
                             {enr.data.otx && (
                               <span className="rounded-full px-2 py-0.5" style={{ color: "#2dd4bf", backgroundColor: "rgba(45,212,191,0.12)", border: "1px solid rgba(45,212,191,0.3)" }}>
-                                OTX · {enr.data.otx.pulses} pulses{enr.data.otx.validation ? ` · ${enr.data.otx.validation}` : ""}{enr.data.otx.country ? ` · ${enr.data.otx.country}` : ""}{enr.data.otx.asnName ? ` · ${enr.data.otx.asnName}` : enr.data.otx.asn ? ` · ${enr.data.otx.asn}` : ""}{enr.data.otx.tags ? ` · ${enr.data.otx.tags}` : ""}{enr.data.otx.parentDomain ? ` (via ${enr.data.otx.parentDomain})` : ""}
+                                OTX · {enr.data.otx.pulses} pulses{enr.data.otx.validation ? ` · ${enr.data.otx.validation}` : ""}{enr.data.otx.country ? ` · ${enr.data.otx.flag ? enr.data.otx.flag + " " : ""}${enr.data.otx.country}` : ""}{enr.data.otx.asnName ? ` · ${enr.data.otx.asnName}` : enr.data.otx.asn ? ` · ${enr.data.otx.asn}` : ""}{enr.data.otx.tags ? ` · ${enr.data.otx.tags}` : ""}{enr.data.otx.parentDomain ? ` (via ${enr.data.otx.parentDomain})` : ""}
+                              </span>
+                            )}
+                            {enr.data.whoisASN && (
+                              <span className="rounded-full px-2 py-0.5" style={{ color: "#a78bfa", backgroundColor: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)" }}>
+                                WHOIS/ASN{enr.data.whoisASN.country ? ` · ${enr.data.whoisASN.flag ? enr.data.whoisASN.flag + " " : ""}${enr.data.whoisASN.country}` : ""}{enr.data.whoisASN.city ? ` (${enr.data.whoisASN.city})` : ""}{enr.data.whoisASN.asn ? ` · ${enr.data.whoisASN.asn}` : ""}
                               </span>
                             )}
                             {enr.data.whois && (
