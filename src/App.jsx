@@ -1035,7 +1035,7 @@ const buildWorkbook = (sheets) => {
 
 export default function App() {
   const [mode, setMode] = useState("url");
-  const [url, setUrl] = useState("");
+  const [url, setUrl] = useState("https://securelist.com/whatsapp-vbs-rmm-campaign/120290/");
   const [jsonText, setJsonText] = useState("");
   const [rawText, setRawText] = useState("");
   const [iocData, setIocData] = useState(null);
@@ -2184,7 +2184,7 @@ export default function App() {
                               title="Open in VirusTotal"
                               className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity flex items-center justify-center"
                               style={{ width: 26, height: 26 }}>
-                              <img src="https://www.virustotal.com/gui/images/favicon.png" alt="VT" width={14} height={14} style={{ display: "block" }} />
+                              <img src="https://www.virustotal.com/gui/images/favicon.png" alt="VT" width={14} height={14} style={{ display: "block", marginTop: "-1px" }} />
                             </a>
                           )}
                           <button onClick={() => copyText(ioc, rowKey)}
