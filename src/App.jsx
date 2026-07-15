@@ -2182,8 +2182,9 @@ export default function App() {
                           {vtLink(cat, arr[i]) && (
                             <a href={vtLink(cat, arr[i])} target="_blank" rel="noreferrer noopener"
                               title="Open in VirusTotal"
-                              className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity">
-                              <img src="https://www.virustotal.com/gui/images/favicon.png" alt="VT" width={14} height={14} style={{ display: "inline-block", verticalAlign: "middle" }} />
+                              className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity flex items-center justify-center"
+                              style={{ width: 26, height: 26 }}>
+                              <img src="https://www.virustotal.com/gui/images/favicon.png" alt="VT" width={14} height={14} style={{ display: "block" }} />
                             </a>
                           )}
                           <button onClick={() => copyText(ioc, rowKey)}
