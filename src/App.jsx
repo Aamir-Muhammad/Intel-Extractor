@@ -1244,19 +1244,26 @@ export default function App() {
           if (j.query_status === "ok" && Array.isArray(j.data) && j.data.length > 0) {
             const d = j.data[0];
             // Extract detection names from vendor_intel (e.g. Trojan.Win32.Agentb.tpwa)
+            // Skip untrusted vendors entirely; filter "clean" detections when any
+            // suspicious/malicious detection exists (so infostealers don't show "Legit File")
+            const SKIP_VENDORS = new Set(["YOROI_YOMI"]);
+            const CLEAN_LABELS = new Set(["legit file","clean","safe","benign","legitimate","no threat","not malicious","whitelisted","trusted","harmless","undetected"]);
             let detections = [], mbVerdict = null;
             if (d.vendor_intel && typeof d.vendor_intel === "object") {
               Object.entries(d.vendor_intel).forEach(([vendor, info]) => {
+                if (SKIP_VENDORS.has(vendor)) return; // untrusted vendor — skip entirely
                 if (info && typeof info === "object") {
                   if (info.verdict && info.verdict.toUpperCase() !== "UNKNOWN") mbVerdict = info.verdict;
                   if (Array.isArray(info.detections)) detections.push(...info.detections);
                   else if (typeof info.detection === "string") detections.push(info.detection);
-                  // Kaspersky-style: detections array at top level
-                  if (Array.isArray(info.detections)) detections.push(...info.detections);
                 }
               });
             }
-            detections = [...new Set(detections.filter(Boolean))].slice(0, 3);
+            detections = [...new Set(detections.filter(Boolean))];
+            // If ANY detection is suspicious/malicious, drop all clean/benign labels
+            const hasMalicious = detections.some((det) => !CLEAN_LABELS.has(det.toLowerCase()));
+            if (hasMalicious) detections = detections.filter((det) => !CLEAN_LABELS.has(det.toLowerCase()));
+            detections = detections.slice(0, 3);
             results.malwarebazaar = {
               family: d.signature || "unknown",
               type: d.file_type || "—",
@@ -1266,6 +1273,7 @@ export default function App() {
               tags: Array.isArray(d.tags) ? d.tags.filter((t) => t && !GENERIC_TAGS.has(t.toLowerCase())).slice(0, 4).join(", ") : null,
               detections: detections.length ? detections.join(" | ") : null,
               verdict: mbVerdict,
+              fileName: d.file_name || null,
             };
           }
         } catch (e) { console.warn("Enrich MalwareBazaar failed:", e.message); }
@@ -2231,8 +2239,8 @@ export default function App() {
                               </span>
                             )}
                             {enr.data.malwarebazaar?.detections && (
-                              <span className="rounded-full px-2 py-0.5" style={{ color: "#f59e0b", backgroundColor: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.3)" }}>
-                                {enr.data.malwarebazaar.detections}
+                              <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.3)" }}>
+                                🔴 {enr.data.malwarebazaar.fileName ? enr.data.malwarebazaar.fileName + " | " : ""}{enr.data.malwarebazaar.detections}
                               </span>
                             )}
                             {enr.data.otx && enr.data._verdict !== "Unknown" && (
