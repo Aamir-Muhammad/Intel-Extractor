@@ -2183,7 +2183,7 @@ export default function App() {
                             <a href={vtLink(cat, arr[i])} target="_blank" rel="noreferrer noopener"
                               title="Open in VirusTotal"
                               className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity">
-                              <img src="https://www.virustotal.com/gui/images/favicon.png" alt="VT" width={14} height={14} style={{ display: "inline-block" }} />
+                              <img src="https://www.virustotal.com/gui/images/favicon.png" alt="VT" width={14} height={14} style={{ display: "inline-block", verticalAlign: "middle" }} />
                             </a>
                           )}
                           <button onClick={() => copyText(ioc, rowKey)}
@@ -2234,9 +2234,9 @@ export default function App() {
                                 {enr.data.malwarebazaar.detections}
                               </span>
                             )}
-                            {enr.data.otx && (
+                            {enr.data.otx && enr.data._verdict !== "Unknown" && (
                               <span className="rounded-full px-2 py-0.5" style={{ color: "#2dd4bf", backgroundColor: "rgba(45,212,191,0.12)", border: "1px solid rgba(45,212,191,0.3)" }}>
-                                OTX · {enr.data.otx.pulses} pulses{enr.data.otx.validation ? ` · ${enr.data.otx.validation}` : ""}{enr.data.otx.country ? <>{" · "}<span style={{ color: "#eafcff", fontWeight: 700 }}>{enr.data.otx.flag ? enr.data.otx.flag + " " : ""}{enr.data.otx.country}</span></> : ""}{enr.data.otx.tags ? ` · ${enr.data.otx.tags}` : ""}{enr.data.otx.parentDomain ? ` (via ${enr.data.otx.parentDomain})` : ""}
+                                OTX · {enr.data.otx.pulses} pulses{enr.data.otx.validation ? ` · ${enr.data.otx.validation}` : ""}{enr.data.otx.tags ? ` · ${enr.data.otx.tags}` : ""}{enr.data.otx.parentDomain ? ` (via ${enr.data.otx.parentDomain})` : ""}
                               </span>
                             )}
                             {enr.data.whoisASN && (
@@ -2261,10 +2261,10 @@ export default function App() {
                           </div>
                         )}
                         {enr && !enr.loading && !enr.data && enr.error && (
-                          <p className="ml-4 mb-1 text-[10px]" style={{ color: "#5d7382" }}>⚪ Unknown to our integrated Enrichment Engines. Please check on VirusTotal.</p>
+                          <p className="ml-4 mb-1 text-[10px] font-bold" style={{ color: "#5d7382" }}>⚪ Unknown to our integrated Enrichment Engines. Please check on VirusTotal.</p>
                         )}
                         {enr?.data && enr.data._verdict === "Unknown" && (
-                          <p className="ml-4 mb-1 text-[10px]" style={{ color: "#5d7382" }}>⚪ Unknown to our integrated Enrichment Engines. Please check on VirusTotal.</p>
+                          <p className="ml-4 mb-1 text-[10px] font-bold" style={{ color: "#5d7382" }}>⚪ Unknown to our integrated Enrichment Engines. Please check on VirusTotal.</p>
                         )}
                       </div>
                     );
