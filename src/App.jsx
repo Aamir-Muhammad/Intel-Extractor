@@ -1277,9 +1277,12 @@ export default function App() {
             MD5: "file", SHA1: "file", SHA256: "file", SHA512: "file" };
           let j = await callEnrich("otx", otxTypeMap[cat]);
 
-          // For subdomains with 0 pulses, query the parent/base domain as fallback
-          // (OTX often has data on the parent but not the subdomain)
-          if (cat === "DOMAIN" && j && !j.error && (j.pulse_info?.count ?? 0) === 0) {
+          // For subdomains with 0 pulses AND no tags AND no validation, query
+          // the parent/base domain as fallback. If the FQDN itself has tags or
+          // validation flags, keep FQDN data — even with 0 pulses it's specific.
+          const fqdnTags = (j?.pulse_info?.pulses || []).flatMap((p) => p.tags || []).filter(Boolean);
+          const fqdnVal = Array.isArray(j?.validation) ? j.validation.filter(Boolean) : [];
+          if (cat === "DOMAIN" && j && !j.error && (j.pulse_info?.count ?? 0) === 0 && fqdnTags.length === 0 && fqdnVal.length === 0) {
             const parts = value.split(".");
             if (parts.length > 2) {
               const parentDomain = parts.slice(-2).join(".");
@@ -1317,8 +1320,7 @@ export default function App() {
               country: j.country_name || cc || null,
               countryCode: cc,
               flag: countryFlag(cc),
-              asn: j.asn ? String(j.asn).startsWith("AS") ? String(j.asn) : `AS${j.asn}` : null,
-              asnName: typeof j.as === "string" ? j.as : null,
+              // ASN info intentionally omitted from OTX chip — shown in dedicated WHOIS/ASN chip instead
               tags: hiFiTags.length ? hiFiTags.join(", ") : null,
               whitelisted: j.whitelisted ?? null,
               validation: valFlags.length ? valFlags.join(", ") : null,
@@ -1376,6 +1378,40 @@ export default function App() {
         } catch (e) { console.warn("Enrich OTX WHOIS failed:", e.message); }
       }
 
+      // ---- Validin (fallback — only when other engines returned nothing useful) ----
+      // For DOMAIN and IP types, if ThreatFox + URLhaus + MalwareBazaar returned
+      // nothing and OTX had 0 pulses + no validation, call Validin as last resort.
+      if (["IPV4","IPV6","DOMAIN"].includes(cat)) {
+        const hasUsefulOther = results.threatfox || results.urlhaus || results.malwarebazaar
+          || (results.otx && ((results.otx.pulses || 0) > 0 || results.otx.validation));
+        if (!hasUsefulOther) {
+          try {
+            const vApi = cat === "DOMAIN" ? "validin_domain" : "validin_ip";
+            const vj = await callEnrich(vApi);
+            if (vj && !vj.error && vj.annotations && Array.isArray(vj.annotations)) {
+              // For IP: show all annotation titles
+              // For DOMAIN: show annotation titles except when risk_cat contains "popularity"
+              const isDomain = cat === "DOMAIN";
+              const relevant = vj.annotations.filter((a) => {
+                if (!a || !a.title) return false;
+                if (isDomain && a.risk_cat && String(a.risk_cat).toLowerCase().includes("popularity")) return false;
+                return true;
+              });
+              const malicious = relevant.filter((a) => a.risk_cat === "malicious" || (a.score && a.score >= 7));
+              const titles = relevant.map((a) => a.title).slice(0, 6);
+              if (relevant.length > 0) {
+                results.validin = {
+                  verdict: vj.verdict || null,
+                  score: vj.score ?? null,
+                  titles,
+                  maliciousCount: malicious.length,
+                };
+              }
+            }
+          } catch (e) { console.warn("Enrich Validin failed:", e.message); }
+        }
+      }
+
       // ---- Derive combined verdict ----
       let verdict = "Unknown";
       if (results.threatfox) verdict = "Malicious";
@@ -1394,8 +1430,14 @@ export default function App() {
       // Parent domain had pulses (subdomain fallback hit)
       else if (results.otx?.parentDomain && results.otx.pulses > 0) verdict = "Suspicious";
 
+      // Validin verdict override
+      else if (results.validin) {
+        if (results.validin.verdict === "malicious" || results.validin.maliciousCount > 0) verdict = "Malicious";
+        else if (results.validin.verdict === "suspicious") verdict = "Suspicious";
+      }
+
       // OTX-only with 0 pulses and no other signals → Unknown
-      const hasNonOtx = results.threatfox || results.urlhaus || results.malwarebazaar || results.whois;
+      const hasNonOtx = results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin;
       if (!hasNonOtx && results.otx && results.otx.pulses === 0 && !results.otx.validation) verdict = "Unknown";
 
       const hasData = Object.keys(results).length > 0;
@@ -2140,9 +2182,8 @@ export default function App() {
                           {vtLink(cat, arr[i]) && (
                             <a href={vtLink(cat, arr[i])} target="_blank" rel="noreferrer noopener"
                               title="Open in VirusTotal"
-                              className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
-                              style={{ color: "#4d8af0" }}>
-                              <Globe size={14} />
+                              className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity">
+                              <img src="https://www.virustotal.com/gui/images/favicon.png" alt="VT" width={14} height={14} style={{ display: "inline-block" }} />
                             </a>
                           )}
                           <button onClick={() => copyText(ioc, rowKey)}
@@ -2160,7 +2201,7 @@ export default function App() {
                         </div>
                         {enr?.data && (
                           <div className="ml-4 mb-1.5 flex flex-wrap gap-1 text-[10px]">
-                            {enr.data._verdict && (
+                            {enr.data._verdict && enr.data._verdict !== "Unknown" && (
                               <span className="rounded-full px-2 py-0.5 font-bold" style={{
                                 color: enr.data._verdict === "Malicious" ? "#ff4d6d" : enr.data._verdict === "Suspicious" ? "#fbbf24" : enr.data._verdict === "Whitelisted" ? "#00ff9c" : "#8aa0ad",
                                 backgroundColor: enr.data._verdict === "Malicious" ? "rgba(255,77,109,0.15)" : enr.data._verdict === "Suspicious" ? "rgba(251,191,36,0.15)" : enr.data._verdict === "Whitelisted" ? "rgba(0,255,156,0.15)" : "rgba(138,160,173,0.15)",
@@ -2195,12 +2236,12 @@ export default function App() {
                             )}
                             {enr.data.otx && (
                               <span className="rounded-full px-2 py-0.5" style={{ color: "#2dd4bf", backgroundColor: "rgba(45,212,191,0.12)", border: "1px solid rgba(45,212,191,0.3)" }}>
-                                OTX · {enr.data.otx.pulses} pulses{enr.data.otx.validation ? ` · ${enr.data.otx.validation}` : ""}{enr.data.otx.country ? ` · ${enr.data.otx.flag ? enr.data.otx.flag + " " : ""}${enr.data.otx.country}` : ""}{enr.data.otx.asnName ? ` · ${enr.data.otx.asnName}` : enr.data.otx.asn ? ` · ${enr.data.otx.asn}` : ""}{enr.data.otx.tags ? ` · ${enr.data.otx.tags}` : ""}{enr.data.otx.parentDomain ? ` (via ${enr.data.otx.parentDomain})` : ""}
+                                OTX · {enr.data.otx.pulses} pulses{enr.data.otx.validation ? ` · ${enr.data.otx.validation}` : ""}{enr.data.otx.country ? <>{" · "}<span style={{ color: "#eafcff", fontWeight: 700 }}>{enr.data.otx.flag ? enr.data.otx.flag + " " : ""}{enr.data.otx.country}</span></> : ""}{enr.data.otx.tags ? ` · ${enr.data.otx.tags}` : ""}{enr.data.otx.parentDomain ? ` (via ${enr.data.otx.parentDomain})` : ""}
                               </span>
                             )}
                             {enr.data.whoisASN && (
                               <span className="rounded-full px-2 py-0.5" style={{ color: "#a78bfa", backgroundColor: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)" }}>
-                                WHOIS/ASN{enr.data.whoisASN.country ? ` · ${enr.data.whoisASN.flag ? enr.data.whoisASN.flag + " " : ""}${enr.data.whoisASN.country}` : ""}{enr.data.whoisASN.city ? ` (${enr.data.whoisASN.city})` : ""}{enr.data.whoisASN.asn ? ` · ${enr.data.whoisASN.asn}` : ""}
+                                WHOIS/ASN{enr.data.whoisASN.country ? <>{" · "}<span style={{ color: "#eafcff", fontWeight: 700 }}>{enr.data.whoisASN.flag ? enr.data.whoisASN.flag + " " : ""}{enr.data.whoisASN.country}</span></> : ""}{enr.data.whoisASN.city ? ` (${enr.data.whoisASN.city})` : ""}{enr.data.whoisASN.asn ? ` · ${enr.data.whoisASN.asn}` : ""}
                               </span>
                             )}
                             {enr.data.whois && (
@@ -2208,10 +2249,22 @@ export default function App() {
                                 WHOIS{enr.data.whois.org ? ` · ${enr.data.whois.org}` : ""}{enr.data.whois.country ? ` · ${enr.data.whois.country}` : ""}{enr.data.whois.ageDays !== null ? ` · ${enr.data.whois.ageDays}d old` : ""}
                               </span>
                             )}
+                            {enr.data.validin && (
+                              <span className="rounded-full px-2 py-0.5" style={{
+                                color: enr.data.validin.verdict === "malicious" ? "#ff4d6d" : enr.data.validin.verdict === "suspicious" ? "#fbbf24" : "#e879f9",
+                                backgroundColor: enr.data.validin.verdict === "malicious" ? "rgba(255,77,109,0.12)" : enr.data.validin.verdict === "suspicious" ? "rgba(251,191,36,0.12)" : "rgba(232,121,249,0.12)",
+                                border: `1px solid ${enr.data.validin.verdict === "malicious" ? "rgba(255,77,109,0.3)" : enr.data.validin.verdict === "suspicious" ? "rgba(251,191,36,0.3)" : "rgba(232,121,249,0.3)"}`,
+                              }}>
+                                Validin{enr.data.validin.verdict ? ` · ${enr.data.validin.verdict}` : ""}{enr.data.validin.score !== null ? ` (${enr.data.validin.score}/10)` : ""}{enr.data.validin.maliciousCount > 0 ? ` · Malicious x ${enr.data.validin.maliciousCount}` : ""}{enr.data.validin.titles?.length ? ` · ${enr.data.validin.titles.join(" · ")}` : ""}
+                              </span>
+                            )}
                           </div>
                         )}
                         {enr && !enr.loading && !enr.data && enr.error && (
-                          <p className="ml-4 mb-1 text-[10px]" style={{ color: "#5d7382" }}>⚪ Unknown to our integrated Enrichment Engines. Please check on VirusTotal</p>
+                          <p className="ml-4 mb-1 text-[10px]" style={{ color: "#5d7382" }}>⚪ Unknown to our integrated Enrichment Engines. Please check on VirusTotal.</p>
+                        )}
+                        {enr?.data && enr.data._verdict === "Unknown" && (
+                          <p className="ml-4 mb-1 text-[10px]" style={{ color: "#5d7382" }}>⚪ Unknown to our integrated Enrichment Engines. Please check on VirusTotal.</p>
                         )}
                       </div>
                     );
