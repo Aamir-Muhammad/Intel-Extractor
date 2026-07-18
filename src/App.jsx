@@ -3,7 +3,7 @@ import * as XLSX from "xlsx";
 import {
   Shield, Search, Download, Copy, Check, Loader2, Globe,
   ClipboardPaste, AlertTriangle, ShieldOff, Trash2, Wand2,
-  Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles, ChevronDown, RefreshCw
+  Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles, ChevronDown, RefreshCw, FileUp
 } from "lucide-react";
 
 // ============================================================
@@ -986,6 +986,110 @@ const extractPdfText = async (arrayBuffer) => {
   }
 };
 
+// DOCX text extraction using mammoth.js loaded from CDN at runtime
+const MAMMOTH_CDN = "https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.8.0/mammoth.browser.min.js";
+let mammothPromise = null;
+const loadMammoth = () => {
+  if (typeof window !== "undefined" && window.mammoth) return Promise.resolve(window.mammoth);
+  if (mammothPromise) return mammothPromise;
+  mammothPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = MAMMOTH_CDN;
+    s.onload = () => resolve(window.mammoth);
+    s.onerror = () => { mammothPromise = null; reject(new Error("mammoth CDN load failed")); };
+    document.head.appendChild(s);
+  });
+  return mammothPromise;
+};
+
+const extractDocxText = async (arrayBuffer) => {
+  try {
+    const mammoth = await loadMammoth();
+    if (!mammoth) return null;
+    const result = await mammoth.extractRawText({ arrayBuffer });
+    const text = result?.value || "";
+    return text.trim().length > 40 ? text : null;
+  } catch (e) {
+    console.warn("DOCX extraction failed:", e.message || e);
+    return null;
+  }
+};
+
+// PPTX text extraction using JSZip loaded from CDN at runtime
+// PPTX files are ZIP archives with XML slides containing text in <a:t> tags
+const JSZIP_CDN = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js";
+let jszipPromise = null;
+const loadJSZip = () => {
+  if (typeof window !== "undefined" && window.JSZip) return Promise.resolve(window.JSZip);
+  if (jszipPromise) return jszipPromise;
+  jszipPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = JSZIP_CDN;
+    s.onload = () => resolve(window.JSZip);
+    s.onerror = () => { jszipPromise = null; reject(new Error("JSZip CDN load failed")); };
+    document.head.appendChild(s);
+  });
+  return jszipPromise;
+};
+
+const extractPptxText = async (arrayBuffer) => {
+  try {
+    const JSZip = await loadJSZip();
+    if (!JSZip) return null;
+    const zip = await JSZip.loadAsync(arrayBuffer);
+    const parts = [];
+    // Iterate slide XML files in order (slide1.xml, slide2.xml, ...)
+    const slideFiles = Object.keys(zip.files)
+      .filter((n) => /^ppt\/slides\/slide\d+\.xml$/i.test(n))
+      .sort((a, b) => {
+        const na = parseInt(a.match(/slide(\d+)/i)?.[1] || "0");
+        const nb = parseInt(b.match(/slide(\d+)/i)?.[1] || "0");
+        return na - nb;
+      });
+    for (const name of slideFiles) {
+      const xml = await zip.files[name].async("text");
+      // Extract text from <a:t>...</a:t> tags
+      const texts = [];
+      xml.replace(/<a:t[^>]*>([^<]*)<\/a:t>/gi, (_, t) => { if (t.trim()) texts.push(t.trim()); return ""; });
+      if (texts.length) parts.push(texts.join(" "));
+    }
+    // Also check notesSlides for speaker notes (often contain IOCs)
+    const noteFiles = Object.keys(zip.files).filter((n) => /^ppt\/notesSlides\/notesSlide\d+\.xml$/i.test(n));
+    for (const name of noteFiles) {
+      const xml = await zip.files[name].async("text");
+      const texts = [];
+      xml.replace(/<a:t[^>]*>([^<]*)<\/a:t>/gi, (_, t) => { if (t.trim()) texts.push(t.trim()); return ""; });
+      if (texts.length) parts.push(texts.join(" "));
+    }
+    const out = parts.join("\n\n");
+    return out.trim().length > 40 ? out : null;
+  } catch (e) {
+    console.warn("PPTX extraction failed:", e.message || e);
+    return null;
+  }
+};
+
+// XLSX text extraction using SheetJS (already bundled)
+const extractXlsxText = (arrayBuffer) => {
+  try {
+    const wb = XLSX.read(arrayBuffer, { type: "array" });
+    const parts = [];
+    wb.SheetNames.forEach((name) => {
+      const ws = wb.Sheets[name];
+      const csv = XLSX.utils.sheet_to_csv(ws, { blankrows: false });
+      if (csv.trim()) parts.push(csv);
+    });
+    const out = parts.join("\n\n");
+    return out.trim().length > 10 ? out : null;
+  } catch (e) {
+    console.warn("XLSX extraction failed:", e.message || e);
+    return null;
+  }
+};
+
+// Supported upload formats and their MIME/extension mapping
+const UPLOAD_ACCEPT = ".pdf,.txt,.csv,.md,.html,.htm,.json,.eml,.docx,.xlsx,.xls,.pptx";
+
 const SCRAPE_DENY = ["w3.org","schema.org","googleapis.com","gstatic.com","google.com","google-analytics.com","googletagmanager.com","doubleclick.net","facebook.com","twitter.com","x.com","t.co","linkedin.com","youtube.com","youtu.be","instagram.com","cloudflare.com","cloudfront.net","jsdelivr.net","cdnjs.com","fontawesome.com","wordpress.org","wp.com","gravatar.com","cookiebot.com","onetrust.com","gmpg.org","bit.ly","gist.github.com"];
 const hostOf = (s) => {
   try { return new URL(s.includes("://") ? s : "http://" + s).hostname.toLowerCase(); }
@@ -1161,6 +1265,103 @@ export default function App() {
       setAiScanError(e.message || String(e));
       setAiScanState("error");
     }
+  };
+
+  // ---- File upload: parse any supported format locally ----
+  const fileInputRef = useRef(null);
+  const [uploadDragging, setUploadDragging] = useState(false);
+
+  const runUpload = async (file) => {
+    if (!file) return;
+    resetResults();
+    setLoading(true);
+    const ext = (file.name.split(".").pop() || "").toLowerCase();
+    const fileName = file.name;
+    let text = null;
+    let isJson = false;
+
+    try {
+      if (ext === "pdf") {
+        const buf = await file.arrayBuffer();
+        text = await extractPdfText(buf);
+        if (!text) throw new Error("Could not extract text from this PDF. It may be scanned/image-only.");
+      } else if (ext === "docx") {
+        const buf = await file.arrayBuffer();
+        text = await extractDocxText(buf);
+        if (!text) throw new Error("Could not extract text from this DOCX file.");
+      } else if (ext === "pptx") {
+        const buf = await file.arrayBuffer();
+        text = await extractPptxText(buf);
+        if (!text) throw new Error("Could not extract text from this PPTX file.");
+      } else if (ext === "xlsx" || ext === "xls") {
+        const buf = await file.arrayBuffer();
+        text = extractXlsxText(buf);
+        if (!text) throw new Error("Could not extract data from this spreadsheet.");
+      } else if (ext === "json") {
+        text = await file.text();
+        isJson = true;
+      } else if (["html", "htm"].includes(ext)) {
+        const raw = await file.text();
+        text = htmlToText(raw);
+      } else {
+        // txt, csv, md, eml — plain text
+        text = await file.text();
+      }
+
+      if (!text || text.trim().length < 10) throw new Error("File appears empty or contains no extractable text.");
+
+      // JSON files → try parseIocs first (MISP, STIX, iocparser.com exports)
+      if (isJson) {
+        try {
+          const parsed = parseIocs(JSON.parse(text));
+          if (Object.keys(parsed).length) {
+            const origin = {};
+            Object.entries(parsed).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "eng"; }); });
+            setIocData(applyWhitelist(parsed));
+            setOriginData(origin);
+            setMeta({ title: fileName });
+            setSourceUrl(`(uploaded: ${fileName})`);
+            setRawArticle(text);
+            setArticleClean(text);
+            setLoading(false);
+            return;
+          }
+        } catch { /* not structured IOC JSON — fall through to regex */ }
+      }
+
+      // Run local regex engine on extracted text
+      const ex = extractIocs(text);
+      const data = ex.data;
+      if (!Object.keys(data).length) {
+        throw new Error("No recognizable IOCs found in this file.");
+      }
+
+      const origin = {};
+      Object.entries(data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "eng"; }); });
+      setIocData(applyWhitelist(data));
+      setOriginData(origin);
+      setRegistryDetails(ex.registryDetails);
+      setMeta({ title: fileName });
+      setSourceUrl(`(uploaded: ${fileName})`);
+      setRawArticle(text);
+      setArticleClean(text);
+    } catch (e) {
+      setError(e.message || "Failed to process uploaded file.");
+    }
+    setLoading(false);
+  };
+
+  const handleFileDrop = (e) => {
+    e.preventDefault();
+    setUploadDragging(false);
+    const file = e.dataTransfer?.files?.[0];
+    if (file) runUpload(file);
+  };
+
+  const handleFileSelect = (e) => {
+    const file = e.target?.files?.[0];
+    if (file) runUpload(file);
+    if (e.target) e.target.value = ""; // allow re-uploading same file
   };
 
   // ---- IOC Enrichment: ThreatFox + URLhaus + MalwareBazaar via Worker proxy ----
@@ -1878,6 +2079,7 @@ export default function App() {
         <div className="rounded-xl p-4 mb-5" style={panel}>
           <div className="flex flex-wrap gap-1 mb-3">
             <Tab active={mode === "url"} onClick={() => setMode("url")} icon={<Globe size={14} />}>Fetch URL</Tab>
+            <Tab active={mode === "upload"} onClick={() => setMode("upload")} icon={<FileUp size={14} />}>Upload File</Tab>
             <Tab active={mode === "paste"} onClick={() => setMode("paste")} icon={<ClipboardPaste size={14} />}>Paste JSON</Tab>
             <Tab active={mode === "raw"} onClick={() => setMode("raw")} icon={<Wand2 size={14} />}>Paste IOCs</Tab>
           </div>
@@ -1900,6 +2102,37 @@ export default function App() {
                   {loading ? "Fetching…" : "Fetch & Extract"}
                 </GButton>
               </div>
+            </div>
+          )}
+
+          {mode === "upload" && (
+            <div className="flex flex-col gap-2">
+              <div
+                onDragOver={(e) => { e.preventDefault(); setUploadDragging(true); }}
+                onDragLeave={() => setUploadDragging(false)}
+                onDrop={handleFileDrop}
+                onClick={() => fileInputRef.current?.click()}
+                className="rounded-lg px-6 py-8 text-center cursor-pointer transition-colors"
+                style={{
+                  backgroundColor: uploadDragging ? "rgba(0,229,255,0.08)" : "rgba(0,0,0,0.35)",
+                  border: `2px dashed ${uploadDragging ? "rgba(0,229,255,0.5)" : "rgba(120,160,180,0.25)"}`,
+                }}>
+                <FileUp size={28} className="mx-auto mb-2" style={{ color: uploadDragging ? "#00e5ff" : "#5d7382" }} />
+                {loading ? (
+                  <p className="text-sm animate-pulse" style={{ color: "#9fb3bd" }}>Processing file…</p>
+                ) : (
+                  <>
+                    <p className="text-sm" style={{ color: "#9fb3bd" }}>
+                      <span style={{ color: "#00e5ff", fontWeight: 600 }}>Click to browse</span> or drag & drop a file
+                    </p>
+                    <p className="text-[11px] mt-1.5" style={{ color: "#5d7382" }}>
+                      PDF · DOCX · PPTX · XLSX · HTML · TXT · CSV · JSON · MD · EML
+                    </p>
+                  </>
+                )}
+              </div>
+              <input ref={fileInputRef} type="file" accept={UPLOAD_ACCEPT} onChange={handleFileSelect}
+                className="hidden" />
             </div>
           )}
 
