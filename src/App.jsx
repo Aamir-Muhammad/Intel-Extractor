@@ -30,6 +30,119 @@ const WL_URL_HOSTS = new Set(["localhost","example.com","www.example.com","kaspe
 // Domain suffixes to filter (any domain ending in these gets removed)
 const WL_DOMAIN_SUFFIXES = [".mitre.org"];
 const WL_EMAIL_SUFFIXES = ["@kaspersky.com"];
+
+// ============================================================
+//  Reference URL detection — known security vendor, research,
+//  news, sandbox, and CERT domains. URLs matching these hosts
+//  are pulled from the IOC URL card into a separate References
+//  box (no hunt queries, no enrichment — just citations).
+// ============================================================
+const REF_DOMAINS = new Set([
+  // Threat intel vendors
+  "securelist.com","kaspersky.com","mandiant.com","cloud.google.com",
+  "unit42.paloaltonetworks.com","paloaltonetworks.com",
+  "crowdstrike.com","www.crowdstrike.com",
+  "microsoft.com","techcommunity.microsoft.com","learn.microsoft.com",
+  "trendmicro.com","www.trendmicro.com",
+  "symantec-enterprise-blogs.security.com","symantec.com","broadcom.com",
+  "trellix.com","fireeye.com",
+  "sentinelone.com","www.sentinelone.com","sentinelone.com",
+  "sophos.com","news.sophos.com",
+  "fortinet.com","fortiguard.com","www.fortinet.com",
+  "checkpoint.com","research.checkpoint.com",
+  "zscaler.com","www.zscaler.com",
+  "proofpoint.com","www.proofpoint.com",
+  "recordedfuture.com","www.recordedfuture.com",
+  "elastic.co","www.elastic.co",
+  "splunk.com","www.splunk.com",
+  "cybereason.com","www.cybereason.com",
+  "securonix.com","www.securonix.com",
+  "malwarebytes.com","www.malwarebytes.com",
+  "avast.com","decoded.avast.io",
+  "eset.com","www.eset.com","welivesecurity.com",
+  "bitdefender.com","www.bitdefender.com",
+  "mcafee.com","www.mcafee.com",
+  "volexity.com","www.volexity.com",
+  "huntress.com","www.huntress.com",
+  "deepinstinct.com","www.deepinstinct.com",
+  "group-ib.com","www.group-ib.com",
+  "team-cymru.com","www.team-cymru.com",
+  "intezer.com","www.intezer.com",
+  "blackberry.com","blogs.blackberry.com",
+  "cisco.com","blog.talosintelligence.com","talosintelligence.com",
+  "akamai.com","www.akamai.com",
+  // Sandboxes & analysis platforms
+  "virustotal.com","www.virustotal.com",
+  "hybrid-analysis.com","www.hybrid-analysis.com",
+  "any.run","app.any.run",
+  "joesandbox.com","www.joesandbox.com",
+  "tria.ge",
+  "urlscan.io",
+  "shodan.io","www.shodan.io",
+  "censys.io","search.censys.io",
+  "opentip.kaspersky.com",
+  "bazaar.abuse.ch","threatfox.abuse.ch","urlhaus.abuse.ch",
+  "otx.alienvault.com",
+  "app.validin.com",
+  // CERTs & government
+  "cisa.gov","www.cisa.gov","us-cert.gov","cert.org","www.cert.org",
+  "nist.gov","nvd.nist.gov","www.nist.gov",
+  "ic3.gov","www.ic3.gov",
+  "ncsc.gov.uk","www.ncsc.gov.uk",
+  "cyber.gov.au","www.cyber.gov.au",
+  "bsi.bund.de","www.bsi.bund.de",
+  "cert.ssi.gouv.fr",
+  // Security news & blogs
+  "bleepingcomputer.com","www.bleepingcomputer.com",
+  "thehackernews.com","www.thehackernews.com",
+  "darkreading.com","www.darkreading.com",
+  "securityweek.com","www.securityweek.com",
+  "threatpost.com","www.threatpost.com",
+  "therecord.media","www.therecord.media",
+  "krebsonsecurity.com",
+  "infosecurity-magazine.com","www.infosecurity-magazine.com",
+  "csoonline.com","www.csoonline.com",
+  "scmagazine.com","www.scmagazine.com",
+  // Research & code (NOT raw.githubusercontent.com — that's payload staging)
+  // github.com intentionally NOT here — malware repos are hosted on github.com
+  "medium.com","www.medium.com",
+  "arxiv.org","www.arxiv.org",
+  "researchgate.net","www.researchgate.net",
+  "docs.google.com","drive.google.com",
+  // Social media (researcher posts used as references)
+  "twitter.com","x.com","www.x.com",
+  "linkedin.com","www.linkedin.com",
+  // Misc
+  "wikipedia.org","en.wikipedia.org",
+  "web.archive.org","archive.org",
+]);
+// Check if a URL host is a known reference domain
+const isRefUrl = (urlStr) => {
+  try {
+    const host = new URL(urlStr.includes("://") ? urlStr : "https://" + urlStr).hostname.toLowerCase();
+    if (REF_DOMAINS.has(host)) return true;
+    // Also match subdomains: e.g. "blogs.blackberry.com" matches "blackberry.com"
+    const parts = host.split(".");
+    for (let i = 1; i < parts.length - 1; i++) {
+      if (REF_DOMAINS.has(parts.slice(i).join("."))) return true;
+    }
+    return false;
+  } catch { return false; }
+};
+// Split URL array into { iocs, refs }
+const splitUrlRefs = (urls) => {
+  const iocs = [], refs = [];
+  (urls || []).forEach((u) => {
+    // raw.githubusercontent.com is payload staging — always an IOC
+    try {
+      const host = new URL(u.includes("://") ? u : "https://" + u).hostname.toLowerCase();
+      if (host === "raw.githubusercontent.com") { iocs.push(u); return; }
+    } catch { /* fall through */ }
+    if (isRefUrl(u)) refs.push(u);
+    else iocs.push(u);
+  });
+  return { iocs, refs };
+};
 const WL_FILES = new Set([
   "cmd.exe","powershell.exe","pwsh.exe","mshta.exe","certutil.exe","regsvr32.exe",
   "rundll32.exe","wscript.exe","cscript.exe","msiexec.exe","bitsadmin.exe",
@@ -98,6 +211,17 @@ const applyWhitelist = (data) => {
 const countryFlag = (cc) => {
   if (!cc || !/^[A-Za-z]{2}$/.test(cc)) return "";
   return String.fromCodePoint(...[...cc.toUpperCase()].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65));
+};
+
+// Apply whitelist AND split reference URLs out of the URL category.
+// Returns { data, refs } where refs is an array of reference URL strings.
+const applyWhitelistAndRefs = (data) => {
+  const cleaned = applyWhitelist(data);
+  if (!cleaned.URL || !cleaned.URL.length) return { data: cleaned, refs: [] };
+  const { iocs, refs } = splitUrlRefs(cleaned.URL);
+  if (iocs.length) cleaned.URL = iocs;
+  else delete cleaned.URL;
+  return { data: cleaned, refs };
 };
 
 // ============================================================
@@ -1155,6 +1279,7 @@ export default function App() {
   const [aiScanState, setAiScanState] = useState("idle");         // idle | loading | done | error
   const [aiScanCounts, setAiScanCounts] = useState(null);         // {scheduled_tasks, services, registry_ops, command_lines, file_paths}
   const [aiScanError, setAiScanError] = useState("");
+  const [references, setReferences] = useState([]);               // URLs pulled from IOC card as references
 
   // ---- AI Scan: on-demand deep artifact extraction ----
   // Sends article text to Worker /artifacts which uses same 4-tier model chain as /summarize.
@@ -1317,7 +1442,7 @@ export default function App() {
           if (Object.keys(parsed).length) {
             const origin = {};
             Object.entries(parsed).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "eng"; }); });
-            setIocData(applyWhitelist(parsed));
+            { const { data: wd, refs: wr } = applyWhitelistAndRefs(parsed); setIocData(wd); setReferences(wr); }
             setOriginData(origin);
             setMeta({ title: fileName });
             setSourceUrl(`(uploaded: ${fileName})`);
@@ -1338,7 +1463,7 @@ export default function App() {
 
       const origin = {};
       Object.entries(data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "eng"; }); });
-      setIocData(applyWhitelist(data));
+      { const { data: wd, refs: wr } = applyWhitelistAndRefs(data); setIocData(wd); setReferences(wr); }
       setOriginData(origin);
       setRegistryDetails(ex.registryDetails);
       setMeta({ title: fileName });
@@ -1745,6 +1870,7 @@ export default function App() {
     setMeta(null); setAiSummary(null); setAiState("idle"); setAiOpen(false);
     setAiScanState("idle"); setAiScanCounts(null); setAiScanError("");
     setRetryCount(0); setCooldown(0); setRawArticle(""); setArticleClean(""); setDefangAll(false);
+    setReferences([]);
   };
 
   // ---- URL mode: API call AND page fetch in parallel ----
@@ -1823,13 +1949,57 @@ export default function App() {
     }
 
     if (!apiData && (!engFull || !Object.keys(filterScraped(engFull, url)).length)) {
-      const why = [
-        aRes.status === "rejected" ? (aRes.reason?.message || "API call failed") : "no API IOCs",
-        pRes.status === "rejected" ? (pRes.reason?.message || "page fetch failed") : "no page IOCs",
-      ].join("; ");
-      setError(`The API call and page fetch both returned no IOCs (${why}). Try the "Paste IOCs" tab, or check the URL.`);
-      setLoading(false);
-      return;
+      // ---- Retry cascade: re-fetch with anti-scraping bypass headers ----
+      // Some sites (gov, enterprise WAFs) block the initial fetch. Retry with
+      // realistic browser headers + Referer. Auto-detect PDF vs HTML and parse.
+      try {
+        const retryRes = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(url)}&retry=1`);
+        if (retryRes.ok) {
+          const ct = (retryRes.headers.get("Content-Type") || "").toLowerCase();
+          const isPdfRetry = ct.includes("pdf") || /\.pdf(\?|#|$)/i.test(url);
+
+          if (isPdfRetry) {
+            // Retry as binary for PDF
+            const binRetry = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(url)}&raw=1&retry=1`);
+            if (binRetry.ok) {
+              const buf = await binRetry.arrayBuffer();
+              const pdfText = await extractPdfText(buf);
+              if (pdfText && pdfText.length > 200) {
+                let clean = pdfText.replace(/[ \t]+/g, " ");
+                clean = clean.replace(/([A-Za-z0-9+/=_-])\s*\n\s*([A-Za-z0-9+/=_-])/g, "$1$2");
+                clean = clean.replace(/\s+/g, " ").trim();
+                articleText = clean;
+                articleBody = clean;
+                const ex = extractIocs(articleText);
+                engFull = ex.data;
+                engDetails = ex.registryDetails;
+              }
+            }
+          } else {
+            const retryHtml = await retryRes.text();
+            if (retryHtml && retryHtml.length >= 50) {
+              articleText = htmlToText(retryHtml);
+              articleBody = extractArticleBody(retryHtml);
+              if (articleBody.length < 800) articleBody = articleText;
+              const ex = extractIocs(articleText);
+              engFull = ex.data;
+              engDetails = ex.registryDetails;
+            }
+          }
+        }
+      } catch (e) { console.warn("Retry fetch failed:", e.message || e); }
+
+      // If retry also failed, show error with Upload File tab guidance
+      if (!apiData && (!engFull || !Object.keys(filterScraped(engFull, url)).length)) {
+        const why = [
+          aRes.status === "rejected" ? (aRes.reason?.message || "API call failed") : "no API IOCs",
+          pRes.status === "rejected" ? (pRes.reason?.message || "page fetch failed") : "no page IOCs",
+        ].join("; ");
+        setError(`Could not fetch this URL (${why}). The site may use anti-scraping protection or require JavaScript. Download the page manually (Save As → PDF/HTML) and use the Upload File tab.`);
+        setMode("upload");
+        setLoading(false);
+        return;
+      }
     }
 
     let data, origin, usedDetails = [];
@@ -1858,7 +2028,7 @@ export default function App() {
     }
 
     setRegistryDetails(usedDetails);
-    setIocData(applyWhitelist(data));
+    { const { data: wd, refs: wr } = applyWhitelistAndRefs(data); setIocData(wd); setReferences(wr); }
     setOriginData(origin);
     setMeta(apiMeta);
     setSourceUrl(url);
@@ -1935,7 +2105,7 @@ export default function App() {
       }
       const origin = {};
       Object.entries(parsed).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "api"; }); });
-      setIocData(applyWhitelist(parsed)); setOriginData(origin); setRegistryDetails(details);
+      { const { data: wd, refs: wr } = applyWhitelistAndRefs(parsed); setIocData(wd); setReferences(wr); } setOriginData(origin); setRegistryDetails(details);
       setSourceUrl("(pasted JSON)");
     } catch (e) { setError(`Could not parse JSON: ${e.message}`); }
   };
@@ -1949,7 +2119,7 @@ export default function App() {
     }
     const origin = {};
     Object.entries(ex.data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "eng"; }); });
-    setIocData(applyWhitelist(ex.data)); setOriginData(origin); setRegistryDetails(ex.registryDetails);
+    { const { data: wd, refs: wr } = applyWhitelistAndRefs(ex.data); setIocData(wd); setReferences(wr); } setOriginData(origin); setRegistryDetails(ex.registryDetails);
     setSourceUrl("(raw paste)");
   };
 
@@ -2552,6 +2722,32 @@ export default function App() {
             );
           })}
         </div>
+
+        {references.length > 0 && (
+          <div className="rounded-xl overflow-hidden mt-4" style={{ backgroundColor: "rgba(10,14,20,0.72)", border: "1px solid rgba(120,160,180,0.12)", backdropFilter: "blur(6px)" }}>
+            <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: "1px solid rgba(120,160,180,0.1)", backgroundColor: "rgba(120,160,180,0.04)" }}>
+              <div className="flex items-center gap-2">
+                <FileText size={14} style={{ color: "#5d7382" }} />
+                <span className="text-xs font-bold uppercase tracking-widest" style={{ color: "#7f95a3" }}>References</span>
+              </div>
+              <span className="text-xs rounded-full px-2 py-0.5" style={{ color: "#5d7382", border: "1px solid rgba(120,160,180,0.2)" }}>{references.length}</span>
+            </div>
+            <div className="px-4 py-2 overflow-y-auto" style={{ maxHeight: 200 }}>
+              {references.map((ref, i) => (
+                <div key={i} className="flex items-center gap-2 py-0.5">
+                  <span className="text-xs" style={{ color: "#5d738255", userSelect: "none" }}>›</span>
+                  <a href={ref.includes("://") ? ref : "https://" + ref} target="_blank" rel="noreferrer noopener"
+                    className="text-xs break-all hover:underline" style={{ color: "#5d7382" }}>
+                    {ref}
+                  </a>
+                </div>
+              ))}
+            </div>
+            <div className="px-3 py-2" style={{ borderTop: "1px solid rgba(120,160,180,0.08)" }}>
+              <CopyBtn label="Copy All" copied={copied === "refs-all"} onClick={() => copyText(references.join("\n"), "refs-all")} color="#5d7382" />
+            </div>
+          </div>
+        )}
 
         {!iocData && !loading && !error && (
           <div className="rounded-xl p-10 text-center" style={panel}>
