@@ -1529,6 +1529,7 @@ export default function App() {
               threat: d.threat_type_desc || d.threat_type || "—",
               confidence: d.confidence_level,
               first: d.first_seen ? d.first_seen.split(" ")[0] : null,
+              last: d.last_seen ? d.last_seen.split(" ")[0] : null,
               tags: Array.isArray(d.tags) ? d.tags.filter((t) => t && !GENERIC_TAGS.has(t.toLowerCase())).slice(0, 4).join(", ") : null,
             };
           }
@@ -1541,10 +1542,14 @@ export default function App() {
           if (j.query_status === "ok" && j.urls && j.urls.length > 0) {
             const online = j.urls.filter((u) => u.url_status === "online").length;
             const offline = j.urls.filter((u) => u.url_status === "offline").length;
+            // Extract earliest/latest dates from URL entries
+            const uhDates = j.urls.map((u) => u.dateadded).filter(Boolean).sort();
             results.urlhaus = {
               urls_total: j.urls.length, online, offline,
               status: online > 0 ? "online" : "offline",
               tags: [...new Set(j.urls.flatMap((u) => u.tags || []).filter((t) => t && !GENERIC_TAGS.has(t.toLowerCase())))].slice(0, 4).join(", ") || null,
+              first: uhDates.length ? uhDates[0].split(" ")[0] : null,
+              last: uhDates.length > 1 ? uhDates[uhDates.length - 1].split(" ")[0] : null,
             };
           }
         } catch (e) { console.warn("Enrich URLhaus failed:", e.message); }
@@ -1559,6 +1564,8 @@ export default function App() {
               threat: j.threat || null,
               tags: Array.isArray(j.tags) ? j.tags.filter((t) => t && !GENERIC_TAGS.has(t.toLowerCase())).slice(0, 4).join(", ") : null,
               payloads: Array.isArray(j.payloads) ? j.payloads.length : 0,
+              first: j.date_added ? j.date_added.split(" ")[0] : null,
+              last: j.last_online ? j.last_online.split(" ")[0] : null,
             };
           }
         } catch (e) { console.warn("Enrich URLhaus URL failed:", e.message); }
@@ -1572,14 +1579,15 @@ export default function App() {
             // Extract detection names from vendor_intel (e.g. Trojan.Win32.Agentb.tpwa)
             // Skip untrusted vendors entirely; filter "clean" detections when any
             // suspicious/malicious detection exists (so infostealers don't show "Legit File")
+            // Individual vendor verdicts are IGNORED for verdict derivation —
+            // MalwareBazaar only indexes confirmed malware, so existence = Malicious.
             const SKIP_VENDORS = new Set(["YOROI_YOMI"]);
-            const CLEAN_LABELS = new Set(["legit file","clean","safe","benign","legitimate","no threat","not malicious","whitelisted","trusted","harmless","undetected"]);
-            let detections = [], mbVerdict = null;
+            const CLEAN_LABELS = new Set(["legit file","clean","safe","benign","legitimate","no threat","no_threat","not malicious","whitelisted","trusted","harmless","undetected"]);
+            let detections = [];
             if (d.vendor_intel && typeof d.vendor_intel === "object") {
               Object.entries(d.vendor_intel).forEach(([vendor, info]) => {
                 if (SKIP_VENDORS.has(vendor)) return; // untrusted vendor — skip entirely
                 if (info && typeof info === "object") {
-                  if (info.verdict && info.verdict.toUpperCase() !== "UNKNOWN") mbVerdict = info.verdict;
                   if (Array.isArray(info.detections)) detections.push(...info.detections);
                   else if (typeof info.detection === "string") detections.push(info.detection);
                 }
@@ -1595,10 +1603,10 @@ export default function App() {
               type: d.file_type || "—",
               size: d.file_size ? `${Math.round(d.file_size / 1024)}KB` : null,
               first: d.first_seen ? d.first_seen.split(" ")[0] : null,
+              last: d.last_seen ? d.last_seen.split(" ")[0] : null,
               delivery: d.delivery_method || null,
               tags: Array.isArray(d.tags) ? d.tags.filter((t) => t && !GENERIC_TAGS.has(t.toLowerCase())).slice(0, 4).join(", ") : null,
               detections: detections.length ? detections.join(" | ") : null,
-              verdict: mbVerdict,
               fileName: d.file_name || null,
             };
           }
@@ -1746,18 +1754,33 @@ export default function App() {
         }
       }
 
+      // ---- Consolidated First Seen / Last Seen across all engines ----
+      const allFirsts = [
+        results.threatfox?.first, results.urlhaus?.first,
+        results.malwarebazaar?.first,
+      ].filter(Boolean).sort();
+      const allLasts = [
+        results.threatfox?.last, results.urlhaus?.last,
+        results.malwarebazaar?.last,
+      ].filter(Boolean).sort();
+      if (allFirsts.length || allLasts.length) {
+        results._timeline = {
+          firstSeen: allFirsts.length ? allFirsts[0] : null,
+          lastSeen: allLasts.length ? allLasts[allLasts.length - 1] : null,
+        };
+      }
+
       // ---- Derive combined verdict ----
+      // MalwareBazaar only indexes confirmed malware — existence = Malicious.
+      // Individual vendor verdicts (NO_THREAT, LIKELY_MALICIOUS) are ignored.
       let verdict = "Unknown";
       if (results.threatfox) verdict = "Malicious";
       else if (results.urlhaus?.status === "online") verdict = "Malicious";
-      else if (results.malwarebazaar) {
-        verdict = results.malwarebazaar.verdict || "Malicious"; // MalBazaar only indexes malware
-      }
+      else if (results.malwarebazaar) verdict = "Malicious";
       else if (results.urlhaus?.status === "offline") verdict = "Suspicious";
       else if (results.otx?.whitelisted === true) verdict = "Whitelisted";
       else if (results.otx?.validation) verdict = "Suspicious"; // OTX flagged (DGA, blocklist, etc.)
-      else if ((results.otx?.pulses || 0) > 20) verdict = "Malicious";
-      else if ((results.otx?.pulses || 0) > 5) verdict = "Suspicious";
+      else if ((results.otx?.pulses || 0) > 5) verdict = "Malicious";
       else if ((results.otx?.pulses || 0) > 0) verdict = "Suspicious";
       // Recently registered domain with OTX data = suspicious
       else if (results.whois && results.whois.ageDays !== null && results.whois.ageDays < 90 && results.otx) verdict = "Suspicious";
@@ -1773,6 +1796,11 @@ export default function App() {
       // OTX-only with 0 pulses and no other signals → Unknown
       const hasNonOtx = results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin;
       if (!hasNonOtx && results.otx && results.otx.pulses === 0 && !results.otx.validation) verdict = "Unknown";
+
+      // Final verdict normalization — catch any non-standard strings
+      const vUp = verdict.toUpperCase();
+      if (vUp.includes("MALICIOUS") && verdict !== "Malicious") verdict = "Malicious";
+      else if (vUp.includes("SUSPICIOUS") && verdict !== "Suspicious") verdict = "Suspicious";
 
       const hasData = Object.keys(results).length > 0;
       if (hasData) results._verdict = verdict;
@@ -2668,6 +2696,11 @@ export default function App() {
                                 border: `1px solid ${enr.data.validin.verdict === "malicious" ? "rgba(255,77,109,0.3)" : enr.data.validin.verdict === "suspicious" ? "rgba(251,191,36,0.3)" : "rgba(232,121,249,0.3)"}`,
                               }}>
                                 Validin{enr.data.validin.verdict ? ` · ${enr.data.validin.verdict}` : ""}{enr.data.validin.score !== null ? ` (${enr.data.validin.score}/10)` : ""}{enr.data.validin.maliciousCount > 0 ? ` · Malicious x ${enr.data.validin.maliciousCount}` : ""}{enr.data.validin.titles?.length ? ` · ${enr.data.validin.titles.join(" · ")}` : ""}
+                              </span>
+                            )}
+                            {enr.data._timeline && (
+                              <span className="rounded-full px-2 py-0.5" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.25)" }}>
+                                🕐{enr.data._timeline.firstSeen ? ` First: ${enr.data._timeline.firstSeen}` : ""}{enr.data._timeline.lastSeen ? ` · Last: ${enr.data._timeline.lastSeen}` : ""}
                               </span>
                             )}
                           </div>
