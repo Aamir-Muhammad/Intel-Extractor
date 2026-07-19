@@ -103,6 +103,11 @@ const REF_DOMAINS = new Set([
   "infosecurity-magazine.com","www.infosecurity-magazine.com",
   "csoonline.com","www.csoonline.com",
   "scmagazine.com","www.scmagazine.com",
+  "sekoia.io","blog.sekoia.io",
+  "duo.com","www.duo.com",
+  "godaddy.com","www.godaddy.com",
+  "forbes.com","www.forbes.com",
+  "helpnetsecurity.com","www.helpnetsecurity.com",
   // Research & code (NOT raw.githubusercontent.com — that's payload staging)
   // github.com intentionally NOT here — malware repos are hosted on github.com
   "medium.com","www.medium.com",
@@ -222,6 +227,35 @@ const applyWhitelistAndRefs = (data) => {
   if (iocs.length) cleaned.URL = iocs;
   else delete cleaned.URL;
   return { data: cleaned, refs };
+};
+
+// Human-readable age: "3 hours ago", "28 days ago", "1.2 years ago"
+const timeAgo = (dateStr) => {
+  if (!dateStr) return "";
+  const d = new Date(dateStr);
+  if (isNaN(d)) return "";
+  const now = Date.now();
+  const diffMs = now - d.getTime();
+  if (diffMs < 0) return "in the future";
+  const hours = Math.floor(diffMs / 3600000);
+  if (hours < 1) return "< 1 hour ago";
+  if (hours < 24) return `${hours} hour${hours !== 1 ? "s" : ""} ago`;
+  const days = Math.floor(diffMs / 86400000);
+  if (days < 365) return `${days} day${days !== 1 ? "s" : ""} ago`;
+  const years = (diffMs / (365.25 * 86400000)).toFixed(1);
+  return `${years} year${parseFloat(years) !== 1 ? "s" : ""} ago`;
+};
+
+// Dynamic favicon: sets a cyber-shield SVG as the browser tab icon
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#00e5ff"/><stop offset="100%" stop-color="#00ff9c"/></linearGradient></defs><path d="M32 4L8 16v16c0 14.4 10.3 27.8 24 31.6C45.7 59.8 56 46.4 56 32V16L32 4z" fill="none" stroke="url(#g)" stroke-width="4"/><path d="M32 14L16 22v10c0 9.6 6.9 18.5 16 21 9.1-2.5 16-11.4 16-21V22L32 14z" fill="url(#g)" opacity="0.15"/><path d="M28 32l-4-4 2.8-2.8L28 26.4l5.2-5.2L36 24l-8 8z" fill="url(#g)" transform="translate(2,2) scale(1.1)"/></svg>`;
+const setFavicon = () => {
+  const existing = document.querySelector('link[rel="icon"]');
+  if (existing) existing.remove();
+  const link = document.createElement("link");
+  link.rel = "icon";
+  link.type = "image/svg+xml";
+  link.href = "data:image/svg+xml," + encodeURIComponent(FAVICON_SVG);
+  document.head.appendChild(link);
 };
 
 // ============================================================
@@ -1263,6 +1297,9 @@ const buildWorkbook = (sheets) => {
 
 export default function App() {
   const [mode, setMode] = useState("url");
+
+  // Set custom favicon on mount
+  useEffect(() => { setFavicon(); }, []);
   const [url, setUrl] = useState("https://securelist.com/whatsapp-vbs-rmm-campaign/120290/");
   const [jsonText, setJsonText] = useState("");
   const [rawText, setRawText] = useState("");
@@ -1733,6 +1770,38 @@ export default function App() {
         } catch (e) { console.warn("Enrich OTX WHOIS failed:", e.message); }
       }
 
+      // ---- urlscan.io — community scan results for domains, URLs, IPs ----
+      if (["IPV4","IPV6","DOMAIN","URL"].includes(cat)) {
+        try {
+          const searchField = cat === "DOMAIN" ? "domain" : cat === "URL" ? "page.url" : "ip";
+          const searchValue = cat === "URL" ? (value.includes("://") ? value : "https://" + value) : value;
+          const uj = await callEnrich("urlscan", searchField, searchValue);
+          if (uj && !uj.error && Array.isArray(uj.results) && uj.results.length > 0) {
+            const totalScans = uj.total || uj.results.length;
+            // Check verdicts from scan results
+            const malCount = uj.results.filter((r) => r.verdicts?.overall?.malicious || r.verdicts?.urlscan?.malicious).length;
+            const latest = uj.results[0]; // results come sorted by date desc
+            const pageTitle = latest.page?.title || null;
+            const pageServer = latest.page?.server || null;
+            const pageCountry = latest.page?.country || null;
+            const scanDate = latest.task?.time ? latest.task.time.split("T")[0] : null;
+            const resultUrl = latest.result || null;
+            const pageUrl = latest.page?.url || null;
+            results.urlscan = {
+              scans: totalScans,
+              malicious: malCount,
+              verdict: malCount > 0 ? "malicious" : totalScans > 3 ? "seen" : "low data",
+              title: pageTitle,
+              server: pageServer,
+              country: pageCountry,
+              flag: countryFlag(pageCountry),
+              scanDate,
+              link: resultUrl ? `https://urlscan.io/result/${latest._id}/` : null,
+            };
+          }
+        } catch (e) { console.warn("Enrich urlscan.io failed:", e.message); }
+      }
+
       // ---- Validin (fallback — only when other engines returned nothing useful) ----
       // For DOMAIN and IP types, if ThreatFox + URLhaus + MalwareBazaar returned
       // nothing and OTX had 0 pulses + no validation, call Validin as last resort.
@@ -1777,9 +1846,13 @@ export default function App() {
         results.malwarebazaar?.last,
       ].filter(Boolean).sort();
       if (allFirsts.length || allLasts.length) {
+        const firstDate = allFirsts.length ? allFirsts[0] : null;
+        const lastDate = allLasts.length ? allLasts[allLasts.length - 1] : null;
         results._timeline = {
-          firstSeen: allFirsts.length ? allFirsts[0] : null,
-          lastSeen: allLasts.length ? allLasts[allLasts.length - 1] : null,
+          firstSeen: firstDate,
+          firstAge: timeAgo(firstDate),
+          lastSeen: lastDate,
+          lastAge: timeAgo(lastDate),
         };
       }
 
@@ -2165,35 +2238,55 @@ export default function App() {
   };
 
 
+  // Enrichment row builder — extracts structured data from enrichCache for export
+  const enrichRow = (cat, value) => {
+    const e = enrichCache[`${cat}::${value}`]?.data;
+    if (!e) return { verdict: "", malware: "", detections: "", fileName: "", pulses: "", country: "", asn: "", firstSeen: "", lastSeen: "", urlscan: "" };
+    return {
+      verdict: e._verdict || "",
+      malware: e.threatfox?.malware || e.malwarebazaar?.family || "",
+      detections: e.malwarebazaar?.detections || "",
+      fileName: e.malwarebazaar?.fileName || "",
+      pulses: e.otx?.pulses ?? "",
+      country: e.whoisASN?.country || e.otx?.country || "",
+      asn: e.whoisASN?.asn || "",
+      firstSeen: e._timeline?.firstSeen || "",
+      lastSeen: e._timeline?.lastSeen || "",
+      urlscan: e.urlscan ? `${e.urlscan.scans} scans${e.urlscan.malicious ? ` (${e.urlscan.malicious} malicious)` : ""}` : "",
+    };
+  };
+  const ENRICH_HEADERS = ["Verdict", "Malware", "Detections", "FileName", "OTX Pulses", "Country", "ASN", "First Seen", "Last Seen", "URLScan"];
+  const enrichVals = (r) => [r.verdict, r.malware, r.detections, r.fileName, r.pulses, r.country, r.asn, r.firstSeen, r.lastSeen, r.urlscan];
+
   const exportAllCSV = () => {
-    const rows = [["Type", "IOC"]];
+    const rows = [["Type", "IOC", ...ENRICH_HEADERS]];
     entries.forEach(([cat, arr]) => {
       const shown = proc(arr, cat);
-      arr.forEach((orig, i) => rows.push([cat, shown[i]]));
+      arr.forEach((orig, i) => rows.push([cat, shown[i], ...enrichVals(enrichRow(cat, orig))]));
     });
     downloadBlob(new Blob([toCSV(rows)], { type: "text/csv;charset=utf-8" }), "all_iocs.csv");
   };
   const exportAllXLSX = () => {
-    const all = [["Type", "IOC"]];
+    const all = [["Type", "IOC", ...ENRICH_HEADERS]];
     entries.forEach(([cat, arr]) => {
       const shown = proc(arr, cat);
-      arr.forEach((orig, i) => all.push([cat, shown[i]]));
+      arr.forEach((orig, i) => all.push([cat, shown[i], ...enrichVals(enrichRow(cat, orig))]));
     });
     const sheets = [{ name: "All_IOCs", rows: all }];
     entries.forEach(([cat, arr]) => {
       const shown = proc(arr, cat);
-      sheets.push({ name: cat, rows: [["IOC"], ...arr.map((orig, i) => [shown[i]])] });
+      sheets.push({ name: cat, rows: [["IOC", ...ENRICH_HEADERS], ...arr.map((orig, i) => [shown[i], ...enrichVals(enrichRow(cat, orig))])] });
     });
     downloadBlob(buildWorkbook(sheets), "all_iocs.xlsx");
   };
   const exportTypeCSV = (cat, arr) => {
     const shown = proc(arr, cat);
-    const rows = [["Type", "IOC"], ...arr.map((orig, i) => [cat, shown[i]])];
+    const rows = [["Type", "IOC", ...ENRICH_HEADERS], ...arr.map((orig, i) => [cat, shown[i], ...enrichVals(enrichRow(cat, orig))])];
     downloadBlob(new Blob([toCSV(rows)], { type: "text/csv;charset=utf-8" }), `${cat.toLowerCase()}_iocs.csv`);
   };
   const exportTypeXLSX = (cat, arr) => {
     const shown = proc(arr, cat);
-    const rows = [["IOC"], ...arr.map((orig, i) => [shown[i]])];
+    const rows = [["IOC", ...ENRICH_HEADERS], ...arr.map((orig, i) => [shown[i], ...enrichVals(enrichRow(cat, orig))])];
     downloadBlob(buildWorkbook([{ name: cat, rows }]), `${cat.toLowerCase()}_iocs.xlsx`);
   };
 
@@ -2515,7 +2608,7 @@ export default function App() {
                 {aiScanState === "idle" && (
                   <span className="text-[10px] uppercase tracking-widest rounded-full px-2 py-0.5 hidden sm:inline"
                     style={{ color: "#8aa0ad", border: "1px solid rgba(120,160,180,0.3)" }}>
-                    catches what regex missed
+                    deep artifact extraction
                   </span>
                 )}
                 {aiScanState === "done" && aiScanCounts && (
@@ -2588,7 +2681,7 @@ export default function App() {
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat) && (
-                      <button onClick={() => { arr.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 1500)); }}
+                      <button onClick={() => { arr.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 2000)); }}
                         className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
                         style={{ color: "#2dd4bf", backgroundColor: "rgba(45,212,191,0.10)", border: "1px solid rgba(45,212,191,0.4)" }}>
                         <Search size={12} /> Enrich All
@@ -2713,7 +2806,17 @@ export default function App() {
                             )}
                             {enr.data._timeline && (
                               <span className="rounded-full px-2 py-0.5" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.25)" }}>
-                                🕐{enr.data._timeline.firstSeen ? ` First: ${enr.data._timeline.firstSeen}` : ""}{enr.data._timeline.lastSeen ? ` · Last: ${enr.data._timeline.lastSeen}` : ""}
+                                🕐{enr.data._timeline.firstSeen ? ` First: ${enr.data._timeline.firstSeen}${enr.data._timeline.firstAge ? ` (${enr.data._timeline.firstAge})` : ""}` : ""}{enr.data._timeline.lastSeen ? ` · Last: ${enr.data._timeline.lastSeen}${enr.data._timeline.lastAge ? ` (${enr.data._timeline.lastAge})` : ""}` : ""}
+                              </span>
+                            )}
+                            {enr.data.urlscan && (
+                              <span className="rounded-full px-2 py-0.5" style={{
+                                color: enr.data.urlscan.malicious > 0 ? "#ff4d6d" : "#38bdf8",
+                                backgroundColor: enr.data.urlscan.malicious > 0 ? "rgba(255,77,109,0.12)" : "rgba(56,189,248,0.10)",
+                                border: `1px solid ${enr.data.urlscan.malicious > 0 ? "rgba(255,77,109,0.3)" : "rgba(56,189,248,0.3)"}`,
+                              }}>
+                                urlscan.io · {enr.data.urlscan.scans} scan{enr.data.urlscan.scans !== 1 ? "s" : ""}{enr.data.urlscan.malicious > 0 ? ` · 🔴 ${enr.data.urlscan.malicious} malicious` : ""}{enr.data.urlscan.title ? ` · "${enr.data.urlscan.title}"` : ""}{enr.data.urlscan.server ? ` · ${enr.data.urlscan.server}` : ""}{enr.data.urlscan.country && enr.data.urlscan.flag ? ` · ${enr.data.urlscan.flag}` : ""}{enr.data.urlscan.scanDate ? ` · ${enr.data.urlscan.scanDate}` : ""}
+                                {enr.data.urlscan.link && <>{" · "}<a href={enr.data.urlscan.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>view</a></>}
                               </span>
                             )}
                           </div>
