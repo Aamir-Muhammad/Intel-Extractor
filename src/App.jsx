@@ -1848,18 +1848,28 @@ export default function App() {
       }
 
       // ---- RDAP — domain registration date (TLD age) ----
-      // Called for DOMAIN and URL categories to get the actual WHOIS registration date.
+      // Called directly from browser (RDAP servers support CORS per RFC 7480).
+      // Worker-to-RDAP gets blocked by Cloudflare WAF, but browser IP is fine.
       if (["DOMAIN","URL"].includes(cat)) {
         try {
-          // Extract the registrable domain (e2ld) — e.g. "evil.com" from "sub.evil.com"
           const domainForRdap = cat === "URL"
             ? (() => { try { return new URL(value.includes("://") ? value : "https://" + value).hostname; } catch { return value; } })()
             : value;
-          // Get the base/registrable domain (last 2 parts, or 3 for co.uk etc.)
           const parts = domainForRdap.split(".");
           const baseDomain = parts.length > 2 ? parts.slice(-2).join(".") : domainForRdap;
-          const rj = await callEnrich("rdap", null, null, baseDomain);
-          if (rj && !rj.error && Array.isArray(rj.events)) {
+          // Try ARIN bootstrap first (auto-redirects to correct registry), then Verisign fallback
+          const rdapEndpoints = [
+            `https://rdap-bootstrap.arin.net/bootstrap/domain/${encodeURIComponent(baseDomain)}`,
+            `https://rdap.verisign.com/com/v1/domain/${encodeURIComponent(baseDomain)}`,
+          ];
+          let rj = null;
+          for (const ep of rdapEndpoints) {
+            try {
+              const r = await fetch(ep, { headers: { "Accept": "application/rdap+json, application/json" } });
+              if (r.ok) { rj = await r.json(); break; }
+            } catch { /* try next */ }
+          }
+          if (rj && Array.isArray(rj.events)) {
             const regEvent = rj.events.find((e) => e.eventAction === "registration");
             const regDate = regEvent?.eventDate || null;
             if (regDate) {
