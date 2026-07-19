@@ -1721,25 +1721,30 @@ export default function App() {
           }
         } catch (e) { console.warn("Enrich OTX failed:", e.message); }
       }
-      // Dedicated WHOIS/ASN + Geo lookup for IP addresses — OTX geo section
-      // returns country, city and the registered ASN/org for the IP.
+      // Dedicated WHOIS/ASN + Geo lookup for IP addresses via IPLocate.io
+      // Returns country (full name), city, ASN, company, and threat flags (VPN/proxy/hosting)
       if (["IPV4","IPV6"].includes(cat)) {
         try {
-          const g = await callEnrich("otx", cat === "IPV4" ? "IPv4" : "IPv6", "geo");
-          if (g && !g.error) {
-            const cc = g.country_code2 || g.country_code || null;
-            const asnRaw = g.asn || null; // OTX geo asn is usually "AS15169 Google LLC"
-            if (cc || asnRaw || g.country_name || g.city) {
-              results.whoisASN = {
-                asn: asnRaw,
-                country: g.country_name || cc || null,
-                countryCode: cc,
-                flag: countryFlag(cc),
-                city: g.city || null,
-              };
-            }
+          const g = await callEnrich("iplocate");
+          if (g && !g.error && g.country_code) {
+            const cc = g.country_code || null;
+            const privacyFlags = [];
+            if (g.privacy?.is_vpn) privacyFlags.push("VPN");
+            if (g.privacy?.is_proxy) privacyFlags.push("Proxy");
+            if (g.privacy?.is_tor) privacyFlags.push("Tor");
+            if (g.privacy?.is_hosting) privacyFlags.push("Hosting");
+            results.whoisASN = {
+              asn: g.asn?.asn || null,
+              asnOrg: g.asn?.name || g.asn?.org || g.company?.name || null,
+              country: g.country || cc || null,
+              countryCode: cc,
+              flag: countryFlag(cc),
+              city: g.city || null,
+              region: g.region || null,
+              privacy: privacyFlags.length ? privacyFlags.join(", ") : null,
+            };
           }
-        } catch (e) { console.warn("Enrich Geo/ASN failed:", e.message); }
+        } catch (e) { console.warn("Enrich IPLocate failed:", e.message); }
       }
       // OTX WHOIS for domains — registrant org, country, registration age
       if (cat === "DOMAIN") {
@@ -2249,7 +2254,7 @@ export default function App() {
       fileName: e.malwarebazaar?.fileName || "",
       pulses: e.otx?.pulses ?? "",
       country: e.whoisASN?.country || e.otx?.country || "",
-      asn: e.whoisASN?.asn || "",
+      asn: e.whoisASN?.asn ? `${e.whoisASN.asn}${e.whoisASN.asnOrg ? ` ${e.whoisASN.asnOrg}` : ""}` : "",
       firstSeen: e._timeline?.firstSeen || "",
       lastSeen: e._timeline?.lastSeen || "",
       urlscan: e.urlscan ? `${e.urlscan.scans} scans${e.urlscan.malicious ? ` (${e.urlscan.malicious} malicious)` : ""}` : "",
@@ -2787,7 +2792,7 @@ export default function App() {
                             )}
                             {enr.data.whoisASN && (
                               <span className="rounded-full px-2 py-0.5" style={{ color: "#a78bfa", backgroundColor: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)" }}>
-                                WHOIS/ASN{enr.data.whoisASN.country ? <>{" · "}<span style={{ color: "#eafcff", fontWeight: 700 }}>{enr.data.whoisASN.flag ? enr.data.whoisASN.flag + " " : ""}{enr.data.whoisASN.country}</span></> : ""}{enr.data.whoisASN.city ? ` (${enr.data.whoisASN.city})` : ""}{enr.data.whoisASN.asn ? ` · ${enr.data.whoisASN.asn}` : ""}
+                                GEO/ASN{enr.data.whoisASN.country ? <>{" · "}<span style={{ color: "#eafcff", fontWeight: 700 }}>{enr.data.whoisASN.flag ? enr.data.whoisASN.flag + " " : ""}{enr.data.whoisASN.country}</span></> : ""}{enr.data.whoisASN.city ? ` (${enr.data.whoisASN.city}${enr.data.whoisASN.region ? `, ${enr.data.whoisASN.region}` : ""})` : ""}{enr.data.whoisASN.asn ? ` · ${enr.data.whoisASN.asn}` : ""}{enr.data.whoisASN.asnOrg ? ` · ${enr.data.whoisASN.asnOrg}` : ""}{enr.data.whoisASN.privacy ? <>{" · "}<span style={{ color: "#fbbf24", fontWeight: 700 }}>{enr.data.whoisASN.privacy}</span></> : ""}
                               </span>
                             )}
                             {enr.data.whois && (
