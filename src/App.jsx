@@ -1586,11 +1586,24 @@ export default function App() {
             let detections = [];
             if (d.vendor_intel && typeof d.vendor_intel === "object") {
               Object.entries(d.vendor_intel).forEach(([vendor, info]) => {
-                if (SKIP_VENDORS.has(vendor)) return; // untrusted vendor — skip entirely
-                if (info && typeof info === "object") {
-                  if (Array.isArray(info.detections)) detections.push(...info.detections);
-                  else if (typeof info.detection === "string") detections.push(info.detection);
+                if (SKIP_VENDORS.has(vendor)) return;
+                if (!info || typeof info !== "object") return;
+                // Handle array-format vendors (ANY.RUN, Spamhaus_HBL, UnpacMe)
+                if (Array.isArray(info)) {
+                  info.forEach((entry) => {
+                    if (entry?.malware_family) detections.push(entry.malware_family);
+                    if (entry?.verdict && !["suspicious","malicious activity"].includes(entry.verdict.toLowerCase())) detections.push(entry.verdict);
+                    if (Array.isArray(entry?.detections)) detections.push(...entry.detections);
+                  });
+                  return;
                 }
+                // Standard detection/detections fields
+                if (Array.isArray(info.detections)) detections.push(...info.detections);
+                else if (typeof info.detection === "string" && info.detection) detections.push(info.detection);
+                // ReversingLabs: threat_name field
+                if (typeof info.threat_name === "string" && info.threat_name) detections.push(info.threat_name);
+                // Triage: malware_family field
+                if (typeof info.malware_family === "string" && info.malware_family) detections.push(info.malware_family);
               });
             }
             detections = [...new Set(detections.filter(Boolean))];
@@ -2669,9 +2682,9 @@ export default function App() {
                                 MalBazaar · {enr.data.malwarebazaar.family} · {enr.data.malwarebazaar.type}{enr.data.malwarebazaar.size ? ` · ${enr.data.malwarebazaar.size}` : ""}{enr.data.malwarebazaar.delivery ? ` · via ${enr.data.malwarebazaar.delivery}` : ""}{enr.data.malwarebazaar.tags ? ` · ${enr.data.malwarebazaar.tags}` : ""}
                               </span>
                             )}
-                            {enr.data.malwarebazaar?.detections && (
+                            {(enr.data.malwarebazaar?.detections || enr.data.malwarebazaar?.fileName) && (
                               <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.3)" }}>
-                                🔴 {enr.data.malwarebazaar.fileName ? enr.data.malwarebazaar.fileName + " | " : ""}{enr.data.malwarebazaar.detections}
+                                🔴 {enr.data.malwarebazaar.fileName ? enr.data.malwarebazaar.fileName + (enr.data.malwarebazaar.detections ? " | " : "") : ""}{enr.data.malwarebazaar.detections || ""}
                               </span>
                             )}
                             {enr.data.otx && enr.data._verdict !== "Unknown" && (
