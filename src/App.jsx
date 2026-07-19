@@ -229,21 +229,48 @@ const applyWhitelistAndRefs = (data) => {
   return { data: cleaned, refs };
 };
 
-// Human-readable age: "3 hours ago", "28 days ago", "1.2 years ago"
+// Human-readable age: "3 Hours Ago", "28 Days Ago", "1.2 Years Ago"
 const timeAgo = (dateStr) => {
   if (!dateStr) return "";
   const d = new Date(dateStr);
   if (isNaN(d)) return "";
   const now = Date.now();
   const diffMs = now - d.getTime();
-  if (diffMs < 0) return "in the future";
+  if (diffMs < 0) return "In The Future";
   const hours = Math.floor(diffMs / 3600000);
-  if (hours < 1) return "< 1 hour ago";
-  if (hours < 24) return `${hours} hour${hours !== 1 ? "s" : ""} ago`;
+  if (hours < 1) return "< 1 Hour Ago";
+  if (hours < 24) return `${hours} Hour${hours !== 1 ? "s" : ""} Ago`;
   const days = Math.floor(diffMs / 86400000);
-  if (days < 365) return `${days} day${days !== 1 ? "s" : ""} ago`;
+  if (days < 365) return `${days} Day${days !== 1 ? "s" : ""} Ago`;
   const years = (diffMs / (365.25 * 86400000)).toFixed(1);
-  return `${years} year${parseFloat(years) !== 1 ? "s" : ""} ago`;
+  return `${years} Year${parseFloat(years) !== 1 ? "s" : ""} Ago`;
+};
+
+// Format date as dd-mm-yyyy
+const fmtDate = (dateStr) => {
+  if (!dateStr) return "";
+  const d = new Date(dateStr);
+  if (isNaN(d)) return dateStr;
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const yyyy = d.getUTCFullYear();
+  return `${dd}-${mm}-${yyyy}`;
+};
+
+// Combined: "28 Days Ago (20-04-2026)"
+const timeAgoFmt = (dateStr) => {
+  if (!dateStr) return "";
+  const ago = timeAgo(dateStr);
+  const dt = fmtDate(dateStr);
+  return ago && dt ? `${ago} (${dt})` : ago || dt;
+};
+
+// Calculate approximate creation date from age in days
+const dateFromAgeDays = (ageDays, refDateStr) => {
+  if (ageDays == null || ageDays < 0) return null;
+  const ref = refDateStr ? new Date(refDateStr) : new Date();
+  ref.setDate(ref.getDate() - ageDays);
+  return ref.toISOString().split("T")[0];
 };
 
 // Dynamic favicon: sets a cyber-shield SVG as the browser tab icon
@@ -1783,15 +1810,24 @@ export default function App() {
           const uj = await callEnrich("urlscan", searchField, searchValue);
           if (uj && !uj.error && Array.isArray(uj.results) && uj.results.length > 0) {
             const totalScans = uj.total || uj.results.length;
-            // Check verdicts from scan results
             const malCount = uj.results.filter((r) => r.verdicts?.overall?.malicious || r.verdicts?.urlscan?.malicious).length;
-            const latest = uj.results[0]; // results come sorted by date desc
+            const latest = uj.results[0]; // results sorted by date desc
+            const oldest = uj.results[uj.results.length - 1];
             const pageTitle = latest.page?.title || null;
             const pageServer = latest.page?.server || null;
             const pageCountry = latest.page?.country || null;
             const scanDate = latest.task?.time ? latest.task.time.split("T")[0] : null;
             const resultUrl = latest.result || null;
-            const pageUrl = latest.page?.url || null;
+
+            // First Seen / Last Seen from scan dates
+            const allScanDates = uj.results.map((r) => r.task?.time).filter(Boolean).sort();
+            const usFirstSeen = allScanDates.length ? allScanDates[0].split("T")[0] : null;
+            const usLastSeen = allScanDates.length > 1 ? allScanDates[allScanDates.length - 1].split("T")[0] : null;
+
+            // Subdomain age from domainAgeDays (observation-based, not WHOIS)
+            const domainAgeDays = latest.page?.domainAgeDays ?? null;
+            const subdomainCreated = domainAgeDays != null ? dateFromAgeDays(domainAgeDays, latest.task?.time) : null;
+
             results.urlscan = {
               scans: totalScans,
               malicious: malCount,
@@ -1802,9 +1838,40 @@ export default function App() {
               flag: countryFlag(pageCountry),
               scanDate,
               link: resultUrl ? `https://urlscan.io/result/${latest._id}/` : null,
+              firstSeen: usFirstSeen,
+              lastSeen: usLastSeen,
+              subdomainAgeDays: domainAgeDays,
+              subdomainCreated,
             };
           }
         } catch (e) { console.warn("Enrich urlscan.io failed:", e.message); }
+      }
+
+      // ---- RDAP — domain registration date (TLD age) ----
+      // Called for DOMAIN and URL categories to get the actual WHOIS registration date.
+      if (["DOMAIN","URL"].includes(cat)) {
+        try {
+          // Extract the registrable domain (e2ld) — e.g. "evil.com" from "sub.evil.com"
+          const domainForRdap = cat === "URL"
+            ? (() => { try { return new URL(value.includes("://") ? value : "https://" + value).hostname; } catch { return value; } })()
+            : value;
+          // Get the base/registrable domain (last 2 parts, or 3 for co.uk etc.)
+          const parts = domainForRdap.split(".");
+          const baseDomain = parts.length > 2 ? parts.slice(-2).join(".") : domainForRdap;
+          const rj = await callEnrich("rdap", null, null, baseDomain);
+          if (rj && !rj.error && Array.isArray(rj.events)) {
+            const regEvent = rj.events.find((e) => e.eventAction === "registration");
+            const regDate = regEvent?.eventDate || null;
+            if (regDate) {
+              const regD = new Date(regDate);
+              const ageDays = !isNaN(regD) ? Math.floor((Date.now() - regD.getTime()) / 86400000) : null;
+              results.domainReg = {
+                date: regDate.split("T")[0],
+                ageDays,
+              };
+            }
+          }
+        } catch (e) { console.warn("Enrich RDAP failed:", e.message); }
       }
 
       // ---- Validin (fallback — only when other engines returned nothing useful) ----
@@ -1844,20 +1911,20 @@ export default function App() {
       // ---- Consolidated First Seen / Last Seen across all engines ----
       const allFirsts = [
         results.threatfox?.first, results.urlhaus?.first,
-        results.malwarebazaar?.first,
+        results.malwarebazaar?.first, results.urlscan?.firstSeen,
       ].filter(Boolean).sort();
       const allLasts = [
         results.threatfox?.last, results.urlhaus?.last,
-        results.malwarebazaar?.last,
+        results.malwarebazaar?.last, results.urlscan?.lastSeen,
       ].filter(Boolean).sort();
       if (allFirsts.length || allLasts.length) {
         const firstDate = allFirsts.length ? allFirsts[0] : null;
         const lastDate = allLasts.length ? allLasts[allLasts.length - 1] : null;
         results._timeline = {
           firstSeen: firstDate,
-          firstAge: timeAgo(firstDate),
+          firstFmt: timeAgoFmt(firstDate),
           lastSeen: lastDate,
-          lastAge: timeAgo(lastDate),
+          lastFmt: timeAgoFmt(lastDate),
         };
       }
 
@@ -2811,7 +2878,7 @@ export default function App() {
                             )}
                             {enr.data._timeline && (
                               <span className="rounded-full px-2 py-0.5" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.25)" }}>
-                                🕐{enr.data._timeline.firstSeen ? ` First: ${enr.data._timeline.firstSeen}${enr.data._timeline.firstAge ? ` (${enr.data._timeline.firstAge})` : ""}` : ""}{enr.data._timeline.lastSeen ? ` · Last: ${enr.data._timeline.lastSeen}${enr.data._timeline.lastAge ? ` (${enr.data._timeline.lastAge})` : ""}` : ""}
+                                🕐{enr.data._timeline.firstFmt ? ` First: ${enr.data._timeline.firstFmt}` : ""}{enr.data._timeline.lastFmt ? ` · Last: ${enr.data._timeline.lastFmt}` : ""}
                               </span>
                             )}
                             {enr.data.urlscan && (
@@ -2820,8 +2887,19 @@ export default function App() {
                                 backgroundColor: enr.data.urlscan.malicious > 0 ? "rgba(255,77,109,0.12)" : "rgba(56,189,248,0.10)",
                                 border: `1px solid ${enr.data.urlscan.malicious > 0 ? "rgba(255,77,109,0.3)" : "rgba(56,189,248,0.3)"}`,
                               }}>
-                                urlscan.io · {enr.data.urlscan.scans} scan{enr.data.urlscan.scans !== 1 ? "s" : ""}{enr.data.urlscan.malicious > 0 ? ` · 🔴 ${enr.data.urlscan.malicious} malicious` : ""}{enr.data.urlscan.title ? ` · "${enr.data.urlscan.title}"` : ""}{enr.data.urlscan.server ? ` · ${enr.data.urlscan.server}` : ""}{enr.data.urlscan.country && enr.data.urlscan.flag ? ` · ${enr.data.urlscan.flag}` : ""}{enr.data.urlscan.scanDate ? ` · ${enr.data.urlscan.scanDate}` : ""}
-                                {enr.data.urlscan.link && <>{" · "}<a href={enr.data.urlscan.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>view</a></>}
+                                Urlscan.io · {enr.data.urlscan.scans} Scan{enr.data.urlscan.scans !== 1 ? "s" : ""}{enr.data.urlscan.malicious > 0 ? ` · 🔴 ${enr.data.urlscan.malicious} Malicious` : ""}{enr.data.urlscan.title ? ` · "${enr.data.urlscan.title}"` : ""}{enr.data.urlscan.server ? ` · ${enr.data.urlscan.server}` : ""}{enr.data.urlscan.country && enr.data.urlscan.flag ? ` · ${enr.data.urlscan.flag}` : ""}
+                                {enr.data.urlscan.link && <>{" · "}<a href={enr.data.urlscan.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a></>}
+                              </span>
+                            )}
+                            {(enr.data.domainReg || enr.data.urlscan?.subdomainAgeDays != null) && (
+                              <span className="rounded-full px-2 py-0.5" style={{
+                                color: (enr.data.domainReg?.ageDays != null && enr.data.domainReg.ageDays < 30) || (enr.data.urlscan?.subdomainAgeDays != null && enr.data.urlscan.subdomainAgeDays < 30 && enr.data.domainReg?.ageDays > 120) ? "#ff4d6d" : "#94a3b8",
+                                backgroundColor: (enr.data.domainReg?.ageDays != null && enr.data.domainReg.ageDays < 30) || (enr.data.urlscan?.subdomainAgeDays != null && enr.data.urlscan.subdomainAgeDays < 30 && enr.data.domainReg?.ageDays > 120) ? "rgba(255,77,109,0.10)" : "rgba(148,163,184,0.08)",
+                                border: `1px solid ${(enr.data.domainReg?.ageDays != null && enr.data.domainReg.ageDays < 30) || (enr.data.urlscan?.subdomainAgeDays != null && enr.data.urlscan.subdomainAgeDays < 30 && enr.data.domainReg?.ageDays > 120) ? "rgba(255,77,109,0.3)" : "rgba(148,163,184,0.25)"}`,
+                              }}>
+                                📋{enr.data.domainReg ? ` Domain: ${enr.data.domainReg.ageDays} Day${enr.data.domainReg.ageDays !== 1 ? "s" : ""} Old (Reg. ${fmtDate(enr.data.domainReg.date)})` : ""}{enr.data.domainReg && enr.data.urlscan?.subdomainAgeDays != null ? " · " : ""}{enr.data.urlscan?.subdomainAgeDays != null ? `Subdomain: ${enr.data.urlscan.subdomainAgeDays} Day${enr.data.urlscan.subdomainAgeDays !== 1 ? "s" : ""} Old (Active Since ${fmtDate(enr.data.urlscan.subdomainCreated)})` : ""}
+                                {enr.data.domainReg?.ageDays != null && enr.data.domainReg.ageDays < 30 && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Domain</span>}
+                                {enr.data.urlscan?.subdomainAgeDays != null && enr.data.urlscan.subdomainAgeDays < 30 && enr.data.domainReg?.ageDays > 120 && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Subdomain</span>}
                               </span>
                             )}
                           </div>
