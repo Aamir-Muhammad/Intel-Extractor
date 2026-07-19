@@ -1863,23 +1863,41 @@ export default function App() {
             `https://rdap.verisign.com/com/v1/domain/${encodeURIComponent(baseDomain)}`,
           ];
           let rj = null;
+          let rdapStatus = null;
           for (const ep of rdapEndpoints) {
             try {
               const r = await fetch(ep, { headers: { "Accept": "application/rdap+json, application/json" } });
+              rdapStatus = r.status;
               if (r.ok) { rj = await r.json(); break; }
             } catch { /* try next */ }
           }
           if (rj && Array.isArray(rj.events)) {
             const regEvent = rj.events.find((e) => e.eventAction === "registration");
             const regDate = regEvent?.eventDate || null;
+            // Extract EPP status codes (serverHold, clientTransferProhibited, etc.)
+            const eppStatus = Array.isArray(rj.status) ? rj.status.filter((s) => typeof s === "string").slice(0, 4) : [];
             if (regDate) {
               const regD = new Date(regDate);
               const ageDays = !isNaN(regD) ? Math.floor((Date.now() - regD.getTime()) / 86400000) : null;
               results.domainReg = {
                 date: regDate.split("T")[0],
                 ageDays,
+                status: eppStatus.length ? eppStatus.join(", ") : null,
+                state: "active",
               };
             }
+          } else if (rdapStatus === 404) {
+            // Domain not found in registry — distinguish deleted vs never existed
+            // by checking if OTHER enrichment engines have historical data about it.
+            const hasHistoricalData = results.threatfox || results.urlhaus || results.malwarebazaar
+              || (results.otx && ((results.otx.pulses || 0) > 0 || results.otx.validation))
+              || (results.urlscan && results.urlscan.scans > 0);
+            results.domainReg = {
+              date: null,
+              ageDays: null,
+              status: null,
+              state: hasHistoricalData ? "deleted" : "unregistered",
+            };
           }
         } catch (e) { console.warn("Enrich RDAP failed:", e.message); }
       }
@@ -2901,17 +2919,26 @@ export default function App() {
                                 {enr.data.urlscan.link && <>{" · "}<a href={enr.data.urlscan.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a></>}
                               </span>
                             )}
-                            {(enr.data.domainReg || enr.data.urlscan?.subdomainAgeDays != null) && (
+                            {(enr.data.domainReg || enr.data.urlscan?.subdomainAgeDays != null) && (() => {
+                              const dr = enr.data.domainReg;
+                              const sd = enr.data.urlscan;
+                              const isNewDomain = dr?.state === "active" && dr?.ageDays != null && dr.ageDays < 30;
+                              const isNewSubdomain = sd?.subdomainAgeDays != null && sd.subdomainAgeDays < 30 && dr?.ageDays > 120;
+                              const isDeleted = dr?.state === "deleted";
+                              const isUnregistered = dr?.state === "unregistered";
+                              const isAlert = isNewDomain || isNewSubdomain || isDeleted;
+                              return (
                               <span className="rounded-full px-2 py-0.5" style={{
-                                color: (enr.data.domainReg?.ageDays != null && enr.data.domainReg.ageDays < 30) || (enr.data.urlscan?.subdomainAgeDays != null && enr.data.urlscan.subdomainAgeDays < 30 && enr.data.domainReg?.ageDays > 120) ? "#ff4d6d" : "#94a3b8",
-                                backgroundColor: (enr.data.domainReg?.ageDays != null && enr.data.domainReg.ageDays < 30) || (enr.data.urlscan?.subdomainAgeDays != null && enr.data.urlscan.subdomainAgeDays < 30 && enr.data.domainReg?.ageDays > 120) ? "rgba(255,77,109,0.10)" : "rgba(148,163,184,0.08)",
-                                border: `1px solid ${(enr.data.domainReg?.ageDays != null && enr.data.domainReg.ageDays < 30) || (enr.data.urlscan?.subdomainAgeDays != null && enr.data.urlscan.subdomainAgeDays < 30 && enr.data.domainReg?.ageDays > 120) ? "rgba(255,77,109,0.3)" : "rgba(148,163,184,0.25)"}`,
+                                color: isAlert ? "#ff4d6d" : isUnregistered ? "#8aa0ad" : "#94a3b8",
+                                backgroundColor: isAlert ? "rgba(255,77,109,0.10)" : "rgba(148,163,184,0.08)",
+                                border: `1px solid ${isAlert ? "rgba(255,77,109,0.3)" : "rgba(148,163,184,0.25)"}`,
                               }}>
-                                📋{enr.data.domainReg ? ` Domain: ${enr.data.domainReg.ageDays} Day${enr.data.domainReg.ageDays !== 1 ? "s" : ""} Old (Reg. ${fmtDate(enr.data.domainReg.date)})` : ""}{enr.data.domainReg && enr.data.urlscan?.subdomainAgeDays != null ? " · " : ""}{enr.data.urlscan?.subdomainAgeDays != null ? `Subdomain: ${enr.data.urlscan.subdomainAgeDays} Day${enr.data.urlscan.subdomainAgeDays !== 1 ? "s" : ""} Old (Active Since ${fmtDate(enr.data.urlscan.subdomainCreated)})` : ""}
-                                {enr.data.domainReg?.ageDays != null && enr.data.domainReg.ageDays < 30 && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Domain</span>}
-                                {enr.data.urlscan?.subdomainAgeDays != null && enr.data.urlscan.subdomainAgeDays < 30 && enr.data.domainReg?.ageDays > 120 && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Subdomain</span>}
+                                📋{dr?.state === "active" && dr.ageDays != null ? ` Domain: ${dr.ageDays} Day${dr.ageDays !== 1 ? "s" : ""} Old (Reg. ${fmtDate(dr.date)})` : ""}{isDeleted ? <span style={{ color: "#ff4d6d", fontWeight: 700 }}> 🔴 Domain Deleted / Taken Down</span> : ""}{isUnregistered ? " ⚪ Domain Not Registered" : ""}{dr?.status ? ` · Status: ${dr.status}` : ""}{(dr && sd?.subdomainAgeDays != null) ? " · " : ""}{sd?.subdomainAgeDays != null ? `Subdomain: ${sd.subdomainAgeDays} Day${sd.subdomainAgeDays !== 1 ? "s" : ""} Old (Active Since ${fmtDate(sd.subdomainCreated)})` : ""}
+                                {isNewDomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Domain</span>}
+                                {isNewSubdomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Subdomain</span>}
                               </span>
-                            )}
+                              );
+                            })()}
                           </div>
                         )}
                         {enr && !enr.loading && !enr.data && enr.error && (
