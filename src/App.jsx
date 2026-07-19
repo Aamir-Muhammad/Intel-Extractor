@@ -273,6 +273,18 @@ const dateFromAgeDays = (ageDays, refDateStr) => {
   return ref.toISOString().split("T")[0];
 };
 
+// Smart age: "18 Hours", "28 Days", "1.2 Years"
+const smartAge = (days) => {
+  if (days == null) return "";
+  if (days < 1) {
+    const hours = Math.max(1, Math.round(days * 24));
+    return `${hours} Hour${hours !== 1 ? "s" : ""}`;
+  }
+  if (days < 365) return `${days} Day${days !== 1 ? "s" : ""}`;
+  const years = (days / 365.25).toFixed(1);
+  return `${years} Year${parseFloat(years) !== 1 ? "s" : ""}`;
+};
+
 // Dynamic favicon: sets a cyber-shield SVG as the browser tab icon
 const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#00e5ff"/><stop offset="100%" stop-color="#00ff9c"/></linearGradient></defs><path d="M32 4L8 16v16c0 14.4 10.3 27.8 24 31.6C45.7 59.8 56 46.4 56 32V16L32 4z" fill="none" stroke="url(#g)" stroke-width="4"/><path d="M32 14L16 22v10c0 9.6 6.9 18.5 16 21 9.1-2.5 16-11.4 16-21V22L32 14z" fill="url(#g)" opacity="0.15"/><path d="M28 32l-4-4 2.8-2.8L28 26.4l5.2-5.2L36 24l-8 8z" fill="url(#g)" transform="translate(2,2) scale(1.1)"/></svg>`;
 const setFavicon = () => {
@@ -1842,6 +1854,10 @@ export default function App() {
               lastSeen: usLastSeen,
               subdomainAgeDays: domainAgeDays,
               subdomainCreated,
+              // Pivot points: serving IP
+              servingIP: latest.page?.ip || null,
+              servingASN: latest.page?.asn || null,
+              servingASNName: latest.page?.asnname || null,
             };
           }
         } catch (e) { console.warn("Enrich urlscan.io failed:", e.message); }
@@ -1849,14 +1865,17 @@ export default function App() {
 
       // ---- RDAP — domain registration date (TLD age) ----
       // Called directly from browser (RDAP servers support CORS per RFC 7480).
-      // Worker-to-RDAP gets blocked by Cloudflare WAF, but browser IP is fine.
+      // Skip for IP-based URLs (e.g. 95.182.97.58/path) — not a proper domain.
       if (["DOMAIN","URL"].includes(cat)) {
+        // Check if the value is an IP address rather than a domain name
+        const rdapTarget = cat === "URL"
+          ? (() => { try { return new URL(value.includes("://") ? value : "https://" + value).hostname; } catch { return value; } })()
+          : value;
+        const isIP = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(rdapTarget) || rdapTarget.includes(":");
+        if (!isIP) {
         try {
-          const domainForRdap = cat === "URL"
-            ? (() => { try { return new URL(value.includes("://") ? value : "https://" + value).hostname; } catch { return value; } })()
-            : value;
-          const parts = domainForRdap.split(".");
-          const baseDomain = parts.length > 2 ? parts.slice(-2).join(".") : domainForRdap;
+          const parts = rdapTarget.split(".");
+          const baseDomain = parts.length > 2 ? parts.slice(-2).join(".") : rdapTarget;
           // Try ARIN bootstrap first (auto-redirects to correct registry), then Verisign fallback
           const rdapEndpoints = [
             `https://rdap-bootstrap.arin.net/bootstrap/domain/${encodeURIComponent(baseDomain)}`,
@@ -1900,6 +1919,7 @@ export default function App() {
             };
           }
         } catch (e) { console.warn("Enrich RDAP failed:", e.message); }
+        } // end if (!isIP)
       }
 
       // ---- Validin (fallback — only when other engines returned nothing useful) ----
@@ -2061,6 +2081,27 @@ export default function App() {
     if (cat === "REGISTRY") {
       setRegistryDetails((prev) => prev.filter((d) => canonicalReg(d) !== value));
     }
+  };
+
+  // Add a pivot IOC from enrichment (urlscan serving IP, file hashes, etc.)
+  // The IOC gets a [pivot] tag in originData for display differentiation.
+  const addPivotIOC = (cat, value, source) => {
+    setIocData((prev) => {
+      const existing = prev?.[cat] || [];
+      if (existing.some((v) => v.toLowerCase() === value.toLowerCase())) return prev; // already exists
+      const next = { ...prev, [cat]: [...existing, value] };
+      // Reorder by ORDER
+      const ordered = {};
+      ORDER.forEach((k) => { if (next[k]?.length) ordered[k] = next[k]; });
+      Object.keys(next).forEach((k) => { if (!ordered[k] && next[k]?.length) ordered[k] = next[k]; });
+      return ordered;
+    });
+    setOriginData((prev) => {
+      const next = { ...prev };
+      if (!next[cat]) next[cat] = {};
+      next[cat][value] = `pivot:${source}`;
+      return next;
+    });
   };
 
   const flash = (key) => {
@@ -2815,6 +2856,12 @@ export default function App() {
                           <span className="text-xs break-all flex-1 min-w-0"
                             style={{ color: huntReady ? "#f3ddfa" : "#c8d6dd", fontWeight: huntReady ? 600 : 400 }}>
                             {ioc}
+                            {originData?.[cat]?.[arr[i]]?.startsWith?.("pivot:") && (
+                              <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle"
+                                style={{ color: "#22d3ee", backgroundColor: "rgba(34,211,238,0.12)", border: "1px solid rgba(34,211,238,0.3)" }}>
+                                pivot: {originData[cat][arr[i]].split(":")[1]}
+                              </span>
+                            )}
                           </span>
                           {enrichable && (
                             <button onClick={() => enrichIOC(cat, arr[i])}
@@ -2906,7 +2953,7 @@ export default function App() {
                             )}
                             {enr.data._timeline && (
                               <span className="rounded-full px-2 py-0.5" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.25)" }}>
-                                🕐{enr.data._timeline.firstFmt ? ` First: ${enr.data._timeline.firstFmt}` : ""}{enr.data._timeline.lastFmt ? ` · Last: ${enr.data._timeline.lastFmt}` : ""}
+                                🕐{enr.data._timeline.firstFmt ? ` First Seen: ${enr.data._timeline.firstFmt}` : ""}{enr.data._timeline.lastFmt ? ` · Last Seen: ${enr.data._timeline.lastFmt}` : ""}
                               </span>
                             )}
                             {enr.data.urlscan && (
@@ -2919,21 +2966,33 @@ export default function App() {
                                 {enr.data.urlscan.link && <>{" · "}<a href={enr.data.urlscan.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a></>}
                               </span>
                             )}
+                            {enr.data.urlscan?.servingIP && (
+                              <span className="rounded-full px-2 py-0.5 flex items-center gap-1.5" style={{ color: "#22d3ee", backgroundColor: "rgba(34,211,238,0.08)", border: "1px solid rgba(34,211,238,0.25)" }}>
+                                <span>Serving IP: {enr.data.urlscan.servingIP}{enr.data.urlscan.servingASN ? ` · ${enr.data.urlscan.servingASN}` : ""}{enr.data.urlscan.servingASNName ? ` · ${enr.data.urlscan.servingASNName}` : ""}</span>
+                                <button onClick={() => addPivotIOC("IPV4", enr.data.urlscan.servingIP, "urlscan")}
+                                  title="Add serving IP as IOC"
+                                  className="rounded px-1.5 py-0.5 font-bold"
+                                  style={{ color: "#04111a", backgroundColor: "#22d3ee", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
+                                  + Add as IOC
+                                </button>
+                              </span>
+                            )}
                             {(enr.data.domainReg || enr.data.urlscan?.subdomainAgeDays != null) && (() => {
                               const dr = enr.data.domainReg;
                               const sd = enr.data.urlscan;
-                              const isNewDomain = dr?.state === "active" && dr?.ageDays != null && dr.ageDays < 30;
-                              const isNewSubdomain = sd?.subdomainAgeDays != null && sd.subdomainAgeDays < 30 && dr?.ageDays > 120;
                               const isDeleted = dr?.state === "deleted";
                               const isUnregistered = dr?.state === "unregistered";
+                              const isNewDomain = dr?.state === "active" && dr?.ageDays != null && dr.ageDays < 30;
+                              const isNewSubdomain = !isDeleted && sd?.subdomainAgeDays != null && sd.subdomainAgeDays < 30 && dr?.ageDays > 120;
                               const isAlert = isNewDomain || isNewSubdomain || isDeleted;
+                              const showSubdomain = !isDeleted && sd?.subdomainAgeDays != null;
                               return (
                               <span className="rounded-full px-2 py-0.5" style={{
                                 color: isAlert ? "#ff4d6d" : isUnregistered ? "#8aa0ad" : "#94a3b8",
                                 backgroundColor: isAlert ? "rgba(255,77,109,0.10)" : "rgba(148,163,184,0.08)",
                                 border: `1px solid ${isAlert ? "rgba(255,77,109,0.3)" : "rgba(148,163,184,0.25)"}`,
                               }}>
-                                📋{dr?.state === "active" && dr.ageDays != null ? ` Domain: ${dr.ageDays} Day${dr.ageDays !== 1 ? "s" : ""} Old (Reg. ${fmtDate(dr.date)})` : ""}{isDeleted ? <span style={{ color: "#ff4d6d", fontWeight: 700 }}> 🔴 Domain Deleted / Taken Down</span> : ""}{isUnregistered ? " ⚪ Domain Not Registered" : ""}{dr?.status ? ` · Status: ${dr.status}` : ""}{(dr && sd?.subdomainAgeDays != null) ? " · " : ""}{sd?.subdomainAgeDays != null ? `Subdomain: ${sd.subdomainAgeDays} Day${sd.subdomainAgeDays !== 1 ? "s" : ""} Old (Active Since ${fmtDate(sd.subdomainCreated)})` : ""}
+                                📋{dr?.state === "active" && dr.ageDays != null ? ` Domain: ${smartAge(dr.ageDays)} old (Reg. ${fmtDate(dr.date)})` : ""}{isDeleted ? <span style={{ color: "#ff4d6d", fontWeight: 700 }}> 🔴 Domain Deleted / Taken Down</span> : ""}{isUnregistered ? " ⚪ Domain Not Registered" : ""}{showSubdomain ? `${dr?.state === "active" ? " · " : " "}Subdomain: ${smartAge(sd.subdomainAgeDays)} old (Active Since ${fmtDate(sd.subdomainCreated)})` : ""}{dr?.status ? ` · Status: ${dr.status}` : ""}
                                 {isNewDomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Domain</span>}
                                 {isNewSubdomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Subdomain</span>}
                               </span>
