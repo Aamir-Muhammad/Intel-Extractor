@@ -2997,13 +2997,13 @@ export default function App() {
                                 🔴 Domain Deleted / Taken Down
                               </span>
                             )}
-                            {enr?.data?.domainReg?.state === "active" && enr?.data?.domainReg?.status && /clientHold|serverHold/i.test(enr.data.domainReg.status) && (
+                            {enr?.data?.domainReg?.state === "active" && enr?.data?.domainReg?.status && /client.?hold|server.?hold/i.test(enr.data.domainReg.status) && (
                               <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle font-bold"
                                 style={{ color: "#f59e0b", backgroundColor: "rgba(245,158,11,0.15)", border: "1px solid rgba(245,158,11,0.3)" }}>
                                 🟠 Domain Suspended / Registrar Hold
                               </span>
                             )}
-                            {enr?.data?.domainReg?.state === "active" && enr?.data?.domainReg?.status && /redemptionPeriod|pendingDelete/i.test(enr.data.domainReg.status) && (
+                            {enr?.data?.domainReg?.state === "active" && enr?.data?.domainReg?.status && /redemption.?period|pending.?delete/i.test(enr.data.domainReg.status) && (
                               <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle font-bold"
                                 style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.15)", border: "1px solid rgba(255,77,109,0.3)" }}>
                                 🔴 Domain Pending Deletion
@@ -3156,8 +3156,11 @@ export default function App() {
                               const existingUrls = new Set((displayData?.URL || []).map((u) => u.toLowerCase().replace(/\/+$/, "")));
                               const fileUrls = new Set((enr.data.urlscan.files || []).map((f) => f.url?.toLowerCase().replace(/\/+$/, "")).filter(Boolean));
                               const iocNorm = arr[i].toLowerCase().replace(/\/+$/, "").replace(/^https?:\/\//i, "");
+                              const seenNorm = new Set();
                               const newUrls = enr.data.urlscan.scannedUrls.filter((u) => {
                                 const stripped = u.replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
+                                if (seenNorm.has(stripped)) return false;
+                                seenNorm.add(stripped);
                                 if (stripped === iocNorm || stripped === iocNorm + "/") return false;
                                 // Also skip "www." variant of the IOC
                                 const iocNoWww = iocNorm.replace(/^www\./i, "");
@@ -3254,20 +3257,20 @@ export default function App() {
                               // Domain Deleted badge is already shown next to IOC name — don't repeat here
                               if (isDeleted) return null;
                               const isNewDomain = dr?.state === "active" && dr?.ageDays != null && dr.ageDays < 30;
-                              const isNewSubdomain = !isDeleted && sd?.subdomainAgeDays != null && sd.subdomainAgeDays < 30 && dr?.ageDays > 120;
+                              const isNewSubdomain = isActualSubdomain && !isDeleted && sd?.subdomainAgeDays != null && sd.subdomainAgeDays < 30 && dr?.ageDays > 120;
                               const isAlert = isNewDomain || isNewSubdomain || isDeleted;
                               const showSubdomain = !isDeleted && sd?.subdomainAgeDays != null;
-                              // Determine if IOC is actually a subdomain (more parts than base domain)
+                              // Only show subdomain age when IOC is actually a subdomain (3+ domain parts)
                               const iocParts = arr[i].replace(/^https?:\/\//i, "").split("/")[0].split(".");
                               const isActualSubdomain = iocParts.length > 2;
-                              const subLabel = isActualSubdomain ? "Subdomain" : "First Observed";
+                              const showSubdomainLine = showSubdomain && isActualSubdomain;
                               return (
                               <span className="rounded-full px-2 py-0.5" style={{
                                 color: isAlert ? "#ff4d6d" : isUnregistered ? "#8aa0ad" : "#94a3b8",
                                 backgroundColor: isAlert ? "rgba(255,77,109,0.10)" : "rgba(148,163,184,0.08)",
                                 border: `1px solid ${isAlert ? "rgba(255,77,109,0.3)" : "rgba(148,163,184,0.25)"}`,
                               }}>
-                                📋{dr?.state === "active" && dr.ageDays != null ? ` Domain: ${smartAge(dr.ageDays)} old (Reg. ${fmtDate(dr.date)})` : ""}{isDeleted ? <span style={{ color: "#ff4d6d", fontWeight: 700 }}> 🔴 Domain Deleted / Taken Down</span> : ""}{isUnregistered ? " ⚪ Domain Not Registered" : ""}{showSubdomain ? `${dr?.state === "active" ? " · " : " "}${subLabel}: ${smartAge(sd.subdomainAgeDays)} old (Active Since ${fmtDate(sd.subdomainCreated)})` : ""}{dr?.status ? ` · Status: ${dr.status}` : ""}
+                                📋{dr?.state === "active" && dr.ageDays != null ? ` Domain: ${smartAge(dr.ageDays)} old (Reg. ${fmtDate(dr.date)})` : ""}{isDeleted ? <span style={{ color: "#ff4d6d", fontWeight: 700 }}> 🔴 Domain Deleted / Taken Down</span> : ""}{isUnregistered ? " ⚪ Domain Not Registered" : ""}{showSubdomainLine ? `${dr?.state === "active" ? " · " : " "}Subdomain: ${smartAge(sd.subdomainAgeDays)} old (Active Since ${fmtDate(sd.subdomainCreated)})` : ""}{dr?.status ? ` · Status: ${dr.status}` : ""}
                                 {isNewDomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Domain</span>}
                                 {isNewSubdomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Subdomain</span>}
                               </span>
