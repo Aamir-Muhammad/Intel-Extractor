@@ -3,7 +3,7 @@ import * as XLSX from "xlsx";
 import {
   Shield, Search, Download, Copy, Check, Loader2, Globe,
   ClipboardPaste, AlertTriangle, ShieldOff, Trash2, Wand2,
-  Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles, ChevronDown, RefreshCw, FileUp
+  Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles, ChevronDown, RefreshCw, FileUp, Pencil
 } from "lucide-react";
 
 // ============================================================
@@ -22,7 +22,7 @@ const isPrivateIP = (ip) => {
     (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 255);
 };
 // DOMAIN whitelist — github.com IS filtered here (bare github.com domain is noise)
-const WL_DOMAINS = new Set(["github.com","www.github.com","localhost","example.com","www.example.com","kaspersky.com","www.kaspersky.com","fbi.gov","www.fbi.gov","mitre.org","attack.mitre.org","www.mitre.org"]);
+const WL_DOMAINS = new Set(["github.com","www.github.com","github.io","localhost","example.com","www.example.com","kaspersky.com","www.kaspersky.com","fbi.gov","www.fbi.gov","mitre.org","attack.mitre.org","www.mitre.org","gmail.com","www.gmail.com","trendmicro.com","www.trendmicro.com"]);
 // URL whitelist — github.com is intentionally NOT here: full GitHub URLs are
 // often real IOCs (payload hosting, raw.githubusercontent staging) and must
 // survive into the URL card. Only the bare DOMAIN entry gets filtered.
@@ -108,6 +108,7 @@ const REF_DOMAINS = new Set([
   "godaddy.com","www.godaddy.com",
   "forbes.com","www.forbes.com",
   "helpnetsecurity.com","www.helpnetsecurity.com",
+  "datadoghq.com","securitylabs.datadoghq.com",
   // Research & code (NOT raw.githubusercontent.com — that's payload staging)
   // github.com intentionally NOT here — malware repos are hosted on github.com
   "medium.com","www.medium.com",
@@ -2053,7 +2054,29 @@ export default function App() {
   const [defangMap, setDefangMap] = useState({});
   const [defangAll, setDefangAll] = useState(false);
   const [copied, setCopied] = useState("");
+  const [editingKey, setEditingKey] = useState(null);   // "cat-i-3" → currently editing
+  const [editValue, setEditValue] = useState("");
   const copyTimer = useRef(null);
+
+  // Edit an IOC value inline — replaces the old value in iocData
+  const editIoc = (cat, oldValue, newValue) => {
+    const trimmed = newValue.trim();
+    if (!trimmed || trimmed === oldValue) { setEditingKey(null); return; }
+    setIocData((prev) => {
+      if (!prev?.[cat]) return prev;
+      const next = { ...prev, [cat]: prev[cat].map((v) => v === oldValue ? trimmed : v) };
+      return next;
+    });
+    // Update originData key if it exists
+    setOriginData((prev) => {
+      if (!prev?.[cat]?.[oldValue]) return prev;
+      const next = { ...prev, [cat]: { ...prev[cat] } };
+      next[cat][trimmed] = next[cat][oldValue];
+      delete next[cat][oldValue];
+      return next;
+    });
+    setEditingKey(null);
+  };
 
 
   const displayData = iocData;
@@ -2105,10 +2128,22 @@ export default function App() {
   // Add a pivot IOC from enrichment (urlscan serving IP, file hashes, etc.)
   // The IOC gets a [pivot] tag in originData for display differentiation.
   const addPivotIOC = (cat, value, source) => {
+    // Normalize: strip trailing slashes, scheme for URLs, trim whitespace
+    let normValue = String(value).trim().replace(/\/+$/, "");
+    if (cat === "URL" || cat === "DOMAIN") {
+      normValue = normValue.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+    }
+    if (!normValue) return;
     setIocData((prev) => {
       const existing = prev?.[cat] || [];
-      if (existing.some((v) => v.toLowerCase() === value.toLowerCase())) return prev; // already exists
-      const next = { ...prev, [cat]: [...existing, value] };
+      // Dedup: normalize existing values the same way for comparison
+      const existingNorm = existing.map((v) => {
+        let n = String(v).trim().replace(/\/+$/, "");
+        if (cat === "URL" || cat === "DOMAIN") n = n.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+        return n.toLowerCase();
+      });
+      if (existingNorm.includes(normValue.toLowerCase())) return prev; // already exists
+      const next = { ...prev, [cat]: [...existing, normValue] };
       // Reorder by ORDER
       const ordered = {};
       ORDER.forEach((k) => { if (next[k]?.length) ordered[k] = next[k]; });
@@ -2118,7 +2153,7 @@ export default function App() {
     setOriginData((prev) => {
       const next = { ...prev };
       if (!next[cat]) next[cat] = {};
-      next[cat][value] = `pivot:${source}`;
+      next[cat][normValue] = `pivot:${source}`;
       return next;
     });
   };
@@ -2155,15 +2190,21 @@ export default function App() {
   const runFetch = async () => {
     resetResults();
     setLoading(true);
+    // Auto-prepend https:// if scheme missing
+    let fetchUrl = url.trim();
+    if (fetchUrl && !/^https?:\/\//i.test(fetchUrl)) {
+      fetchUrl = "https://" + fetchUrl;
+      setUrl(fetchUrl);
+    }
 
     const apiP = fetch(`${WORKER_BASE}/parse`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url: fetchUrl }),
     })
       .then((r) => { if (!r.ok) throw new Error(`API HTTP ${r.status}`); return r.json(); });
 
-    const pageP = fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(url)}`)
+    const pageP = fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}`)
       .then((r) => { if (!r.ok) throw new Error(`page HTTP ${r.status}`); return r.text(); });
 
     const [aRes, pRes] = await Promise.allSettled([apiP, pageP]);
@@ -2176,7 +2217,7 @@ export default function App() {
     let engFull = null, engDetails = [], articleText = "", articleBody = "";
     if (pRes.status === "fulfilled" && pRes.value && pRes.value.length >= 50) {
       // Detect PDF binary content
-      const isPDF = pRes.value.trimStart().startsWith("%PDF") || /\.pdf(\?|#|$)/i.test(url);
+      const isPDF = pRes.value.trimStart().startsWith("%PDF") || /\.pdf(\?|#|$)/i.test(fetchUrl);
       if (isPDF) {
         // Refetch as binary (raw=1 = untouched bytes from the Worker) and extract
         // text via pdf.js — proper PDF parsing decompresses FlateDecode streams to
@@ -2184,7 +2225,7 @@ export default function App() {
         // that ASCII scraping cannot see.
         let pdfText = null;
         try {
-          const binRes = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(url)}&raw=1`);
+          const binRes = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&raw=1`);
           if (binRes.ok) {
             const buf = await binRes.arrayBuffer();
             pdfText = await extractPdfText(buf);
@@ -2222,19 +2263,19 @@ export default function App() {
       }
     }
 
-    if (!apiData && (!engFull || !Object.keys(filterScraped(engFull, url)).length)) {
+    if (!apiData && (!engFull || !Object.keys(filterScraped(engFull, fetchUrl)).length)) {
       // ---- Retry cascade: re-fetch with anti-scraping bypass headers ----
       // Some sites (gov, enterprise WAFs) block the initial fetch. Retry with
       // realistic browser headers + Referer. Auto-detect PDF vs HTML and parse.
       try {
-        const retryRes = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(url)}&retry=1`);
+        const retryRes = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&retry=1`);
         if (retryRes.ok) {
           const ct = (retryRes.headers.get("Content-Type") || "").toLowerCase();
-          const isPdfRetry = ct.includes("pdf") || /\.pdf(\?|#|$)/i.test(url);
+          const isPdfRetry = ct.includes("pdf") || /\.pdf(\?|#|$)/i.test(fetchUrl);
 
           if (isPdfRetry) {
             // Retry as binary for PDF
-            const binRetry = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(url)}&raw=1&retry=1`);
+            const binRetry = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&raw=1&retry=1`);
             if (binRetry.ok) {
               const buf = await binRetry.arrayBuffer();
               const pdfText = await extractPdfText(buf);
@@ -2841,7 +2882,7 @@ export default function App() {
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat) && (
-                      <button onClick={() => { arr.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 2000)); }}
+                      <button onClick={() => { arr.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 1500)); }}
                         className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
                         style={{ color: "#2dd4bf", backgroundColor: "rgba(45,212,191,0.10)", border: "1px solid rgba(45,212,191,0.4)" }}>
                         <Search size={12} /> Enrich All
@@ -2864,6 +2905,7 @@ export default function App() {
                     const huntReady = isReg && huntReadySet.has(arr[i]);
                     const rowKey = `${cat}-i-${i}`;
                     const isCopied = copied === rowKey;
+                    const isEditing = editingKey === rowKey;
                     const eKey = `${cat}::${arr[i]}`;
                     const enr = enrichCache[eKey];
                     const enrichable = ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat);
@@ -2872,6 +2914,20 @@ export default function App() {
                         <div className="group flex items-start gap-1.5 py-0.5 leading-relaxed"
                           title={huntReady ? "Hunt-ready: key + value captured — enriches the hunt queries below" : undefined}>
                           <span className="text-xs shrink-0" style={{ color: `${c}aa`, userSelect: "none" }}>›</span>
+                          {isEditing ? (
+                            <input
+                              autoFocus
+                              value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") editIoc(cat, arr[i], editValue);
+                                if (e.key === "Escape") setEditingKey(null);
+                              }}
+                              onBlur={() => editIoc(cat, arr[i], editValue)}
+                              className="text-xs flex-1 min-w-0 rounded px-1 py-0.5 outline-none"
+                              style={{ backgroundColor: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.4)", color: "#dff" }}
+                            />
+                          ) : (
                           <span className="text-xs break-all flex-1 min-w-0"
                             style={{ color: huntReady ? "#f3ddfa" : "#c8d6dd", fontWeight: huntReady ? 600 : 400 }}>
                             {ioc}
@@ -2882,6 +2938,7 @@ export default function App() {
                               </span>
                             )}
                           </span>
+                          )}
                           {enrichable && (
                             <button onClick={() => enrichIOC(cat, arr[i])}
                               title="Enrich via ThreatFox / URLhaus / MalwareBazaar / OTX"
@@ -2903,6 +2960,12 @@ export default function App() {
                             className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
                             style={{ color: isCopied ? c : "#8aa0ad" }}>
                             {isCopied ? <Check size={16} /> : <Copy size={16} />}
+                          </button>
+                          <button onClick={() => { setEditingKey(rowKey); setEditValue(arr[i]); }}
+                            title="Edit this indicator"
+                            className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
+                            style={{ color: "#8aa0ad" }}>
+                            <Pencil size={14} />
                           </button>
                           <button onClick={() => removeIoc(cat, arr[i])}
                             title="Discard this indicator"
