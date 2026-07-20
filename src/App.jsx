@@ -2056,6 +2056,9 @@ export default function App() {
   const [copied, setCopied] = useState("");
   const [editingKey, setEditingKey] = useState(null);   // "cat-i-3" → currently editing
   const [editValue, setEditValue] = useState("");
+  const [addedPivots, setAddedPivots] = useState(new Set());       // "targetCat::targetValue" → added
+  const [dismissedPivots, setDismissedPivots] = useState(new Set()); // dismissed pivot suggestions
+  const [enrichAllDone, setEnrichAllDone] = useState({});           // { cat: true } → greyed out
   const copyTimer = useRef(null);
 
   // Edit an IOC value inline — replaces the old value in iocData
@@ -2128,23 +2131,21 @@ export default function App() {
   // Add a pivot IOC from enrichment (urlscan serving IP, file hashes, etc.)
   // The IOC gets a [pivot] tag in originData for display differentiation.
   const addPivotIOC = (cat, value, source) => {
-    // Normalize: strip trailing slashes, scheme for URLs, trim whitespace
     let normValue = String(value).trim().replace(/\/+$/, "");
     if (cat === "URL" || cat === "DOMAIN") {
       normValue = normValue.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
     }
     if (!normValue) return;
+    const pivotKey = `${cat}::${normValue}`;
     setIocData((prev) => {
       const existing = prev?.[cat] || [];
-      // Dedup: normalize existing values the same way for comparison
       const existingNorm = existing.map((v) => {
         let n = String(v).trim().replace(/\/+$/, "");
         if (cat === "URL" || cat === "DOMAIN") n = n.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
         return n.toLowerCase();
       });
-      if (existingNorm.includes(normValue.toLowerCase())) return prev; // already exists
+      if (existingNorm.includes(normValue.toLowerCase())) return prev;
       const next = { ...prev, [cat]: [...existing, normValue] };
-      // Reorder by ORDER
       const ordered = {};
       ORDER.forEach((k) => { if (next[k]?.length) ordered[k] = next[k]; });
       Object.keys(next).forEach((k) => { if (!ordered[k] && next[k]?.length) ordered[k] = next[k]; });
@@ -2156,7 +2157,28 @@ export default function App() {
       next[cat][normValue] = `pivot:${source}`;
       return next;
     });
+    setAddedPivots((prev) => new Set([...prev, pivotKey]));
+    setEnrichAllDone((prev) => { const n = { ...prev }; delete n[cat]; return n; });
   };
+
+  const removePivotIOC = (cat, value) => {
+    let normValue = String(value).trim().replace(/\/+$/, "");
+    if (cat === "URL" || cat === "DOMAIN") normValue = normValue.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+    const pivotKey = `${cat}::${normValue}`;
+    removeIoc(cat, normValue);
+    setAddedPivots((prev) => { const n = new Set(prev); n.delete(pivotKey); return n; });
+  };
+
+  const dismissPivot = (key) => {
+    setDismissedPivots((prev) => new Set([...prev, key]));
+  };
+
+  const isPivotAdded = (cat, value) => {
+    let n = String(value).trim().replace(/\/+$/, "");
+    if (cat === "URL" || cat === "DOMAIN") n = n.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+    return addedPivots.has(`${cat}::${n}`);
+  };
+
 
   const flash = (key) => {
     setCopied(key);
@@ -2882,10 +2904,11 @@ export default function App() {
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat) && (
-                      <button onClick={() => { arr.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 1500)); }}
+                      <button onClick={() => { arr.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 1500)); setEnrichAllDone((p) => ({ ...p, [cat]: true })); }}
+                        disabled={!!enrichAllDone[cat]}
                         className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
-                        style={{ color: "#2dd4bf", backgroundColor: "rgba(45,212,191,0.10)", border: "1px solid rgba(45,212,191,0.4)" }}>
-                        <Search size={12} /> Enrich All
+                        style={{ color: enrichAllDone[cat] ? "#5d7382" : "#2dd4bf", backgroundColor: enrichAllDone[cat] ? "rgba(120,160,180,0.06)" : "rgba(45,212,191,0.10)", border: `1px solid ${enrichAllDone[cat] ? "rgba(120,160,180,0.2)" : "rgba(45,212,191,0.4)"}`, cursor: enrichAllDone[cat] ? "not-allowed" : "pointer" }}>
+                        <Search size={12} /> {enrichAllDone[cat] ? "Enriched" : "Enrich All"}
                       </button>
                     )}
                     <button onClick={() => toggleDefang(cat)} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
@@ -2935,6 +2958,12 @@ export default function App() {
                               <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle"
                                 style={{ color: "#22d3ee", backgroundColor: "rgba(34,211,238,0.12)", border: "1px solid rgba(34,211,238,0.3)" }}>
                                 Pivot: {originData[cat][arr[i]].slice(6)}
+                              </span>
+                            )}
+                            {enr?.data?.domainReg?.state === "deleted" && (
+                              <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle font-bold"
+                                style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.15)", border: "1px solid rgba(255,77,109,0.3)" }}>
+                                🔴 Domain Deleted / Taken Down
                               </span>
                             )}
                           </span>
@@ -3046,45 +3075,87 @@ export default function App() {
                               }}>
                                 Urlscan.io · {enr.data.urlscan.scans} Scan{enr.data.urlscan.scans !== 1 ? "s" : ""}{enr.data.urlscan.malicious > 0 ? ` · 🔴 ${enr.data.urlscan.malicious} Malicious` : ""}{enr.data.urlscan.title ? ` · "${enr.data.urlscan.title}"` : ""}{enr.data.urlscan.server ? ` · ${enr.data.urlscan.server}` : ""}{enr.data.urlscan.country && enr.data.urlscan.flag ? ` · ${enr.data.urlscan.flag}` : ""}
                                 {enr.data.urlscan.link && <>{" · "}<a href={enr.data.urlscan.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a></>}
+                                {" · "}<a href={`https://urlscan.io/scan/?url=${encodeURIComponent(arr[i].includes("://") ? arr[i] : "https://" + arr[i])}`} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "#fbbf24" }}>Scan</a>
                               </span>
                             )}
-                            {enr.data.urlscan?.servingIP && enr.data.urlscan.servingIP !== arr[i] && (
+                            {enr.data.urlscan?.servingIP && enr.data.urlscan.servingIP !== arr[i] && !dismissedPivots.has(`ip::${enr.data.urlscan.servingIP}::${arr[i]}`) && (
                               <span className="rounded-full px-2 py-0.5 flex items-center gap-1.5 flex-wrap" style={{ color: "#22d3ee", backgroundColor: "rgba(34,211,238,0.08)", border: "1px solid rgba(34,211,238,0.25)" }}>
                                 <span>Serving IP: {enr.data.urlscan.servingIP}{enr.data.urlscan.servingASN ? ` · ${enr.data.urlscan.servingASN}` : ""}{enr.data.urlscan.servingASNName ? ` · ${enr.data.urlscan.servingASNName}` : ""}</span>
-                                <button onClick={() => addPivotIOC("IPV4", enr.data.urlscan.servingIP, `Serving IP of ${arr[i]}`)}
-                                  title="Add serving IP as IOC"
-                                  className="rounded px-1.5 py-0.5 font-bold"
-                                  style={{ color: "#04111a", backgroundColor: "#22d3ee", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
-                                  + Add as IOC
-                                </button>
+                                {isPivotAdded("IPV4", enr.data.urlscan.servingIP) ? (
+                                  <>
+                                    <span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>Added to IPV4</span>
+                                    <button onClick={() => removePivotIOC("IPV4", enr.data.urlscan.servingIP)}
+                                      className="rounded px-1.5 py-0.5 font-bold"
+                                      style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>
+                                      Remove</button>
+                                  </>
+                                ) : (
+                                  <button onClick={() => addPivotIOC("IPV4", enr.data.urlscan.servingIP, `Serving IP of ${arr[i]}`)}
+                                    className="rounded px-1.5 py-0.5 font-bold"
+                                    style={{ color: "#04111a", backgroundColor: "#22d3ee", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
+                                    + Add as IOC</button>
+                                )}
+                                <button onClick={() => dismissPivot(`ip::${enr.data.urlscan.servingIP}::${arr[i]}`)}
+                                  className="rounded p-0.5" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}>
+                                  <X size={10} /></button>
                               </span>
                             )}
                             {enr.data.urlscan?.scannedUrls?.length > 0 && (() => {
-                              // Filter out URLs already in the URL IOC card
-                              const existingUrls = new Set((displayData?.URL || []).map((u) => u.toLowerCase()));
+                              const existingUrls = new Set((displayData?.URL || []).map((u) => u.toLowerCase().replace(/\/+$/, "")));
+                              // Also collect file URLs to avoid duplicates
+                              const fileUrls = new Set((enr.data.urlscan.files || []).map((f) => f.url?.toLowerCase().replace(/\/+$/, "")).filter(Boolean));
+                              const iocNorm = arr[i].toLowerCase().replace(/\/+$/, "").replace(/^https?:\/\//i, "");
                               const newUrls = enr.data.urlscan.scannedUrls.filter((u) => {
-                                const stripped = u.replace(/^https?:\/\//i, "").toLowerCase();
-                                return !existingUrls.has(stripped) && !existingUrls.has(u.toLowerCase());
+                                const stripped = u.replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
+                                // Skip if it's just the IOC domain/IP with optional slash
+                                if (stripped === iocNorm || stripped === iocNorm + "/") return false;
+                                // Skip if already in URL IOC card
+                                if (existingUrls.has(stripped)) return false;
+                                // Skip if covered by file URLs
+                                if (fileUrls.has(u.toLowerCase().replace(/\/+$/, ""))) return false;
+                                // Skip if dismissed
+                                if (dismissedPivots.has(`url::${stripped}::${arr[i]}`)) return false;
+                                return true;
                               });
                               if (!newUrls.length) return null;
                               return (
                                 <div className="flex flex-col gap-0.5 w-full">
-                                  {newUrls.map((u, ui) => (
+                                  {newUrls.map((u, ui) => {
+                                    const uNorm = u.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+                                    const added = isPivotAdded("URL", uNorm);
+                                    return (
                                     <span key={ui} className="rounded-full px-2 py-0.5 flex items-center gap-1.5 text-[10px]" style={{ color: "#7c9cff", backgroundColor: "rgba(124,156,255,0.06)", border: "1px solid rgba(124,156,255,0.2)" }}>
                                       <span className="break-all flex-1">{u}</span>
-                                      <button onClick={() => addPivotIOC("URL", u.replace(/^https?:\/\//i, ""), `Urlscan scan of ${arr[i]}`)}
-                                        className="rounded px-1.5 py-0.5 font-bold shrink-0"
-                                        style={{ color: "#04111a", backgroundColor: "#7c9cff", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
-                                        + Add as IOC
-                                      </button>
+                                      {added ? (
+                                        <>
+                                          <span className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>Added to URL</span>
+                                          <button onClick={() => removePivotIOC("URL", uNorm)}
+                                            className="rounded px-1.5 py-0.5 font-bold shrink-0"
+                                            style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>
+                                            Remove</button>
+                                        </>
+                                      ) : (
+                                        <button onClick={() => addPivotIOC("URL", uNorm, `Urlscan scan of ${arr[i]}`)}
+                                          className="rounded px-1.5 py-0.5 font-bold shrink-0"
+                                          style={{ color: "#04111a", backgroundColor: "#7c9cff", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
+                                          + Add as IOC</button>
+                                      )}
+                                      <button onClick={() => dismissPivot(`url::${uNorm}::${arr[i]}`)}
+                                        className="rounded p-0.5 shrink-0" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}>
+                                        <X size={10} /></button>
                                     </span>
-                                  ))}
+                                    );
+                                  })}
                                 </div>
                               );
                             })()}
                             {enr.data.urlscan?.files?.length > 0 && (
                               <div className="flex flex-col gap-0.5 w-full">
-                                {enr.data.urlscan.files.map((f, fi) => (
+                                {enr.data.urlscan.files.filter((f) => !dismissedPivots.has(`file::${f.sha256 || f.filename}::${arr[i]}`)).map((f, fi) => {
+                                  const hashAdded = f.sha256 && isPivotAdded("SHA256", f.sha256);
+                                  const fileAdded = f.filename && isPivotAdded("FILE_NAME", f.filename);
+                                  const urlAdded = f.url && isPivotAdded("URL", f.url.replace(/^https?:\/\//i, "").replace(/\/+$/, ""));
+                                  return (
                                   <span key={fi} className="rounded-full px-2 py-0.5 flex items-center gap-1.5 flex-wrap text-[10px]" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
                                     <span className="break-all flex-1">
                                       {f.filename ? <span style={{ color: "#fbbf24" }}>{f.filename}</span> : null}
@@ -3092,25 +3163,30 @@ export default function App() {
                                       {f.sha256 ? <>{(f.filename || f.url) ? " · " : ""}<span style={{ color: "#ff4d6d" }}>{f.sha256.slice(0, 16)}…</span></> : null}
                                       {f.size ? ` · ${Math.round(f.size / 1024)}KB` : ""}
                                     </span>
-                                    <span className="flex gap-1 shrink-0">
-                                      {f.sha256 && <button onClick={() => addPivotIOC("SHA256", f.sha256, `File on ${arr[i]}`)}
-                                        className="rounded px-1.5 py-0.5 font-bold"
-                                        style={{ color: "#04111a", backgroundColor: "#ff4d6d", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
-                                        + Hash</button>}
-                                      {f.filename && <button onClick={() => addPivotIOC("FILE_NAME", f.filename, `File on ${arr[i]}`)}
+                                    <span className="flex gap-1 shrink-0 flex-wrap">
+                                      {f.sha256 && (hashAdded
+                                        ? <><span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>Added</span>
+                                           <button onClick={() => removePivotIOC("SHA256", f.sha256)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove</button></>
+                                        : <button onClick={() => addPivotIOC("SHA256", f.sha256, `${f.filename || "File"} on ${arr[i]}`)}
+                                          className="rounded px-1.5 py-0.5 font-bold"
+                                          style={{ color: "#04111a", backgroundColor: "#ff4d6d", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
+                                          + Hash</button>
+                                      )}
+                                      {f.filename && !fileAdded && <button onClick={() => addPivotIOC("FILE_NAME", f.filename, `File on ${arr[i]}`)}
                                         className="rounded px-1.5 py-0.5 font-bold"
                                         style={{ color: "#04111a", backgroundColor: "#fbbf24", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
                                         + File</button>}
-                                      {f.url && <button onClick={() => addPivotIOC("URL", f.url.replace(/^https?:\/\//i, ""), `File URL on ${arr[i]}`)}
-                                        className="rounded px-1.5 py-0.5 font-bold"
-                                        style={{ color: "#04111a", backgroundColor: "#7c9cff", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
-                                        + URL</button>}
+                                      {f.filename && fileAdded && <span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>File Added</span>}
                                     </span>
+                                    <button onClick={() => dismissPivot(`file::${f.sha256 || f.filename}::${arr[i]}`)}
+                                      className="rounded p-0.5 shrink-0" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}>
+                                      <X size={10} /></button>
                                   </span>
-                                ))}
+                                  );
+                                })}
                               </div>
                             )}
-                            {["DOMAIN","URL"].includes(cat) && (enr.data.domainReg || enr.data.urlscan?.subdomainAgeDays != null) && (() => {
+                            {["DOMAIN","URL"].includes(cat) && !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(arr[i]) && (enr.data.domainReg || enr.data.urlscan?.subdomainAgeDays != null) && (() => {
                               const dr = enr.data.domainReg;
                               const sd = enr.data.urlscan;
                               const isDeleted = dr?.state === "deleted";
@@ -3136,7 +3212,7 @@ export default function App() {
                         {enr && !enr.loading && !enr.data && enr.error && (
                           <p className="ml-4 mb-1 text-[10px] font-bold" style={{ color: "#5d7382" }}>⚪ Unknown to our integrated Enrichment Engines. Please check on VirusTotal.</p>
                         )}
-                        {enr?.data && enr.data._verdict === "Unknown" && (
+                        {enr?.data && enr.data._verdict === "Unknown" && enr.data.domainReg?.state !== "deleted" && (
                           <p className="ml-4 mb-1 text-[10px] font-bold" style={{ color: "#5d7382" }}>⚪ Unknown to our integrated Enrichment Engines. Please check on VirusTotal.</p>
                         )}
                       </div>
