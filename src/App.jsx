@@ -1815,6 +1815,35 @@ export default function App() {
         } catch (e) { console.warn("Enrich OTX WHOIS failed:", e.message); }
       }
 
+      // AbuseIPDB — community abuse reports for IP addresses
+      if (["IPV4","IPV6"].includes(cat)) {
+        try {
+          const aj = await callEnrich("abuseipdb");
+          if (aj && aj.data && !aj.errors) {
+            const d = aj.data;
+            const categories = Array.isArray(d.reports)
+              ? [...new Set(d.reports.flatMap((r) => r.categories || []).map((c) => {
+                  const CAT_MAP = {1:"DNS Compromise",2:"DNS Poisoning",3:"Fraud Orders",4:"DDoS Attack",5:"FTP Brute-Force",
+                    6:"Ping of Death",7:"Phishing",8:"Fraud VoIP",9:"Open Proxy",10:"Web Spam",11:"Email Spam",
+                    12:"Blog Spam",13:"VPN IP",14:"Port Scan",15:"Hacking",16:"SQL Injection",17:"Spoofing",
+                    18:"Brute-Force",19:"Bad Web Bot",20:"Exploited Host",21:"Web App Attack",22:"SSH",23:"IoT Targeted"};
+                  return CAT_MAP[c] || null;
+                }).filter(Boolean))].slice(0, 4)
+              : [];
+            if (d.abuseConfidenceScore != null || d.totalReports > 0) {
+              results.abuseipdb = {
+                score: d.abuseConfidenceScore,
+                reports: d.totalReports || 0,
+                lastReported: d.lastReportedAt ? d.lastReportedAt.split("T")[0] : null,
+                isp: d.isp || null,
+                usageType: d.usageType || null,
+                categories: categories.length ? categories.join(", ") : null,
+              };
+            }
+          }
+        } catch (e) { console.warn("Enrich AbuseIPDB failed:", e.message); }
+      }
+
       // ---- urlscan.io — community scan results for domains, URLs, IPs ----
       if (["IPV4","IPV6","DOMAIN","URL"].includes(cat)) {
         try {
@@ -2007,6 +2036,8 @@ export default function App() {
       else if (results.otx?.whitelisted === true) verdict = "Whitelisted";
       else if (results.otx?.validation) verdict = "Suspicious"; // OTX flagged (DGA, blocklist, etc.)
       else if ((results.otx?.pulses || 0) >= 9) verdict = "Malicious";
+      else if ((results.abuseipdb?.score || 0) >= 80) verdict = "Malicious";
+      else if ((results.abuseipdb?.score || 0) >= 25) verdict = "Suspicious";
       else if ((results.otx?.pulses || 0) > 0) verdict = "Suspicious";
       // Recently registered domain with OTX data = suspicious
       else if (results.whois && results.whois.ageDays !== null && results.whois.ageDays < 90 && results.otx) verdict = "Suspicious";
@@ -2966,6 +2997,18 @@ export default function App() {
                                 🔴 Domain Deleted / Taken Down
                               </span>
                             )}
+                            {enr?.data?.domainReg?.state === "active" && enr?.data?.domainReg?.status && /clientHold|serverHold/i.test(enr.data.domainReg.status) && (
+                              <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle font-bold"
+                                style={{ color: "#f59e0b", backgroundColor: "rgba(245,158,11,0.15)", border: "1px solid rgba(245,158,11,0.3)" }}>
+                                🟠 Domain Suspended / Registrar Hold
+                              </span>
+                            )}
+                            {enr?.data?.domainReg?.state === "active" && enr?.data?.domainReg?.status && /redemptionPeriod|pendingDelete/i.test(enr.data.domainReg.status) && (
+                              <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle font-bold"
+                                style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.15)", border: "1px solid rgba(255,77,109,0.3)" }}>
+                                🔴 Domain Pending Deletion
+                              </span>
+                            )}
                           </span>
                           )}
                           {enrichable && (
@@ -3048,6 +3091,15 @@ export default function App() {
                                 GEO/ASN{enr.data.whoisASN.country ? <>{" · "}<span style={{ color: "#eafcff", fontWeight: 700 }}>{enr.data.whoisASN.flag ? enr.data.whoisASN.flag + " " : ""}{enr.data.whoisASN.country}</span></> : ""}{enr.data.whoisASN.city ? ` (${enr.data.whoisASN.city}${enr.data.whoisASN.region ? `, ${enr.data.whoisASN.region}` : ""})` : ""}{enr.data.whoisASN.asn ? ` · ${enr.data.whoisASN.asn}` : ""}{enr.data.whoisASN.asnOrg ? ` · ${enr.data.whoisASN.asnOrg}` : ""}{enr.data.whoisASN.privacy ? <>{" · "}<span style={{ color: "#fbbf24", fontWeight: 700 }}>{enr.data.whoisASN.privacy}</span></> : ""}
                               </span>
                             )}
+                            {enr.data.abuseipdb && (
+                              <span className="rounded-full px-2 py-0.5" style={{
+                                color: (enr.data.abuseipdb.score || 0) >= 80 ? "#ff4d6d" : (enr.data.abuseipdb.score || 0) >= 25 ? "#fbbf24" : "#2dd4bf",
+                                backgroundColor: (enr.data.abuseipdb.score || 0) >= 80 ? "rgba(255,77,109,0.12)" : (enr.data.abuseipdb.score || 0) >= 25 ? "rgba(251,191,36,0.12)" : "rgba(45,212,191,0.08)",
+                                border: `1px solid ${(enr.data.abuseipdb.score || 0) >= 80 ? "rgba(255,77,109,0.3)" : (enr.data.abuseipdb.score || 0) >= 25 ? "rgba(251,191,36,0.3)" : "rgba(45,212,191,0.25)"}`,
+                              }}>
+                                AbuseIPDB · {enr.data.abuseipdb.score}% Confidence · {enr.data.abuseipdb.reports} Report{enr.data.abuseipdb.reports !== 1 ? "s" : ""}{enr.data.abuseipdb.categories ? ` · ${enr.data.abuseipdb.categories}` : ""}{enr.data.abuseipdb.isp ? ` · ${enr.data.abuseipdb.isp}` : ""}{enr.data.abuseipdb.usageType ? ` · ${enr.data.abuseipdb.usageType}` : ""}{enr.data.abuseipdb.lastReported ? ` · Last: ${enr.data.abuseipdb.lastReported}` : ""}
+                              </span>
+                            )}
                             {enr.data.whois && (
                               <span className="rounded-full px-2 py-0.5" style={{ color: "#a78bfa", backgroundColor: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)" }}>
                                 WHOIS{enr.data.whois.org ? ` · ${enr.data.whois.org}` : ""}{enr.data.whois.country ? ` · ${enr.data.whois.country}` : ""}{enr.data.whois.ageDays !== null ? ` · ${enr.data.whois.ageDays}d old` : ""}
@@ -3107,7 +3159,10 @@ export default function App() {
                               const newUrls = enr.data.urlscan.scannedUrls.filter((u) => {
                                 const stripped = u.replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
                                 if (stripped === iocNorm || stripped === iocNorm + "/") return false;
-                                // Keep if it was added as pivot (show Added state), skip if it was in original IOCs
+                                // Also skip "www." variant of the IOC
+                                const iocNoWww = iocNorm.replace(/^www\./i, "");
+                                const strippedNoWww = stripped.replace(/^www\./i, "");
+                                if (strippedNoWww === iocNoWww || strippedNoWww === iocNoWww + "/") return false;
                                 const wasPivotAdded = isPivotAdded("URL", stripped);
                                 if (!wasPivotAdded && existingUrls.has(stripped)) return false;
                                 if (fileUrls.has(u.toLowerCase().replace(/\/+$/, ""))) return false;
@@ -3196,17 +3251,23 @@ export default function App() {
                               const sd = enr.data.urlscan;
                               const isDeleted = dr?.state === "deleted";
                               const isUnregistered = dr?.state === "unregistered";
+                              // Domain Deleted badge is already shown next to IOC name — don't repeat here
+                              if (isDeleted) return null;
                               const isNewDomain = dr?.state === "active" && dr?.ageDays != null && dr.ageDays < 30;
                               const isNewSubdomain = !isDeleted && sd?.subdomainAgeDays != null && sd.subdomainAgeDays < 30 && dr?.ageDays > 120;
                               const isAlert = isNewDomain || isNewSubdomain || isDeleted;
                               const showSubdomain = !isDeleted && sd?.subdomainAgeDays != null;
+                              // Determine if IOC is actually a subdomain (more parts than base domain)
+                              const iocParts = arr[i].replace(/^https?:\/\//i, "").split("/")[0].split(".");
+                              const isActualSubdomain = iocParts.length > 2;
+                              const subLabel = isActualSubdomain ? "Subdomain" : "First Observed";
                               return (
                               <span className="rounded-full px-2 py-0.5" style={{
                                 color: isAlert ? "#ff4d6d" : isUnregistered ? "#8aa0ad" : "#94a3b8",
                                 backgroundColor: isAlert ? "rgba(255,77,109,0.10)" : "rgba(148,163,184,0.08)",
                                 border: `1px solid ${isAlert ? "rgba(255,77,109,0.3)" : "rgba(148,163,184,0.25)"}`,
                               }}>
-                                📋{dr?.state === "active" && dr.ageDays != null ? ` Domain: ${smartAge(dr.ageDays)} old (Reg. ${fmtDate(dr.date)})` : ""}{isDeleted ? <span style={{ color: "#ff4d6d", fontWeight: 700 }}> 🔴 Domain Deleted / Taken Down</span> : ""}{isUnregistered ? " ⚪ Domain Not Registered" : ""}{showSubdomain ? `${dr?.state === "active" ? " · " : " "}Subdomain: ${smartAge(sd.subdomainAgeDays)} old (Active Since ${fmtDate(sd.subdomainCreated)})` : ""}{dr?.status ? ` · Status: ${dr.status}` : ""}
+                                📋{dr?.state === "active" && dr.ageDays != null ? ` Domain: ${smartAge(dr.ageDays)} old (Reg. ${fmtDate(dr.date)})` : ""}{isDeleted ? <span style={{ color: "#ff4d6d", fontWeight: 700 }}> 🔴 Domain Deleted / Taken Down</span> : ""}{isUnregistered ? " ⚪ Domain Not Registered" : ""}{showSubdomain ? `${dr?.state === "active" ? " · " : " "}${subLabel}: ${smartAge(sd.subdomainAgeDays)} old (Active Since ${fmtDate(sd.subdomainCreated)})` : ""}{dr?.status ? ` · Status: ${dr.status}` : ""}
                                 {isNewDomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Domain</span>}
                                 {isNewSubdomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Subdomain</span>}
                               </span>
