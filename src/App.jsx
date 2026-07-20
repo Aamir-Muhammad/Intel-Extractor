@@ -2006,7 +2006,7 @@ export default function App() {
       else if (results.urlhaus?.status === "offline") verdict = "Suspicious";
       else if (results.otx?.whitelisted === true) verdict = "Whitelisted";
       else if (results.otx?.validation) verdict = "Suspicious"; // OTX flagged (DGA, blocklist, etc.)
-      else if ((results.otx?.pulses || 0) > 5) verdict = "Malicious";
+      else if ((results.otx?.pulses || 0) >= 9) verdict = "Malicious";
       else if ((results.otx?.pulses || 0) > 0) verdict = "Suspicious";
       // Recently registered domain with OTX data = suspicious
       else if (results.whois && results.whois.ageDays !== null && results.whois.ageDays < 90 && results.otx) verdict = "Suspicious";
@@ -3102,18 +3102,15 @@ export default function App() {
                             )}
                             {enr.data.urlscan?.scannedUrls?.length > 0 && (() => {
                               const existingUrls = new Set((displayData?.URL || []).map((u) => u.toLowerCase().replace(/\/+$/, "")));
-                              // Also collect file URLs to avoid duplicates
                               const fileUrls = new Set((enr.data.urlscan.files || []).map((f) => f.url?.toLowerCase().replace(/\/+$/, "")).filter(Boolean));
                               const iocNorm = arr[i].toLowerCase().replace(/\/+$/, "").replace(/^https?:\/\//i, "");
                               const newUrls = enr.data.urlscan.scannedUrls.filter((u) => {
                                 const stripped = u.replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
-                                // Skip if it's just the IOC domain/IP with optional slash
                                 if (stripped === iocNorm || stripped === iocNorm + "/") return false;
-                                // Skip if already in URL IOC card
-                                if (existingUrls.has(stripped)) return false;
-                                // Skip if covered by file URLs
+                                // Keep if it was added as pivot (show Added state), skip if it was in original IOCs
+                                const wasPivotAdded = isPivotAdded("URL", stripped);
+                                if (!wasPivotAdded && existingUrls.has(stripped)) return false;
                                 if (fileUrls.has(u.toLowerCase().replace(/\/+$/, ""))) return false;
-                                // Skip if dismissed
                                 if (dismissedPivots.has(`url::${stripped}::${arr[i]}`)) return false;
                                 return true;
                               });
@@ -3165,18 +3162,26 @@ export default function App() {
                                     </span>
                                     <span className="flex gap-1 shrink-0 flex-wrap">
                                       {f.sha256 && (hashAdded
-                                        ? <><span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>Added</span>
-                                           <button onClick={() => removePivotIOC("SHA256", f.sha256)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove</button></>
+                                        ? <button onClick={() => removePivotIOC("SHA256", f.sha256)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove Hash</button>
                                         : <button onClick={() => addPivotIOC("SHA256", f.sha256, `${f.filename || "File"} on ${arr[i]}`)}
                                           className="rounded px-1.5 py-0.5 font-bold"
                                           style={{ color: "#04111a", backgroundColor: "#ff4d6d", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
                                           + Hash</button>
                                       )}
-                                      {f.filename && !fileAdded && <button onClick={() => addPivotIOC("FILE_NAME", f.filename, `File on ${arr[i]}`)}
-                                        className="rounded px-1.5 py-0.5 font-bold"
-                                        style={{ color: "#04111a", backgroundColor: "#fbbf24", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
-                                        + File</button>}
-                                      {f.filename && fileAdded && <span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>File Added</span>}
+                                      {f.filename && (fileAdded
+                                        ? <button onClick={() => removePivotIOC("FILE_NAME", f.filename)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove File</button>
+                                        : <button onClick={() => addPivotIOC("FILE_NAME", f.filename, `File on ${arr[i]}`)}
+                                          className="rounded px-1.5 py-0.5 font-bold"
+                                          style={{ color: "#04111a", backgroundColor: "#fbbf24", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
+                                          + File</button>
+                                      )}
+                                      {f.url && (urlAdded
+                                        ? <button onClick={() => removePivotIOC("URL", f.url.replace(/^https?:\/\//i, "").replace(/\/+$/, ""))} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove URL</button>
+                                        : <button onClick={() => addPivotIOC("URL", f.url.replace(/^https?:\/\//i, "").replace(/\/+$/, ""), `File URL on ${arr[i]}`)}
+                                          className="rounded px-1.5 py-0.5 font-bold"
+                                          style={{ color: "#04111a", backgroundColor: "#7c9cff", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
+                                          + URL</button>
+                                      )}
                                     </span>
                                     <button onClick={() => dismissPivot(`file::${f.sha256 || f.filename}::${arr[i]}`)}
                                       className="rounded p-0.5 shrink-0" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}>
