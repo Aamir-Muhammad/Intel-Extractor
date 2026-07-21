@@ -663,7 +663,7 @@ const classify = (t) => {
   if (/^T\d{4}(?:\.\d{3})?$/.test(t)) return ["MITRE_ATTACK", t.toUpperCase()];
   if (/^[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$/.test(t)) return ["EMAIL", t.toLowerCase()];
   if (/^(https?|ftp):\/\//i.test(t)) return ["URL", t];
-  if (/^([a-z0-9-]+\.)+[a-z]{2,}(:\d+)?\/\S*/i.test(t)) return ["URL", t];
+  if (/^([a-z0-9-]+\.)+[a-z]{2,}(:\d+)?\/\S+/i.test(t)) return ["URL", t];
   if (/^\d{1,6}:[A-Za-z0-9/+]{4,}:[A-Za-z0-9/+]{4,}$/.test(t)) return ["SSDEEP", t];
   if (/^0x[a-fA-F0-9]{40}$/.test(t)) return ["ETH", t];
   if (/^[a-fA-F0-9]{32}$/.test(t)) return ["MD5", t.toLowerCase()];
@@ -678,7 +678,16 @@ const classify = (t) => {
   if (/^ASN?\d{2,}$/i.test(t)) return ["ASN", t.toUpperCase().replace(/^ASN/, "AS")];
   if (/^(HKLM|HKCU|HKCR|HKU|HKCC|HKEY_[A-Z_]+)[\\/]/i.test(t)) return ["REGISTRY", t];
   if (/\\/.test(t)) return ["FILE_PATH", t];
-  if (FILE_EXT.test(t)) return ["FILE_NAME", t];
+  // Country TLDs that overlap with file extensions (.pl=Poland/Perl, .py=Paraguay/Python, etc.)
+  // If token looks like a domain AND its extension is a known country TLD, prefer DOMAIN
+  if (FILE_EXT.test(t)) {
+    const ext = t.split(".").pop().toLowerCase();
+    const COUNTRY_TLD = new Set(["pl","py","sh","rs","md","ba","bg","by","cz","de","dk","ee","es","fi","fr","ge","gr","hr","hu","ie","il","in","is","it","jp","kg","kr","lt","lu","lv","mk","ml","mn","ms","mt","mx","my","nl","no","nz","pe","ph","pk","pt","ro","ru","se","sg","si","sk","su","th","tr","ua","uk","us","uz","vn","za"]);
+    if (COUNTRY_TLD.has(ext) && /^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2}$/i.test(t)) {
+      return ["DOMAIN", t.toLowerCase()];
+    }
+    return ["FILE_NAME", t];
+  }
   if (/^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(t)) return ["DOMAIN", t.toLowerCase()];
   return null;
 };
@@ -953,9 +962,11 @@ const huntKQL = (cat, arr) => {
       return `let ${varName} = ${hashDyn};\nlet ProcEvents =\n    DeviceProcessEvents\n    | where Timestamp > ago(30d)\n    | where ${hashField} in~ (${varName}) or ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = iff(${hashField} in~ (${varName}), ${hashField}, ${initField}),\n        MatchedField = iff(${hashField} in~ (${varName}), "${hashField}", "${initField}"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName, " > ", FileName)\n    | project Timestamp, DeviceName, AccountName, SourceTable="DeviceProcessEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = ProcessCommandLine;\nlet FileEvents =\n    DeviceFileEvents\n    | where Timestamp > ago(30d)\n    | where ${hashField} in~ (${varName}) or ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = iff(${hashField} in~ (${varName}), ${hashField}, ${initField}),\n        MatchedField = iff(${hashField} in~ (${varName}), "${hashField}", "${initField}"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceFileEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet ImageLoadEvents =\n    DeviceImageLoadEvents\n    | where Timestamp > ago(30d)\n    | where ${hashField} in~ (${varName}) or ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = iff(${hashField} in~ (${varName}), ${hashField}, ${initField}),\n        MatchedField = iff(${hashField} in~ (${varName}), "${hashField}", "${initField}"),\n        Detail       = strcat(FolderPath, FileName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceImageLoadEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet NetworkEvents =\n    DeviceNetworkEvents\n    | where Timestamp > ago(30d)\n    | where ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = ${initField},\n        MatchedField = "${initField}",\n        Detail       = strcat(RemoteIP, ":", tostring(RemotePort), " ", RemoteUrl),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceNetworkEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet RegistryEvents =\n    DeviceRegistryEvents\n    | where Timestamp > ago(30d)\n    | where ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = ${initField},\n        MatchedField = "${initField}",\n        Detail       = strcat(RegistryKey, " \\\\ ", RegistryValueName),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, InitiatingProcessAccountName, SourceTable="DeviceRegistryEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet LogonEvents =\n    DeviceLogonEvents\n    | where Timestamp > ago(30d)\n    | where ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = ${initField},\n        MatchedField = "${initField}",\n        Detail       = strcat(LogonType, " | ", RemoteIP),\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, AccountName, SourceTable="DeviceLogonEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nlet MiscEvents =\n    DeviceEvents\n    | where Timestamp > ago(30d)\n    | where ${initField} in~ (${varName})\n    | extend\n        MatchedHash  = ${initField},\n        MatchedField = "${initField}",\n        Detail       = ActionType,\n        ProcessTree  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, AccountName, SourceTable="DeviceEvents",\n        MatchedHash, MatchedField, Detail, ProcessTree,\n        CommandLine = InitiatingProcessCommandLine;\nunion ProcEvents, FileEvents, ImageLoadEvents,\n      NetworkEvents, RegistryEvents, LogonEvents, MiscEvents\n| summarize\n    FirstSeen    = min(Timestamp),\n    LastSeen     = max(Timestamp),\n    EventCount   = count(),\n    Accounts     = make_set(AccountName),\n    Details      = make_set(Detail),\n    ProcessTrees = make_set(ProcessTree),\n    CommandLines = make_set(CommandLine)\n    by DeviceName, SourceTable, MatchedHash, MatchedField\n| sort by FirstSeen desc`;
     }
     case "FILE_NAME":
-      return `DeviceFileEvents\n| where FileName in~ (${kqlList(arr)})\n| project-reorder Timestamp, DeviceName, FileName, FolderPath, SHA256, ActionType, InitiatingProcessFileName\nunion DeviceProcessEvents\n| where FileName in~ (${kqlList(arr)}) or ProcessCommandLine has_any (${kqlList(arr)})\n| project-reorder Timestamp, DeviceName, FileName, ProcessCommandLine, SHA256`;
-    case "FILE_PATH":
-      return `DeviceFileEvents\n| where ${arr.map((p) => `FolderPath has @"${p.replace(/"/g, '\\"')}"`).join("\n    or ")}\n| project Timestamp, DeviceName, FileName, FolderPath, SHA256, InitiatingProcessFileName`;
+      return `DeviceFileEvents\n| where FileName in~ (${kqlList(arr)})\n| project-reorder Timestamp, DeviceName, FileName, FolderPath, SHA256, ActionType, InitiatingProcessFileName;\nunion DeviceProcessEvents\n| where FileName in~ (${kqlList(arr)}) or ProcessCommandLine has_any (${kqlList(arr)})\n| project-reorder Timestamp, DeviceName, FileName, ProcessCommandLine, SHA256`;
+    case "FILE_PATH": {
+      const pathDyn = `dynamic([${arr.map((p) => `@"${p.replace(/"/g, '\\"')}"`).join(", ")}])`;
+      return `let ScopedPaths = ${pathDyn};\nlet ProcEvents =\n    DeviceProcessEvents\n    | where Timestamp > ago(30d)\n    | where FolderPath has_any (ScopedPaths) or InitiatingProcessFolderPath has_any (ScopedPaths)\n    | extend\n        Detail      = strcat(FolderPath, FileName),\n        ProcessTree = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName, " > ", FileName)\n    | project Timestamp, DeviceName, AccountName, SourceTable="DeviceProcessEvents",\n        Detail, ProcessTree, CommandLine = ProcessCommandLine,\n        SHA256, InitiatingProcessSHA256;\nlet FileEvents =\n    DeviceFileEvents\n    | where Timestamp > ago(30d)\n    | where FolderPath has_any (ScopedPaths) or InitiatingProcessFolderPath has_any (ScopedPaths)\n    | extend\n        Detail      = strcat(FolderPath, FileName),\n        ProcessTree = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, AccountName = InitiatingProcessAccountName, SourceTable="DeviceFileEvents",\n        Detail, ProcessTree, CommandLine = InitiatingProcessCommandLine,\n        SHA256, InitiatingProcessSHA256;\nlet ImageLoadEvents =\n    DeviceImageLoadEvents\n    | where Timestamp > ago(30d)\n    | where FolderPath has_any (ScopedPaths) or InitiatingProcessFolderPath has_any (ScopedPaths)\n    | extend\n        Detail      = strcat(FolderPath, FileName),\n        ProcessTree = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, AccountName = InitiatingProcessAccountName, SourceTable="DeviceImageLoadEvents",\n        Detail, ProcessTree, CommandLine = InitiatingProcessCommandLine,\n        SHA256, InitiatingProcessSHA256;\nlet NetworkEvents =\n    DeviceNetworkEvents\n    | where Timestamp > ago(30d)\n    | where InitiatingProcessFolderPath has_any (ScopedPaths)\n    | extend\n        Detail      = strcat(RemoteIP, ":", tostring(RemotePort), " ", RemoteUrl),\n        ProcessTree = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, AccountName = InitiatingProcessAccountName, SourceTable="DeviceNetworkEvents",\n        Detail, ProcessTree, CommandLine = InitiatingProcessCommandLine,\n        SHA256 = "", InitiatingProcessSHA256;\nlet RegistryEvents =\n    DeviceRegistryEvents\n    | where Timestamp > ago(30d)\n    | where InitiatingProcessFolderPath has_any (ScopedPaths)\n    | extend\n        Detail      = strcat(RegistryKey, " \\\\ ", RegistryValueName),\n        ProcessTree = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, AccountName = InitiatingProcessAccountName, SourceTable="DeviceRegistryEvents",\n        Detail, ProcessTree, CommandLine = InitiatingProcessCommandLine,\n        SHA256 = "", InitiatingProcessSHA256;\nlet MiscEvents =\n    DeviceEvents\n    | where Timestamp > ago(30d)\n    | where InitiatingProcessFolderPath has_any (ScopedPaths)\n    | extend\n        Detail      = ActionType,\n        ProcessTree = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName)\n    | project Timestamp, DeviceName, AccountName, SourceTable="DeviceEvents",\n        Detail, ProcessTree, CommandLine = InitiatingProcessCommandLine,\n        SHA256 = "", InitiatingProcessSHA256;\nunion ProcEvents, FileEvents, ImageLoadEvents, NetworkEvents, RegistryEvents, MiscEvents\n| summarize\n    FirstSeen    = min(Timestamp),\n    LastSeen     = max(Timestamp),\n    EventCount   = count(),\n    Accounts     = make_set(AccountName),\n    Details      = make_set(Detail),\n    CommandLines = make_set(CommandLine),\n    SHA256s      = make_set(SHA256)\n    by DeviceName, SourceTable, ProcessTree\n| sort by FirstSeen desc`;
+    }
     case "EMAIL":
       return `EmailEvents\n| where SenderFromAddress in~ (${kqlList(arr)})\n| project Timestamp, Subject, SenderFromAddress, RecipientEmailAddress, DeliveryAction, NetworkMessageId`;
     case "CVE":
@@ -1016,8 +1027,11 @@ const huntCQL = (cat, arr) => {
       return cqlHashHunt("SHA256HashData", arr);
     case "FILE_NAME":
       return `#event_simpleName=/ProcessRollup2|Written/iF\n|case{\n\t#event_simpleName=/Written/iF| FileName=/(${cqlPat(arr)})/iF |HuntObject:= FileName |HuntLogic:= "File written to disk";\n\t#event_simpleName=/ProcessRollup2/iF| CommandLine=/(${cqlPat(arr)})/iF |HuntObject:= CommandLine |HuntLogic:= "File / Payload execution via commandline";\n}\n|groupBy([@timetamp,ComputerName,UserName,HuntLogic,HuntObject,ContextBaseFileName,IsOnRemovableDisk,ZoneIdentifier,ParentBaseFileName], limit=max)`;
-    case "FILE_PATH":
-      return `#event_simpleName=ProcessRollup2 OR #event_simpleName=NewExecutableWritten\n| ImageFileName=/(${cqlPat(arr)})/i\n| groupBy([ComputerName, ImageFileName, CommandLine, SHA256HashData], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
+    case "FILE_PATH": {
+      // CrowdStrike doesn't log drive letters — strip C:\ D:\ etc. from paths
+      const cqlPaths = arr.map((p) => p.replace(/^[A-Za-z]:\\/, "\\\\"));
+      return `#event_simpleName=ProcessRollup2 OR #event_simpleName=NewExecutableWritten\n| ImageFileName=/(${cqlPaths.map(reEsc).join("|")})/i\n| groupBy([ComputerName, ImageFileName, CommandLine, SHA256HashData], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
+    }
     case "EMAIL":
       return `#event_simpleName=UserLogon OR #event_simpleName=SSOLogin\n| ${cqlIn("UserPrincipal")}\n| groupBy([ComputerName, UserPrincipal, LogonType], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
     case "SCHEDULED_TASK": {
@@ -2052,7 +2066,7 @@ export default function App() {
       }
 
       // OTX-only with 0 pulses and no other signals → Unknown
-      const hasNonOtx = results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin;
+      const hasNonOtx = results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin || results.abuseipdb || results.urlscan;
       if (!hasNonOtx && results.otx && results.otx.pulses === 0 && !results.otx.validation) verdict = "Unknown";
 
       // Final verdict normalization — catch any non-standard strings
@@ -2091,6 +2105,8 @@ export default function App() {
   const [addedPivots, setAddedPivots] = useState(new Set());       // "targetCat::targetValue" → added
   const [dismissedPivots, setDismissedPivots] = useState(new Set()); // dismissed pivot suggestions
   const [enrichAllDone, setEnrichAllDone] = useState({});           // { cat: true } → greyed out
+  const [customAddCat, setCustomAddCat] = useState(null);           // category currently showing add input
+  const [customAddValue, setCustomAddValue] = useState("");
   const copyTimer = useRef(null);
 
   // Edit an IOC value inline — replaces the old value in iocData
@@ -2936,7 +2952,7 @@ export default function App() {
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat) && (
-                      <button onClick={() => { arr.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 1500)); setEnrichAllDone((p) => ({ ...p, [cat]: true })); }}
+                      <button onClick={() => { arr.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 1500)); setEnrichAllDone((p) => ({ ...p, [cat]: true })); setTimeout(() => setEnrichAllDone((p) => { const n = { ...p }; delete n[cat]; return n; }), 5000); }}
                         disabled={!!enrichAllDone[cat]}
                         className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
                         style={{ color: enrichAllDone[cat] ? "#5d7382" : "#2dd4bf", backgroundColor: enrichAllDone[cat] ? "rgba(120,160,180,0.06)" : "rgba(45,212,191,0.10)", border: `1px solid ${enrichAllDone[cat] ? "rgba(120,160,180,0.2)" : "rgba(45,212,191,0.4)"}`, cursor: enrichAllDone[cat] ? "not-allowed" : "pointer" }}>
@@ -2952,10 +2968,39 @@ export default function App() {
                       style={{ backgroundColor: `${c}22`, color: c, border: `1px solid ${c}66`, textShadow: `0 0 10px ${c}66` }}>
                       {arr.length}
                     </span>
+                    <button onClick={() => { setCustomAddCat(customAddCat === cat ? null : cat); setCustomAddValue(""); }}
+                      title="Add custom IOC"
+                      className="rounded-md px-1.5 py-1 text-xs font-bold"
+                      style={{ color: customAddCat === cat ? "#04111a" : c, backgroundColor: customAddCat === cat ? c : `${c}14`, border: `1px solid ${c}55`, cursor: "pointer" }}>
+                      +
+                    </button>
                   </div>
                 </div>
 
                 <div className="px-4 py-2 overflow-y-auto flex-1" style={{ maxHeight: 420 }}>
+                  {customAddCat === cat && (
+                    <div className="flex gap-1.5 mb-2 pb-2" style={{ borderBottom: `1px solid ${c}22` }}>
+                      <input
+                        autoFocus
+                        value={customAddValue}
+                        onChange={(e) => setCustomAddValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && customAddValue.trim()) {
+                            addPivotIOC(cat, customAddValue.trim(), "Manual");
+                            setCustomAddValue("");
+                          }
+                          if (e.key === "Escape") setCustomAddCat(null);
+                        }}
+                        placeholder={`Add ${cat} indicator...`}
+                        className="flex-1 rounded px-2 py-1 text-xs outline-none"
+                        style={{ backgroundColor: "rgba(0,0,0,0.4)", border: `1px solid ${c}44`, color: "#dff" }}
+                      />
+                      <button onClick={() => { if (customAddValue.trim()) { addPivotIOC(cat, customAddValue.trim(), "Manual"); setCustomAddValue(""); } }}
+                        className="rounded px-2 py-1 text-xs font-bold"
+                        style={{ color: "#04111a", backgroundColor: c, cursor: "pointer", border: "none" }}>
+                        Add</button>
+                    </div>
+                  )}
                   {shown.map((ioc, i) => {
                     const huntReady = isReg && huntReadySet.has(arr[i]);
                     const rowKey = `${cat}-i-${i}`;
@@ -3131,16 +3176,17 @@ export default function App() {
                                 {" · "}<a href={`https://urlscan.io/scan/?url=${encodeURIComponent(arr[i].includes("://") ? arr[i] : "https://" + arr[i])}`} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "#fbbf24" }}>Scan</a>
                                 {enr.data.urlscan.screenshot && (
                                   <span className="relative inline-block ml-1" style={{ cursor: "pointer" }}>
-                                    <span className="peer text-[10px] px-1 py-0.5 rounded"
-                                      style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.3)", backgroundColor: "rgba(192,132,252,0.08)" }}>
+                                    <a href={enr.data.urlscan.screenshot} target="_blank" rel="noreferrer noopener"
+                                      className="peer text-[10px] px-1 py-0.5 rounded inline-block"
+                                      style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.3)", backgroundColor: "rgba(192,132,252,0.08)", textDecoration: "none" }}>
                                       🖥️ Screen
-                                    </span>
-                                    <span className="hidden peer-hover:block absolute bottom-full left-1/2 -translate-x-1/2 mb-2 z-50 rounded-lg overflow-hidden shadow-2xl"
-                                      style={{ border: "2px solid rgba(192,132,252,0.5)", backgroundColor: "#0a0e14", padding: "4px", minWidth: "320px", maxWidth: "480px" }}>
+                                    </a>
+                                    <span className="hidden peer-hover:block fixed z-[9999] rounded-lg shadow-2xl pointer-events-none"
+                                      style={{ border: "2px solid rgba(192,132,252,0.5)", backgroundColor: "#0a0e14", padding: "4px", width: "400px", maxWidth: "90vw", left: "50%", top: "50%", transform: "translate(-50%, -50%)" }}>
                                       <img src={enr.data.urlscan.screenshot} alt="Page screenshot" loading="lazy"
                                         style={{ width: "100%", borderRadius: "6px", display: "block" }}
-                                        onError={(e) => { e.target.style.display = "none"; }} />
-                                      <p className="text-[9px] text-center mt-1" style={{ color: "#5d7382" }}>urlscan.io screenshot</p>
+                                        onError={(e) => { e.target.parentElement.style.display = "none"; }} />
+                                      <p className="text-[9px] text-center mt-1" style={{ color: "#5d7382" }}>{arr[i]}</p>
                                     </span>
                                   </span>
                                 )}
