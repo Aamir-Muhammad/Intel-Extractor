@@ -3256,14 +3256,14 @@ export default function App() {
                               const isUnregistered = dr?.state === "unregistered";
                               // Domain Deleted badge is already shown next to IOC name — don't repeat here
                               if (isDeleted) return null;
+                              const iocParts = arr[i].replace(/^https?:\/\//i, "").split("/")[0].split(".");
+                              const isActualSubdomain = iocParts.length > 2;
                               const isNewDomain = dr?.state === "active" && dr?.ageDays != null && dr.ageDays < 30;
                               const isNewSubdomain = isActualSubdomain && !isDeleted && sd?.subdomainAgeDays != null && sd.subdomainAgeDays < 30 && dr?.ageDays > 120;
                               const isAlert = isNewDomain || isNewSubdomain || isDeleted;
                               const showSubdomain = !isDeleted && sd?.subdomainAgeDays != null;
-                              // Only show subdomain age when IOC is actually a subdomain (3+ domain parts)
-                              const iocParts = arr[i].replace(/^https?:\/\//i, "").split("/")[0].split(".");
-                              const isActualSubdomain = iocParts.length > 2;
                               const showSubdomainLine = showSubdomain && isActualSubdomain;
+                              // Only show subdomain age when IOC is actually a subdomain (3+ domain parts)
                               return (
                               <span className="rounded-full px-2 py-0.5" style={{
                                 color: isAlert ? "#ff4d6d" : isUnregistered ? "#8aa0ad" : "#94a3b8",
