@@ -1880,6 +1880,7 @@ export default function App() {
               flag: countryFlag(pageCountry),
               scanDate,
               link: resultUrl ? `https://urlscan.io/result/${latest._id}/` : null,
+              screenshot: latest.screenshot || null,
               firstSeen: usFirstSeen,
               lastSeen: usLastSeen,
               subdomainAgeDays: domainAgeDays,
@@ -3128,6 +3129,21 @@ export default function App() {
                                 Urlscan.io · {enr.data.urlscan.scans} Scan{enr.data.urlscan.scans !== 1 ? "s" : ""}{enr.data.urlscan.malicious > 0 ? ` · 🔴 ${enr.data.urlscan.malicious} Malicious` : ""}{enr.data.urlscan.title ? ` · "${enr.data.urlscan.title}"` : ""}{enr.data.urlscan.server ? ` · ${enr.data.urlscan.server}` : ""}{enr.data.urlscan.country && enr.data.urlscan.flag ? ` · ${enr.data.urlscan.flag}` : ""}
                                 {enr.data.urlscan.link && <>{" · "}<a href={enr.data.urlscan.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a></>}
                                 {" · "}<a href={`https://urlscan.io/scan/?url=${encodeURIComponent(arr[i].includes("://") ? arr[i] : "https://" + arr[i])}`} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "#fbbf24" }}>Scan</a>
+                                {enr.data.urlscan.screenshot && (
+                                  <span className="relative inline-block ml-1" style={{ cursor: "pointer" }}>
+                                    <span className="peer text-[10px] px-1 py-0.5 rounded"
+                                      style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.3)", backgroundColor: "rgba(192,132,252,0.08)" }}>
+                                      🖥️ Screen
+                                    </span>
+                                    <span className="hidden peer-hover:block absolute bottom-full left-1/2 -translate-x-1/2 mb-2 z-50 rounded-lg overflow-hidden shadow-2xl"
+                                      style={{ border: "2px solid rgba(192,132,252,0.5)", backgroundColor: "#0a0e14", padding: "4px", minWidth: "320px", maxWidth: "480px" }}>
+                                      <img src={enr.data.urlscan.screenshot} alt="Page screenshot" loading="lazy"
+                                        style={{ width: "100%", borderRadius: "6px", display: "block" }}
+                                        onError={(e) => { e.target.style.display = "none"; }} />
+                                      <p className="text-[9px] text-center mt-1" style={{ color: "#5d7382" }}>urlscan.io screenshot</p>
+                                    </span>
+                                  </span>
+                                )}
                               </span>
                             )}
                             {enr.data.urlscan?.servingIP && enr.data.urlscan.servingIP !== arr[i] && !dismissedPivots.has(`ip::${enr.data.urlscan.servingIP}::${arr[i]}`) && (
