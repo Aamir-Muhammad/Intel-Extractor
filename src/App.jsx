@@ -2931,7 +2931,7 @@ export default function App() {
         )}
 
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 gap-4">
           {entries.map(([cat, arr]) => {
             const c = colorFor(cat);
             const isDefanged = defangAll || !!defangMap[cat];
@@ -3092,139 +3092,217 @@ export default function App() {
                             <X size={16} />
                           </button>
                         </div>
-                        {enr?.data && (
-                          <div className="ml-4 mb-1.5 flex flex-wrap gap-1 text-[10px]">
-                            {enr.data._verdict && enr.data._verdict !== "Unknown" && (
-                              <span className="rounded-full px-2 py-0.5 font-bold" style={{
-                                color: enr.data._verdict === "Malicious" ? "#ff4d6d" : enr.data._verdict === "Suspicious" ? "#fbbf24" : enr.data._verdict === "Whitelisted" ? "#00ff9c" : "#8aa0ad",
-                                backgroundColor: enr.data._verdict === "Malicious" ? "rgba(255,77,109,0.15)" : enr.data._verdict === "Suspicious" ? "rgba(251,191,36,0.15)" : enr.data._verdict === "Whitelisted" ? "rgba(0,255,156,0.15)" : "rgba(138,160,173,0.15)",
-                                border: `1px solid ${enr.data._verdict === "Malicious" ? "rgba(255,77,109,0.4)" : enr.data._verdict === "Suspicious" ? "rgba(251,191,36,0.4)" : enr.data._verdict === "Whitelisted" ? "rgba(0,255,156,0.4)" : "rgba(138,160,173,0.3)"}`,
-                              }}>
-                                {enr.data._verdict === "Malicious" ? "🔴" : enr.data._verdict === "Suspicious" ? "🟡" : enr.data._verdict === "Whitelisted" ? "🟢" : "⚪"} {enr.data._verdict}
-                              </span>
-                            )}
-                            {enr.data.threatfox && (
-                              <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.12)", border: "1px solid rgba(255,77,109,0.3)" }}>
-                                ThreatFox · {enr.data.threatfox.malware} · {enr.data.threatfox.threat}{enr.data.threatfox.confidence ? ` · ${enr.data.threatfox.confidence}%` : ""}{enr.data.threatfox.tags ? ` · ${enr.data.threatfox.tags}` : ""}
-                              </span>
-                            )}
-                            {enr.data.urlhaus && (
-                              <span className="rounded-full px-2 py-0.5" style={{
-                                color: enr.data.urlhaus.status === "online" ? "#ff4d6d" : "#fbbf24",
-                                backgroundColor: enr.data.urlhaus.status === "online" ? "rgba(255,77,109,0.12)" : "rgba(251,191,36,0.12)",
-                                border: `1px solid ${enr.data.urlhaus.status === "online" ? "rgba(255,77,109,0.3)" : "rgba(251,191,36,0.3)"}`,
-                              }}>
-                                URLhaus · {enr.data.urlhaus.status === "online" ? "🔴 Online" : "⚫ Offline"}{enr.data.urlhaus.urls_total ? ` · ${enr.data.urlhaus.urls_total} URLs` : ""}{enr.data.urlhaus.tags ? ` · ${enr.data.urlhaus.tags}` : ""}
-                              </span>
-                            )}
-                            {enr.data.malwarebazaar && (
-                              <span className="rounded-full px-2 py-0.5" style={{ color: "#00e5ff", backgroundColor: "rgba(0,229,255,0.12)", border: "1px solid rgba(0,229,255,0.3)" }}>
-                                MalBazaar · {enr.data.malwarebazaar.family} · {enr.data.malwarebazaar.type}{enr.data.malwarebazaar.size ? ` · ${enr.data.malwarebazaar.size}` : ""}{enr.data.malwarebazaar.delivery ? ` · via ${enr.data.malwarebazaar.delivery}` : ""}{enr.data.malwarebazaar.tags ? ` · ${enr.data.malwarebazaar.tags}` : ""}
-                              </span>
-                            )}
-                            {(enr.data.malwarebazaar?.detections || enr.data.malwarebazaar?.fileName) && (
-                              <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.3)" }}>
-                                🔴 {enr.data.malwarebazaar.fileName ? enr.data.malwarebazaar.fileName + (enr.data.malwarebazaar.detections ? " | " : "") : ""}{enr.data.malwarebazaar.detections || ""}
-                              </span>
-                            )}
-                            {enr.data.otx && enr.data._verdict !== "Unknown" && (
-                              <span className="rounded-full px-2 py-0.5" style={{ color: "#2dd4bf", backgroundColor: "rgba(45,212,191,0.12)", border: "1px solid rgba(45,212,191,0.3)" }}>
-                                OTX · {enr.data.otx.pulses} pulses{enr.data.otx.validation ? ` · ${enr.data.otx.validation}` : ""}{enr.data.otx.tags ? ` · ${enr.data.otx.tags}` : ""}{enr.data.otx.parentDomain ? ` (via ${enr.data.otx.parentDomain})` : ""}
-                              </span>
-                            )}
-                            {enr.data.whoisASN && (
-                              <span className="rounded-full px-2 py-0.5" style={{ color: "#a78bfa", backgroundColor: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)" }}>
-                                GEO/ASN{enr.data.whoisASN.country ? <>{" · "}<span style={{ color: "#eafcff", fontWeight: 700 }}>{enr.data.whoisASN.flag ? enr.data.whoisASN.flag + " " : ""}{enr.data.whoisASN.country}</span></> : ""}{enr.data.whoisASN.city ? ` (${enr.data.whoisASN.city}${enr.data.whoisASN.region ? `, ${enr.data.whoisASN.region}` : ""})` : ""}{enr.data.whoisASN.asn ? ` · ${enr.data.whoisASN.asn}` : ""}{enr.data.whoisASN.asnOrg ? ` · ${enr.data.whoisASN.asnOrg}` : ""}{enr.data.whoisASN.privacy ? <>{" · "}<span style={{ color: "#fbbf24", fontWeight: 700 }}>{enr.data.whoisASN.privacy}</span></> : ""}
-                              </span>
-                            )}
-                            {enr.data.abuseipdb && (
-                              <span className="rounded-full px-2 py-0.5" style={{
-                                color: (enr.data.abuseipdb.score || 0) >= 80 ? "#ff4d6d" : (enr.data.abuseipdb.score || 0) >= 25 ? "#fbbf24" : "#2dd4bf",
-                                backgroundColor: (enr.data.abuseipdb.score || 0) >= 80 ? "rgba(255,77,109,0.12)" : (enr.data.abuseipdb.score || 0) >= 25 ? "rgba(251,191,36,0.12)" : "rgba(45,212,191,0.08)",
-                                border: `1px solid ${(enr.data.abuseipdb.score || 0) >= 80 ? "rgba(255,77,109,0.3)" : (enr.data.abuseipdb.score || 0) >= 25 ? "rgba(251,191,36,0.3)" : "rgba(45,212,191,0.25)"}`,
-                              }}>
-                                AbuseIPDB · {enr.data.abuseipdb.score}% Confidence · {enr.data.abuseipdb.reports} Report{enr.data.abuseipdb.reports !== 1 ? "s" : ""}{enr.data.abuseipdb.categories ? ` · ${enr.data.abuseipdb.categories}` : ""}{enr.data.abuseipdb.isp ? ` · ${enr.data.abuseipdb.isp}` : ""}{enr.data.abuseipdb.usageType ? ` · ${enr.data.abuseipdb.usageType}` : ""}{enr.data.abuseipdb.lastReported ? ` · Last: ${enr.data.abuseipdb.lastReported}` : ""}
-                              </span>
-                            )}
-                            {enr.data.whois && (
-                              <span className="rounded-full px-2 py-0.5" style={{ color: "#a78bfa", backgroundColor: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)" }}>
-                                WHOIS{enr.data.whois.org ? ` · ${enr.data.whois.org}` : ""}{enr.data.whois.country ? ` · ${enr.data.whois.country}` : ""}{enr.data.whois.ageDays !== null ? ` · ${enr.data.whois.ageDays}d old` : ""}
-                              </span>
-                            )}
-                            {enr.data.validin && (
-                              <span className="rounded-full px-2 py-0.5" style={{
-                                color: enr.data.validin.verdict === "malicious" ? "#ff4d6d" : enr.data.validin.verdict === "suspicious" ? "#fbbf24" : "#e879f9",
-                                backgroundColor: enr.data.validin.verdict === "malicious" ? "rgba(255,77,109,0.12)" : enr.data.validin.verdict === "suspicious" ? "rgba(251,191,36,0.12)" : "rgba(232,121,249,0.12)",
-                                border: `1px solid ${enr.data.validin.verdict === "malicious" ? "rgba(255,77,109,0.3)" : enr.data.validin.verdict === "suspicious" ? "rgba(251,191,36,0.3)" : "rgba(232,121,249,0.3)"}`,
-                              }}>
-                                Validin{enr.data.validin.verdict ? ` · ${enr.data.validin.verdict}` : ""}{enr.data.validin.score !== null ? ` (${enr.data.validin.score}/10)` : ""}{enr.data.validin.maliciousCount > 0 ? ` · Malicious x ${enr.data.validin.maliciousCount}` : ""}{enr.data.validin.titles?.length ? ` · ${enr.data.validin.titles.join(" · ")}` : ""}
-                              </span>
-                            )}
-                            {enr.data._timeline && (
-                              <span className="rounded-full px-2 py-0.5" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.25)" }}>
-                                🕐{enr.data._timeline.firstFmt ? ` First Seen: ${enr.data._timeline.firstFmt}` : ""}{enr.data._timeline.lastFmt ? ` · Last Seen: ${enr.data._timeline.lastFmt}` : ""}
-                              </span>
-                            )}
-                            {enr.data.urlscan && (
-                              <span className="rounded-full px-2 py-0.5" style={{
-                                color: enr.data.urlscan.malicious > 0 ? "#ff4d6d" : "#38bdf8",
-                                backgroundColor: enr.data.urlscan.malicious > 0 ? "rgba(255,77,109,0.12)" : "rgba(56,189,248,0.10)",
-                                border: `1px solid ${enr.data.urlscan.malicious > 0 ? "rgba(255,77,109,0.3)" : "rgba(56,189,248,0.3)"}`,
-                              }}>
-                                Urlscan.io · {enr.data.urlscan.scans} Scan{enr.data.urlscan.scans !== 1 ? "s" : ""}{enr.data.urlscan.malicious > 0 ? ` · 🔴 ${enr.data.urlscan.malicious} Malicious` : ""}{enr.data.urlscan.title ? ` · "${enr.data.urlscan.title}"` : ""}{enr.data.urlscan.server ? ` · ${enr.data.urlscan.server}` : ""}{enr.data.urlscan.country && enr.data.urlscan.flag ? ` · ${enr.data.urlscan.flag}` : ""}
-                                {enr.data.urlscan.link && <>{" · "}<a href={enr.data.urlscan.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a></>}
-                                {" · "}<a href={`https://urlscan.io/scan/?url=${encodeURIComponent(arr[i].includes("://") ? arr[i] : "https://" + arr[i])}`} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "#fbbf24" }}>Scan</a>
-                                {enr.data.urlscan.screenshot && (
-                                  <span className="relative inline-block ml-1" style={{ cursor: "pointer" }}>
-                                    <a href={enr.data.urlscan.screenshot} target="_blank" rel="noreferrer noopener"
-                                      className="peer text-[10px] px-1 py-0.5 rounded inline-block"
-                                      style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.3)", backgroundColor: "rgba(192,132,252,0.08)", textDecoration: "none" }}>
-                                      🖥️ Screen
-                                    </a>
-                                    <span className="hidden peer-hover:block fixed z-[9999] rounded-lg shadow-2xl pointer-events-none"
-                                      style={{ border: "2px solid rgba(192,132,252,0.5)", backgroundColor: "#0a0e14", padding: "4px", width: "400px", maxWidth: "90vw", left: "50%", top: "50%", transform: "translate(-50%, -50%)" }}>
-                                      <img src={enr.data.urlscan.screenshot} alt="Page screenshot" loading="lazy"
-                                        style={{ width: "100%", borderRadius: "6px", display: "block" }}
-                                        onError={(e) => { e.target.parentElement.style.display = "none"; }} />
-                                      <p className="text-[9px] text-center mt-1" style={{ color: "#5d7382" }}>{arr[i]}</p>
+                        {enr?.data && (() => {
+                          const d = enr.data;
+                          const isHash = ["MD5","SHA1","SHA256","SHA512"].includes(cat);
+                          const isIP = ["IPV4","IPV6"].includes(cat);
+                          const isDomUrl = ["DOMAIN","URL"].includes(cat);
+                          const isIpAsDomain = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(arr[i]);
+                          const hasVerdict = d._verdict && d._verdict !== "Unknown";
+                          const hasThreatfox = !!d.threatfox;
+                          const hasMalBaz = !!d.malwarebazaar;
+                          const hasUrlhaus = !!d.urlhaus;
+                          const hasOtx = !!d.otx;
+                          const hasAbuse = !!d.abuseipdb;
+                          const hasValidin = !!d.validin;
+                          const hasGeo = !!d.whoisASN;
+                          const hasUrlscan = !!d.urlscan;
+                          const hasTimeline = !!d._timeline;
+                          const hasDomainReg = isDomUrl && !isIpAsDomain && !!d.domainReg;
+                          const hasWhois = !!d.whois;
+                          const hasPivotIP = hasUrlscan && d.urlscan.servingIP && d.urlscan.servingIP !== arr[i];
+                          const secDivider = (label) => (
+                            <div className="flex items-center gap-2 mt-1.5 mb-1" style={{ opacity: 0.5 }}>
+                              <span className="text-[9px] uppercase tracking-widest font-bold" style={{ color: "#5d738288" }}>{label}</span>
+                              <div className="flex-1" style={{ height: "1px", background: "rgba(120,160,180,0.12)" }}></div>
+                            </div>
+                          );
+                          return (
+                          <div className="ml-4 mb-1.5 text-[10px]">
+                            {/* ── VERDICT & IDENTITY ── */}
+                            {(hasVerdict || hasThreatfox || hasMalBaz || hasUrlhaus) && (
+                              <div>
+                                {secDivider("Verdict & Identity")}
+                                <div className="flex flex-wrap gap-1">
+                                  {hasVerdict && (
+                                    <span className="rounded-full px-2 py-0.5 font-bold" style={{
+                                      color: d._verdict === "Malicious" ? "#ff4d6d" : d._verdict === "Suspicious" ? "#fbbf24" : d._verdict === "Whitelisted" ? "#00ff9c" : "#8aa0ad",
+                                      backgroundColor: d._verdict === "Malicious" ? "rgba(255,77,109,0.15)" : d._verdict === "Suspicious" ? "rgba(251,191,36,0.15)" : d._verdict === "Whitelisted" ? "rgba(0,255,156,0.15)" : "rgba(138,160,173,0.15)",
+                                      border: `1px solid ${d._verdict === "Malicious" ? "rgba(255,77,109,0.4)" : d._verdict === "Suspicious" ? "rgba(251,191,36,0.4)" : d._verdict === "Whitelisted" ? "rgba(0,255,156,0.4)" : "rgba(138,160,173,0.3)"}`,
+                                    }}>
+                                      {d._verdict === "Malicious" ? "🔴" : d._verdict === "Suspicious" ? "🟡" : d._verdict === "Whitelisted" ? "🟢" : "⚪"} {d._verdict}
                                     </span>
-                                  </span>
-                                )}
-                              </span>
+                                  )}
+                                  {hasThreatfox && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.12)", border: "1px solid rgba(255,77,109,0.3)" }}>
+                                      ThreatFox · {d.threatfox.malware} · {d.threatfox.threat}{d.threatfox.confidence ? ` · ${d.threatfox.confidence}%` : ""}{d.threatfox.tags ? ` · ${d.threatfox.tags}` : ""}
+                                    </span>
+                                  )}
+                                  {hasUrlhaus && (
+                                    <span className="rounded-full px-2 py-0.5" style={{
+                                      color: d.urlhaus.status === "online" ? "#ff4d6d" : "#fbbf24",
+                                      backgroundColor: d.urlhaus.status === "online" ? "rgba(255,77,109,0.12)" : "rgba(251,191,36,0.12)",
+                                      border: `1px solid ${d.urlhaus.status === "online" ? "rgba(255,77,109,0.3)" : "rgba(251,191,36,0.3)"}`,
+                                    }}>
+                                      URLhaus · {d.urlhaus.status === "online" ? "🔴 Online" : "⚫ Offline"}{d.urlhaus.urls_total ? ` · ${d.urlhaus.urls_total} URLs` : ""}{d.urlhaus.tags ? ` · ${d.urlhaus.tags}` : ""}
+                                    </span>
+                                  )}
+                                  {hasMalBaz && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#00e5ff", backgroundColor: "rgba(0,229,255,0.12)", border: "1px solid rgba(0,229,255,0.3)" }}>
+                                      MalBazaar · {d.malwarebazaar.family} · {d.malwarebazaar.type}{d.malwarebazaar.size ? ` · ${d.malwarebazaar.size}` : ""}{d.malwarebazaar.delivery ? ` · via ${d.malwarebazaar.delivery}` : ""}{d.malwarebazaar.tags ? ` · ${d.malwarebazaar.tags}` : ""}
+                                    </span>
+                                  )}
+                                  {(d.malwarebazaar?.detections || d.malwarebazaar?.fileName) && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.3)" }}>
+                                      🔴 {d.malwarebazaar.fileName ? d.malwarebazaar.fileName + (d.malwarebazaar.detections ? " | " : "") : ""}{d.malwarebazaar.detections || ""}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
                             )}
-                            {enr.data.urlscan?.servingIP && enr.data.urlscan.servingIP !== arr[i] && !dismissedPivots.has(`ip::${enr.data.urlscan.servingIP}::${arr[i]}`) && (
-                              <span className="rounded-full px-2 py-0.5 flex items-center gap-1.5 flex-wrap" style={{ color: "#22d3ee", backgroundColor: "rgba(34,211,238,0.08)", border: "1px solid rgba(34,211,238,0.25)" }}>
-                                <span>Serving IP: {enr.data.urlscan.servingIP}{enr.data.urlscan.servingASN ? ` · ${enr.data.urlscan.servingASN}` : ""}{enr.data.urlscan.servingASNName ? ` · ${enr.data.urlscan.servingASNName}` : ""}</span>
-                                {isPivotAdded("IPV4", enr.data.urlscan.servingIP) ? (
-                                  <>
-                                    <span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>Added to IPV4</span>
-                                    <button onClick={() => removePivotIOC("IPV4", enr.data.urlscan.servingIP)}
-                                      className="rounded px-1.5 py-0.5 font-bold"
-                                      style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>
-                                      Remove</button>
-                                  </>
-                                ) : (
-                                  <button onClick={() => addPivotIOC("IPV4", enr.data.urlscan.servingIP, `Serving IP of ${arr[i]}`)}
-                                    className="rounded px-1.5 py-0.5 font-bold"
-                                    style={{ color: "#04111a", backgroundColor: "#22d3ee", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
-                                    + Add as IOC</button>
-                                )}
-                                <button onClick={() => dismissPivot(`ip::${enr.data.urlscan.servingIP}::${arr[i]}`)}
-                                  className="rounded p-0.5" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}>
-                                  <X size={10} /></button>
-                              </span>
+
+                            {/* ── REPUTATION ── */}
+                            {(hasOtx || hasAbuse || hasValidin) && (
+                              <div>
+                                {secDivider("Reputation")}
+                                <div className="flex flex-wrap gap-1">
+                                  {hasOtx && d._verdict !== "Unknown" && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#2dd4bf", backgroundColor: "rgba(45,212,191,0.12)", border: "1px solid rgba(45,212,191,0.3)" }}>
+                                      OTX · {d.otx.pulses} pulses{d.otx.validation ? ` · ${d.otx.validation}` : ""}{d.otx.tags ? ` · ${d.otx.tags}` : ""}{d.otx.parentDomain ? ` (via ${d.otx.parentDomain})` : ""}
+                                    </span>
+                                  )}
+                                  {hasAbuse && (
+                                    <span className="rounded-full px-2 py-0.5" style={{
+                                      color: (d.abuseipdb.score || 0) >= 80 ? "#ff4d6d" : (d.abuseipdb.score || 0) >= 25 ? "#fbbf24" : "#2dd4bf",
+                                      backgroundColor: (d.abuseipdb.score || 0) >= 80 ? "rgba(255,77,109,0.12)" : (d.abuseipdb.score || 0) >= 25 ? "rgba(251,191,36,0.12)" : "rgba(45,212,191,0.08)",
+                                      border: `1px solid ${(d.abuseipdb.score || 0) >= 80 ? "rgba(255,77,109,0.3)" : (d.abuseipdb.score || 0) >= 25 ? "rgba(251,191,36,0.3)" : "rgba(45,212,191,0.25)"}`,
+                                    }}>
+                                      AbuseIPDB · {d.abuseipdb.score}% Confidence · {d.abuseipdb.reports} Report{d.abuseipdb.reports !== 1 ? "s" : ""}{d.abuseipdb.categories ? ` · ${d.abuseipdb.categories}` : ""}{d.abuseipdb.isp ? ` · ${d.abuseipdb.isp}` : ""}{d.abuseipdb.usageType ? ` · ${d.abuseipdb.usageType}` : ""}{d.abuseipdb.lastReported ? ` · Last: ${d.abuseipdb.lastReported}` : ""}
+                                    </span>
+                                  )}
+                                  {hasValidin && (
+                                    <span className="rounded-full px-2 py-0.5" style={{
+                                      color: d.validin.verdict === "malicious" ? "#ff4d6d" : d.validin.verdict === "suspicious" ? "#fbbf24" : "#e879f9",
+                                      backgroundColor: d.validin.verdict === "malicious" ? "rgba(255,77,109,0.12)" : d.validin.verdict === "suspicious" ? "rgba(251,191,36,0.12)" : "rgba(232,121,249,0.12)",
+                                      border: `1px solid ${d.validin.verdict === "malicious" ? "rgba(255,77,109,0.3)" : d.validin.verdict === "suspicious" ? "rgba(251,191,36,0.3)" : "rgba(232,121,249,0.3)"}`,
+                                    }}>
+                                      Validin{d.validin.verdict ? ` · ${d.validin.verdict}` : ""}{d.validin.score !== null ? ` (${d.validin.score}/10)` : ""}{d.validin.maliciousCount > 0 ? ` · Malicious x ${d.validin.maliciousCount}` : ""}{d.validin.titles?.length ? ` · ${d.validin.titles.join(" · ")}` : ""}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
                             )}
-                            {enr.data.urlscan?.scannedUrls?.length > 0 && (() => {
+
+                            {/* ── INFRASTRUCTURE (skip for hashes) ── */}
+                            {!isHash && (hasGeo || hasUrlscan || hasWhois) && (
+                              <div>
+                                {secDivider("Infrastructure")}
+                                <div className="flex flex-wrap gap-1">
+                                  {hasGeo && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#a78bfa", backgroundColor: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)" }}>
+                                      GEO/ASN{d.whoisASN.country ? <>{" · "}<span style={{ color: "#eafcff", fontWeight: 700 }}>{d.whoisASN.flag ? d.whoisASN.flag + " " : ""}{d.whoisASN.country}</span></> : ""}{d.whoisASN.city ? ` (${d.whoisASN.city}${d.whoisASN.region ? `, ${d.whoisASN.region}` : ""})` : ""}{d.whoisASN.asn ? ` · ${d.whoisASN.asn}` : ""}{d.whoisASN.asnOrg ? ` · ${d.whoisASN.asnOrg}` : ""}{d.whoisASN.privacy ? <>{" · "}<span style={{ color: "#fbbf24", fontWeight: 700 }}>{d.whoisASN.privacy}</span></> : ""}
+                                    </span>
+                                  )}
+                                  {hasUrlscan && (
+                                    <span className="rounded-full px-2 py-0.5" style={{
+                                      color: d.urlscan.malicious > 0 ? "#ff4d6d" : "#38bdf8",
+                                      backgroundColor: d.urlscan.malicious > 0 ? "rgba(255,77,109,0.12)" : "rgba(56,189,248,0.10)",
+                                      border: `1px solid ${d.urlscan.malicious > 0 ? "rgba(255,77,109,0.3)" : "rgba(56,189,248,0.3)"}`,
+                                    }}>
+                                      Urlscan.io · {d.urlscan.scans} Scan{d.urlscan.scans !== 1 ? "s" : ""}{d.urlscan.malicious > 0 ? ` · 🔴 ${d.urlscan.malicious} Malicious` : ""}{d.urlscan.title ? ` · "${d.urlscan.title}"` : ""}{d.urlscan.server ? ` · ${d.urlscan.server}` : ""}{d.urlscan.country && d.urlscan.flag ? ` · ${d.urlscan.flag}` : ""}
+                                      {d.urlscan.link && <>{" · "}<a href={d.urlscan.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a></>}
+                                      {" · "}<a href={`https://urlscan.io/scan/?url=${encodeURIComponent(arr[i].includes("://") ? arr[i] : "https://" + arr[i])}`} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "#fbbf24" }}>Scan</a>
+                                      {d.urlscan.screenshot && (
+                                        <span className="relative inline-block ml-1" style={{ cursor: "pointer" }}>
+                                          <a href={d.urlscan.screenshot} target="_blank" rel="noreferrer noopener"
+                                            className="peer text-[10px] px-1 py-0.5 rounded inline-block"
+                                            style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.3)", backgroundColor: "rgba(192,132,252,0.08)", textDecoration: "none" }}>
+                                            🖥️ Screen
+                                          </a>
+                                          <span className="hidden peer-hover:block fixed z-[9999] rounded-lg shadow-2xl pointer-events-none"
+                                            style={{ border: "2px solid rgba(192,132,252,0.5)", backgroundColor: "#0a0e14", padding: "4px", width: "400px", maxWidth: "90vw", left: "50%", top: "50%", transform: "translate(-50%, -50%)" }}>
+                                            <img src={d.urlscan.screenshot} alt="Screenshot" loading="lazy"
+                                              style={{ width: "100%", borderRadius: "6px", display: "block" }}
+                                              onError={(e) => { e.target.parentElement.style.display = "none"; }} />
+                                            <p className="text-[9px] text-center mt-1" style={{ color: "#5d7382" }}>{arr[i]}</p>
+                                          </span>
+                                        </span>
+                                      )}
+                                    </span>
+                                  )}
+                                  {hasWhois && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#a78bfa", backgroundColor: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)" }}>
+                                      WHOIS{d.whois.org ? ` · ${d.whois.org}` : ""}{d.whois.country ? ` · ${d.whois.country}` : ""}{d.whois.ageDays !== null ? ` · ${d.whois.ageDays}d old` : ""}
+                                    </span>
+                                  )}
+                                </div>
+                                {/* Serving IP */}
+                                {hasPivotIP && !dismissedPivots.has(`ip::${d.urlscan.servingIP}::${arr[i]}`) && (
+                                  <div className="flex flex-wrap gap-1 mt-1">
+                                    <span className="rounded-full px-2 py-0.5 flex items-center gap-1.5 flex-wrap" style={{ color: "#22d3ee", backgroundColor: "rgba(34,211,238,0.08)", border: "1px solid rgba(34,211,238,0.25)" }}>
+                                      <span>Serving IP: {d.urlscan.servingIP}{d.urlscan.servingASN ? ` · ${d.urlscan.servingASN}` : ""}{d.urlscan.servingASNName ? ` · ${d.urlscan.servingASNName}` : ""}</span>
+                                      {isPivotAdded("IPV4", d.urlscan.servingIP) ? (
+                                        <>
+                                          <span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>Added to IPV4</span>
+                                          <button onClick={() => removePivotIOC("IPV4", d.urlscan.servingIP)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove</button>
+                                        </>
+                                      ) : (
+                                        <button onClick={() => addPivotIOC("IPV4", d.urlscan.servingIP, `Serving IP of ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#22d3ee", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>+ Add as IOC</button>
+                                      )}
+                                      <button onClick={() => dismissPivot(`ip::${d.urlscan.servingIP}::${arr[i]}`)} className="rounded p-0.5" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {/* ── TIMELINE ── */}
+                            {(hasTimeline || (hasDomainReg && d.domainReg.state !== "deleted")) && (
+                              <div>
+                                {secDivider("Timeline")}
+                                <div className="flex flex-wrap gap-1">
+                                  {hasTimeline && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.25)" }}>
+                                      🕐{d._timeline.firstFmt ? ` First Seen: ${d._timeline.firstFmt}` : ""}{d._timeline.lastFmt ? ` · Last Seen: ${d._timeline.lastFmt}` : ""}
+                                    </span>
+                                  )}
+                                  {hasDomainReg && d.domainReg.state !== "deleted" && (() => {
+                                    const dr = d.domainReg;
+                                    const sd = d.urlscan;
+                                    const isUnregistered = dr?.state === "unregistered";
+                                    const iocParts = arr[i].replace(/^https?:\/\//i, "").split("/")[0].split(".");
+                                    const isActualSubdomain = iocParts.length > 2;
+                                    const isNewDomain = dr?.state === "active" && dr?.ageDays != null && dr.ageDays < 30;
+                                    const isNewSubdomain = isActualSubdomain && sd?.subdomainAgeDays != null && sd.subdomainAgeDays < 30 && dr?.ageDays > 120;
+                                    const showSubdomainLine = sd?.subdomainAgeDays != null && isActualSubdomain;
+                                    const isAlert = isNewDomain || isNewSubdomain;
+                                    return (
+                                      <span className="rounded-full px-2 py-0.5" style={{
+                                        color: isAlert ? "#ff4d6d" : isUnregistered ? "#8aa0ad" : "#94a3b8",
+                                        backgroundColor: isAlert ? "rgba(255,77,109,0.10)" : "rgba(148,163,184,0.08)",
+                                        border: `1px solid ${isAlert ? "rgba(255,77,109,0.3)" : "rgba(148,163,184,0.25)"}`,
+                                      }}>
+                                        📋{dr?.state === "active" && dr.ageDays != null ? ` Domain: ${smartAge(dr.ageDays)} old (Reg. ${fmtDate(dr.date)})` : ""}{isUnregistered ? " ⚪ Domain Not Registered" : ""}{showSubdomainLine ? ` · Subdomain: ${smartAge(sd.subdomainAgeDays)} old (Active Since ${fmtDate(sd.subdomainCreated)})` : ""}{dr?.status ? ` · Status: ${dr.status}` : ""}
+                                        {isNewDomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Domain</span>}
+                                        {isNewSubdomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Subdomain</span>}
+                                      </span>
+                                    );
+                                  })()}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* ── PIVOTS (skip for hashes) ── */}
+                            {!isHash && hasUrlscan && (() => {
                               const existingUrls = new Set((displayData?.URL || []).map((u) => u.toLowerCase().replace(/\/+$/, "")));
-                              const fileUrls = new Set((enr.data.urlscan.files || []).map((f) => f.url?.toLowerCase().replace(/\/+$/, "")).filter(Boolean));
+                              const fileUrls = new Set((d.urlscan.files || []).map((f) => f.url?.toLowerCase().replace(/\/+$/, "")).filter(Boolean));
                               const iocNorm = arr[i].toLowerCase().replace(/\/+$/, "").replace(/^https?:\/\//i, "");
                               const seenNorm = new Set();
-                              const newUrls = enr.data.urlscan.scannedUrls.filter((u) => {
+                              const newUrls = (d.urlscan.scannedUrls || []).filter((u) => {
                                 const stripped = u.replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
                                 if (seenNorm.has(stripped)) return false;
                                 seenNorm.add(stripped);
                                 if (stripped === iocNorm || stripped === iocNorm + "/") return false;
-                                // Also skip "www." variant of the IOC
                                 const iocNoWww = iocNorm.replace(/^www\./i, "");
                                 const strippedNoWww = stripped.replace(/^www\./i, "");
                                 if (strippedNoWww === iocNoWww || strippedNoWww === iocNoWww + "/") return false;
@@ -3234,112 +3312,67 @@ export default function App() {
                                 if (dismissedPivots.has(`url::${stripped}::${arr[i]}`)) return false;
                                 return true;
                               });
-                              if (!newUrls.length) return null;
+                              const hasFiles = d.urlscan.files && d.urlscan.files.filter((f) => !dismissedPivots.has(`file::${f.sha256 || f.filename}::${arr[i]}`)).length > 0;
+                              if (!newUrls.length && !hasFiles) return null;
                               return (
-                                <div className="flex flex-col gap-0.5 w-full">
-                                  {newUrls.map((u, ui) => {
-                                    const uNorm = u.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
-                                    const added = isPivotAdded("URL", uNorm);
-                                    return (
-                                    <span key={ui} className="rounded-full px-2 py-0.5 flex items-center gap-1.5 text-[10px]" style={{ color: "#7c9cff", backgroundColor: "rgba(124,156,255,0.06)", border: "1px solid rgba(124,156,255,0.2)" }}>
-                                      <span className="break-all flex-1">{u}</span>
-                                      {added ? (
-                                        <>
-                                          <span className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>Added to URL</span>
-                                          <button onClick={() => removePivotIOC("URL", uNorm)}
-                                            className="rounded px-1.5 py-0.5 font-bold shrink-0"
-                                            style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>
-                                            Remove</button>
-                                        </>
-                                      ) : (
-                                        <button onClick={() => addPivotIOC("URL", uNorm, `Urlscan scan of ${arr[i]}`)}
-                                          className="rounded px-1.5 py-0.5 font-bold shrink-0"
-                                          style={{ color: "#04111a", backgroundColor: "#7c9cff", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
-                                          + Add as IOC</button>
-                                      )}
-                                      <button onClick={() => dismissPivot(`url::${uNorm}::${arr[i]}`)}
-                                        className="rounded p-0.5 shrink-0" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}>
-                                        <X size={10} /></button>
-                                    </span>
-                                    );
-                                  })}
+                                <div>
+                                  {secDivider("Pivots")}
+                                  <div className="flex flex-col gap-0.5">
+                                    {newUrls.map((u, ui) => {
+                                      const uNorm = u.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+                                      const added = isPivotAdded("URL", uNorm);
+                                      return (
+                                        <span key={`u${ui}`} className="rounded-full px-2 py-0.5 flex items-center gap-1.5" style={{ color: "#7c9cff", backgroundColor: "rgba(124,156,255,0.06)", border: "1px solid rgba(124,156,255,0.2)" }}>
+                                          <span className="break-all flex-1">{u}</span>
+                                          {added ? (
+                                            <>
+                                              <span className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>Added to URL</span>
+                                              <button onClick={() => removePivotIOC("URL", uNorm)} className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove</button>
+                                            </>
+                                          ) : (
+                                            <button onClick={() => addPivotIOC("URL", uNorm, `Urlscan scan of ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#04111a", backgroundColor: "#7c9cff", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>+ Add as IOC</button>
+                                          )}
+                                          <button onClick={() => dismissPivot(`url::${uNorm}::${arr[i]}`)} className="rounded p-0.5 shrink-0" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
+                                        </span>
+                                      );
+                                    })}
+                                    {(d.urlscan.files || []).filter((f) => !dismissedPivots.has(`file::${f.sha256 || f.filename}::${arr[i]}`)).map((f, fi) => {
+                                      const hashAdded = f.sha256 && isPivotAdded("SHA256", f.sha256);
+                                      const fileAdded = f.filename && isPivotAdded("FILE_NAME", f.filename);
+                                      const urlAdded = f.url && isPivotAdded("URL", f.url.replace(/^https?:\/\//i, "").replace(/\/+$/, ""));
+                                      return (
+                                        <span key={`f${fi}`} className="rounded-full px-2 py-0.5 flex items-center gap-1.5 flex-wrap" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
+                                          <span className="break-all flex-1">
+                                            {f.filename ? <span style={{ color: "#fbbf24" }}>{f.filename}</span> : null}
+                                            {f.url ? <>{f.filename ? " · " : ""}<span style={{ color: "#7c9cff" }}>{f.url}</span></> : null}
+                                            {f.sha256 ? <>{(f.filename || f.url) ? " · " : ""}<span style={{ color: "#ff4d6d" }}>{f.sha256.slice(0, 16)}…</span></> : null}
+                                            {f.size ? ` · ${Math.round(f.size / 1024)}KB` : ""}
+                                          </span>
+                                          <span className="flex gap-1 shrink-0 flex-wrap">
+                                            {f.sha256 && (hashAdded
+                                              ? <button onClick={() => removePivotIOC("SHA256", f.sha256)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove Hash</button>
+                                              : <button onClick={() => addPivotIOC("SHA256", f.sha256, `${f.filename || "File"} on ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#ff4d6d", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>+ Hash</button>
+                                            )}
+                                            {f.filename && (fileAdded
+                                              ? <button onClick={() => removePivotIOC("FILE_NAME", f.filename)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove File</button>
+                                              : <button onClick={() => addPivotIOC("FILE_NAME", f.filename, `File on ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#fbbf24", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>+ File</button>
+                                            )}
+                                            {f.url && (urlAdded
+                                              ? <button onClick={() => removePivotIOC("URL", f.url.replace(/^https?:\/\//i, "").replace(/\/+$/, ""))} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove URL</button>
+                                              : <button onClick={() => addPivotIOC("URL", f.url.replace(/^https?:\/\//i, "").replace(/\/+$/, ""), `File URL on ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#7c9cff", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>+ URL</button>
+                                            )}
+                                          </span>
+                                          <button onClick={() => dismissPivot(`file::${f.sha256 || f.filename}::${arr[i]}`)} className="rounded p-0.5 shrink-0" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
+                                        </span>
+                                      );
+                                    })}
+                                  </div>
                                 </div>
                               );
                             })()}
-                            {enr.data.urlscan?.files?.length > 0 && (
-                              <div className="flex flex-col gap-0.5 w-full">
-                                {enr.data.urlscan.files.filter((f) => !dismissedPivots.has(`file::${f.sha256 || f.filename}::${arr[i]}`)).map((f, fi) => {
-                                  const hashAdded = f.sha256 && isPivotAdded("SHA256", f.sha256);
-                                  const fileAdded = f.filename && isPivotAdded("FILE_NAME", f.filename);
-                                  const urlAdded = f.url && isPivotAdded("URL", f.url.replace(/^https?:\/\//i, "").replace(/\/+$/, ""));
-                                  return (
-                                  <span key={fi} className="rounded-full px-2 py-0.5 flex items-center gap-1.5 flex-wrap text-[10px]" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
-                                    <span className="break-all flex-1">
-                                      {f.filename ? <span style={{ color: "#fbbf24" }}>{f.filename}</span> : null}
-                                      {f.url ? <>{f.filename ? " · " : ""}<span style={{ color: "#7c9cff" }}>{f.url}</span></> : null}
-                                      {f.sha256 ? <>{(f.filename || f.url) ? " · " : ""}<span style={{ color: "#ff4d6d" }}>{f.sha256.slice(0, 16)}…</span></> : null}
-                                      {f.size ? ` · ${Math.round(f.size / 1024)}KB` : ""}
-                                    </span>
-                                    <span className="flex gap-1 shrink-0 flex-wrap">
-                                      {f.sha256 && (hashAdded
-                                        ? <button onClick={() => removePivotIOC("SHA256", f.sha256)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove Hash</button>
-                                        : <button onClick={() => addPivotIOC("SHA256", f.sha256, `${f.filename || "File"} on ${arr[i]}`)}
-                                          className="rounded px-1.5 py-0.5 font-bold"
-                                          style={{ color: "#04111a", backgroundColor: "#ff4d6d", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
-                                          + Hash</button>
-                                      )}
-                                      {f.filename && (fileAdded
-                                        ? <button onClick={() => removePivotIOC("FILE_NAME", f.filename)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove File</button>
-                                        : <button onClick={() => addPivotIOC("FILE_NAME", f.filename, `File on ${arr[i]}`)}
-                                          className="rounded px-1.5 py-0.5 font-bold"
-                                          style={{ color: "#04111a", backgroundColor: "#fbbf24", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
-                                          + File</button>
-                                      )}
-                                      {f.url && (urlAdded
-                                        ? <button onClick={() => removePivotIOC("URL", f.url.replace(/^https?:\/\//i, "").replace(/\/+$/, ""))} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove URL</button>
-                                        : <button onClick={() => addPivotIOC("URL", f.url.replace(/^https?:\/\//i, "").replace(/\/+$/, ""), `File URL on ${arr[i]}`)}
-                                          className="rounded px-1.5 py-0.5 font-bold"
-                                          style={{ color: "#04111a", backgroundColor: "#7c9cff", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>
-                                          + URL</button>
-                                      )}
-                                    </span>
-                                    <button onClick={() => dismissPivot(`file::${f.sha256 || f.filename}::${arr[i]}`)}
-                                      className="rounded p-0.5 shrink-0" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}>
-                                      <X size={10} /></button>
-                                  </span>
-                                  );
-                                })}
-                              </div>
-                            )}
-                            {["DOMAIN","URL"].includes(cat) && !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(arr[i]) && (enr.data.domainReg || enr.data.urlscan?.subdomainAgeDays != null) && (() => {
-                              const dr = enr.data.domainReg;
-                              const sd = enr.data.urlscan;
-                              const isDeleted = dr?.state === "deleted";
-                              const isUnregistered = dr?.state === "unregistered";
-                              // Domain Deleted badge is already shown next to IOC name — don't repeat here
-                              if (isDeleted) return null;
-                              const iocParts = arr[i].replace(/^https?:\/\//i, "").split("/")[0].split(".");
-                              const isActualSubdomain = iocParts.length > 2;
-                              const isNewDomain = dr?.state === "active" && dr?.ageDays != null && dr.ageDays < 30;
-                              const isNewSubdomain = isActualSubdomain && !isDeleted && sd?.subdomainAgeDays != null && sd.subdomainAgeDays < 30 && dr?.ageDays > 120;
-                              const isAlert = isNewDomain || isNewSubdomain || isDeleted;
-                              const showSubdomain = !isDeleted && sd?.subdomainAgeDays != null;
-                              const showSubdomainLine = showSubdomain && isActualSubdomain;
-                              // Only show subdomain age when IOC is actually a subdomain (3+ domain parts)
-                              return (
-                              <span className="rounded-full px-2 py-0.5" style={{
-                                color: isAlert ? "#ff4d6d" : isUnregistered ? "#8aa0ad" : "#94a3b8",
-                                backgroundColor: isAlert ? "rgba(255,77,109,0.10)" : "rgba(148,163,184,0.08)",
-                                border: `1px solid ${isAlert ? "rgba(255,77,109,0.3)" : "rgba(148,163,184,0.25)"}`,
-                              }}>
-                                📋{dr?.state === "active" && dr.ageDays != null ? ` Domain: ${smartAge(dr.ageDays)} old (Reg. ${fmtDate(dr.date)})` : ""}{isDeleted ? <span style={{ color: "#ff4d6d", fontWeight: 700 }}> 🔴 Domain Deleted / Taken Down</span> : ""}{isUnregistered ? " ⚪ Domain Not Registered" : ""}{showSubdomainLine ? `${dr?.state === "active" ? " · " : " "}Subdomain: ${smartAge(sd.subdomainAgeDays)} old (Active Since ${fmtDate(sd.subdomainCreated)})` : ""}{dr?.status ? ` · Status: ${dr.status}` : ""}
-                                {isNewDomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Domain</span>}
-                                {isNewSubdomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Subdomain</span>}
-                              </span>
-                              );
-                            })()}
                           </div>
-                        )}
+                          );
+                        })()}
                         {enr && !enr.loading && !enr.data && enr.error && (
                           <p className="ml-4 mb-1 text-[10px] font-bold" style={{ color: "#5d7382" }}>⚪ Unknown to our integrated Enrichment Engines. Please check on VirusTotal.</p>
                         )}
