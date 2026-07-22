@@ -1905,7 +1905,19 @@ export default function App() {
               servingASN: latest.page?.asn || null,
               servingASNName: latest.page?.asnname || null,
               // Scanned URLs from all results (for showing as additional info)
-              scannedUrls: [...new Set(uj.results.map((r) => r.page?.url || r.task?.url).filter(Boolean))].slice(0, 10),
+              scannedUrls: (() => {
+                const seen = new Set();
+                const out = [];
+                uj.results.forEach((r) => {
+                  const u = r.page?.url || r.task?.url;
+                  if (!u) return;
+                  const k = u.toLowerCase().replace(/\/+$/, "");
+                  if (seen.has(k)) return;
+                  seen.add(k);
+                  out.push({ url: u, screenshot: r.screenshot || null });
+                });
+                return out.slice(0, 10);
+              })(),
               // Files observed in scans (filename, hash, URL)
               files: (() => {
                 const seen = new Set();
@@ -3120,6 +3132,21 @@ export default function App() {
                                 🔴 Domain Deleted / Taken Down
                               </span>
                             )}
+                            {enr?.data?.domainReg?.state === "active" && enr.data.domainReg.ageDays != null && enr.data.domainReg.ageDays < 30 && (
+                              <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle font-bold"
+                                style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.15)", border: "1px solid rgba(255,77,109,0.3)" }}>
+                                🔴 Newly Created Domain
+                              </span>
+                            )}
+                            {(condensed || cardCondensed[cat]) && enr?.data?._verdict && (
+                              <span className="ml-1.5 text-[9px] rounded px-1.5 py-0.5 align-middle font-bold" style={{
+                                color: enr.data._verdict === "Malicious" ? "#ff4d6d" : enr.data._verdict === "Suspicious" ? "#fbbf24" : enr.data._verdict === "Whitelisted" ? "#00ff9c" : "#8aa0ad",
+                                backgroundColor: enr.data._verdict === "Malicious" ? "rgba(255,77,109,0.15)" : enr.data._verdict === "Suspicious" ? "rgba(251,191,36,0.15)" : enr.data._verdict === "Whitelisted" ? "rgba(0,255,156,0.15)" : "rgba(138,160,173,0.15)",
+                                border: `1px solid ${enr.data._verdict === "Malicious" ? "rgba(255,77,109,0.4)" : enr.data._verdict === "Suspicious" ? "rgba(251,191,36,0.4)" : enr.data._verdict === "Whitelisted" ? "rgba(0,255,156,0.4)" : "rgba(138,160,173,0.3)"}`,
+                              }}>
+                                {enr.data._verdict === "Malicious" ? "🔴" : enr.data._verdict === "Suspicious" ? "🟡" : enr.data._verdict === "Whitelisted" ? "🟢" : "⚪"} {enr.data._verdict}
+                              </span>
+                            )}
                             {enr?.data?.domainReg?.state === "active" && enr?.data?.domainReg?.status && /client.?hold|server.?hold/i.test(enr.data.domainReg.status) && (
                               <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle font-bold"
                                 style={{ color: "#f59e0b", backgroundColor: "rgba(245,158,11,0.15)", border: "1px solid rgba(245,158,11,0.3)" }}>
@@ -3199,7 +3226,7 @@ export default function App() {
                           return (
                           <div className="ml-4 mb-1.5 text-[10px]">
                             {/* ── VERDICT & IDENTITY ── */}
-                            {(hasVerdict || hasThreatfox || hasMalBaz || hasUrlhaus) && secRow("Verdict & Identity", (
+                            {!isCondensed && (hasVerdict || hasThreatfox || hasMalBaz || hasUrlhaus) && secRow("Verdict & Identity", (
                               <>
                                   {hasVerdict && (
                                     <span className="rounded-full px-2 py-0.5 font-bold" style={{
@@ -3353,7 +3380,6 @@ export default function App() {
                                         border: `1px solid ${isAlert ? "rgba(255,77,109,0.3)" : "rgba(148,163,184,0.25)"}`,
                                       }}>
                                         📋{dr?.state === "active" && dr.ageDays != null ? ` Domain: ${smartAge(dr.ageDays)} old (Reg. ${fmtDate(dr.date)})` : ""}{isUnregistered ? " ⚪ Domain Not Registered" : ""}{showSubdomainLine ? ` · Subdomain: ${smartAge(sd.subdomainAgeDays)} old (Active Since ${fmtDate(sd.subdomainCreated)})` : ""}{dr?.status ? ` · Status: ${dr.status}` : ""}
-                                        {isNewDomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Domain</span>}
                                         {isNewSubdomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Subdomain</span>}
                                       </span>
                                     );
@@ -3367,7 +3393,9 @@ export default function App() {
                               const fileUrls = new Set((d.urlscan.files || []).map((f) => f.url?.toLowerCase().replace(/\/+$/, "")).filter(Boolean));
                               const iocNorm = arr[i].toLowerCase().replace(/\/+$/, "").replace(/^https?:\/\//i, "");
                               const seenNorm = new Set();
-                              const newUrls = (d.urlscan.scannedUrls || []).filter((u) => {
+                              const existingDomains = new Set((displayData?.DOMAIN || []).map((x) => x.toLowerCase()));
+                              const newUrls = (d.urlscan.scannedUrls || []).filter((su) => {
+                                const u = typeof su === "string" ? su : su.url;
                                 const stripped = u.replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
                                 if (seenNorm.has(stripped)) return false;
                                 seenNorm.add(stripped);
@@ -3375,8 +3403,10 @@ export default function App() {
                                 const iocNoWww = iocNorm.replace(/^www\./i, "");
                                 const strippedNoWww = stripped.replace(/^www\./i, "");
                                 if (strippedNoWww === iocNoWww || strippedNoWww === iocNoWww + "/") return false;
-                                const wasPivotAdded = isPivotAdded("URL", stripped);
-                                if (!wasPivotAdded && existingUrls.has(stripped)) return false;
+                                // Domain-only (no path) → check DOMAIN card too
+                                const isDomainOnly = !stripped.includes("/");
+                                const wasPivotAdded = isPivotAdded(isDomainOnly ? "DOMAIN" : "URL", stripped);
+                                if (!wasPivotAdded && (existingUrls.has(stripped) || (isDomainOnly && existingDomains.has(stripped)))) return false;
                                 if (fileUrls.has(u.toLowerCase().replace(/\/+$/, ""))) return false;
                                 if (dismissedPivots.has(`url::${stripped}::${arr[i]}`)) return false;
                                 return true;
@@ -3385,31 +3415,36 @@ export default function App() {
                               if (!newUrls.length && !hasFiles) return null;
                               return secRow("Pivots", (
                                   <div className="flex flex-col gap-0.5 w-full">
-                                    {newUrls.map((u, ui) => {
+                                    {newUrls.map((su, ui) => {
+                                      const u = typeof su === "string" ? su : su.url;
+                                      const shot = typeof su === "string" ? null : su.screenshot;
                                       const uNorm = u.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
-                                      const added = isPivotAdded("URL", uNorm);
+                                      const targetCat = uNorm.includes("/") ? "URL" : "DOMAIN";
+                                      const added = isPivotAdded(targetCat, uNorm);
                                       return (
                                         <span key={`u${ui}`} className="rounded-full px-2 py-0.5 flex items-center gap-1.5" style={{ color: "#7c9cff", backgroundColor: "rgba(124,156,255,0.06)", border: "1px solid rgba(124,156,255,0.2)" }}>
                                           <span className="break-all flex-1">{u}</span>
+                                          {shot && (
                                           <span className="relative inline-block shrink-0">
-                                            <a href={`https://urlscan.io/domain/${encodeURIComponent(uNorm.split("/")[0])}`} target="_blank" rel="noreferrer noopener"
+                                            <a href={shot} target="_blank" rel="noreferrer noopener"
                                               className="peer text-[9px] px-1 py-0.5 rounded inline-block"
                                               style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.3)", backgroundColor: "rgba(192,132,252,0.08)", textDecoration: "none" }}>🖥️</a>
                                             <span className="hidden peer-hover:block fixed z-[9999] rounded-lg shadow-2xl pointer-events-none"
                                               style={{ border: "2px solid rgba(192,132,252,0.5)", backgroundColor: "#0a0e14", padding: "4px", width: "400px", maxWidth: "90vw", left: "50%", top: "50%", transform: "translate(-50%, -50%)" }}>
-                                              <img src={`https://urlscan.io/liveshot/?width=800&height=600&url=${encodeURIComponent(u)}`} alt="Screenshot" loading="lazy"
+                                              <img src={shot} alt="Screenshot" loading="lazy"
                                                 style={{ width: "100%", borderRadius: "6px", display: "block" }}
                                                 onError={(e) => { e.target.parentElement.style.display = "none"; }} />
                                               <p className="text-[9px] text-center mt-1" style={{ color: "#5d7382" }}>{uNorm}</p>
                                             </span>
                                           </span>
+                                          )}
                                           {added ? (
                                             <>
-                                              <span className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>Added to URL</span>
-                                              <button onClick={() => removePivotIOC("URL", uNorm)} className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove</button>
+                                              <span className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>Added to {targetCat}</span>
+                                              <button onClick={() => removePivotIOC(targetCat, uNorm)} className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove</button>
                                             </>
                                           ) : (
-                                            <button onClick={() => addPivotIOC("URL", uNorm, `Urlscan scan of ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#04111a", backgroundColor: "#7c9cff", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>+ Add as IOC</button>
+                                            <button onClick={() => addPivotIOC(targetCat, uNorm, `Urlscan scan of ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#04111a", backgroundColor: "#7c9cff", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>+ Add as IOC</button>
                                           )}
                                           <button onClick={() => dismissPivot(`url::${uNorm}::${arr[i]}`)} className="rounded p-0.5 shrink-0" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
                                         </span>
