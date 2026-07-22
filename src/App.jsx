@@ -10,6 +10,7 @@ import {
 //  Backend proxy
 // ============================================================
 const WORKER_BASE = "https://ioc-parser.aamirmuhd.workers.dev";
+const APP_VERSION = "v69";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -359,7 +360,7 @@ const stripScheme = (s) => refangSoft(String(s)).replace(/^\s*(?:https?|ftp):\/\
 const stripUrlArray = (arr) => {
   const out = [], seen = new Set();
   arr.forEach((u) => {
-    const s = stripScheme(u);
+    const s = stripScheme(u).replace(/\/+$/, ""); // strip trailing slash so domain.xyz/ → domain.xyz
     if (s && !seen.has(s.toLowerCase())) { seen.add(s.toLowerCase()); out.push(s); }
   });
   return out;
@@ -2107,6 +2108,9 @@ export default function App() {
   const [enrichAllDone, setEnrichAllDone] = useState({});           // { cat: true } → greyed out
   const [customAddCat, setCustomAddCat] = useState(null);           // category currently showing add input
   const [customAddValue, setCustomAddValue] = useState("");
+  const [condensed, setCondensed] = useState(false);
+  const [dragging, setDragging] = useState(null);               // { cat, value }
+  const [dragOverCat, setDragOverCat] = useState(null);
   const copyTimer = useRef(null);
 
   // Edit an IOC value inline — replaces the old value in iocData
@@ -2159,6 +2163,23 @@ export default function App() {
 
   const proc = (arr, cat) => ((defangAll || defangMap[cat]) ? arr.map(defang) : arr);
   const toggleDefang = (cat) => setDefangMap((m) => ({ ...m, [cat]: !m[cat] }));
+
+  // Drag-and-drop IOC between categories
+  const handleDragStart = (cat, value) => {
+    setDragging({ cat, value });
+  };
+  const handleDragEnd = () => {
+    setDragging(null);
+    setDragOverCat(null);
+  };
+  const handleDropOnCat = (targetCat) => {
+    if (!dragging || dragging.cat === targetCat) { handleDragEnd(); return; }
+    // Remove from source
+    removeIoc(dragging.cat, dragging.value);
+    // Add to target
+    addPivotIOC(targetCat, dragging.value, `Moved from ${dragging.cat}`);
+    handleDragEnd();
+  };
 
   // Discard a bogus IOC. Copy formats, CSV/XLSX exports and hunt queries all
   // derive from iocData, so removal propagates everywhere automatically.
@@ -2597,7 +2618,7 @@ export default function App() {
               Intel Extractor
             </h1>
             <p className="text-[11px]" style={{ color: "#5d7382", letterSpacing: "2px", marginTop: "2px" }}>
-              EXTRACT · ENRICH · HUNT
+              EXTRACT · ENRICH · HUNT <span style={{ color: "#3a4a54", marginLeft: "8px" }}>{APP_VERSION}</span>
             </p>
           </div>
           <div className="sm:ml-auto flex flex-col sm:items-end gap-1.5">
@@ -2635,6 +2656,16 @@ export default function App() {
           <span className="text-3xl font-medium tabular-nums" style={{ color: "#00e5ff", letterSpacing: "-1px" }}>{entries.length}</span>
           <span className="text-[10px] uppercase" style={{ color: "#5d7382", letterSpacing: "1.5px" }}>types</span>
           <div className="ml-auto flex items-center gap-2">
+            <button onClick={() => setCondensed((v) => !v)}
+              title={condensed ? "Expand all enrichment sections" : "Collapse to verdicts only"}
+              className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold"
+              style={{
+                color: condensed ? "#04111a" : "#c084fc",
+                backgroundColor: condensed ? "#c084fc" : "rgba(192,132,252,0.14)",
+                border: `1px solid rgba(192,132,252,${condensed ? "1" : "0.55"})`,
+              }}>
+              {condensed ? "Expand" : "Compact"}
+            </button>
             <button onClick={() => setDefangAll((v) => !v)}
               title="Defang every IOC type at once"
               className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold"
@@ -2931,6 +2962,39 @@ export default function App() {
         )}
 
 
+        {dragging && (
+          <div className="fixed inset-0 z-[9998] pointer-events-none">
+            <div className="fixed bottom-6 left-1/2 -translate-x-1/2 pointer-events-auto rounded-2xl px-5 py-3"
+              style={{ backgroundColor: "rgba(10,14,20,0.95)", border: "2px solid rgba(0,229,255,0.4)", backdropFilter: "blur(12px)", boxShadow: "0 0 40px rgba(0,229,255,0.15)" }}>
+              <p className="text-[10px] uppercase tracking-widest text-center mb-2" style={{ color: "#5d7382" }}>
+                Drop <span style={{ color: "#00e5ff", fontWeight: 700 }}>{dragging.value.length > 30 ? dragging.value.slice(0, 30) + "…" : dragging.value}</span> into:
+              </p>
+              <div className="flex flex-wrap gap-1.5 justify-center">
+                {ORDER.filter((k) => k !== dragging.cat).slice(0, 16).map((targetCat) => {
+                  const tc = colorFor(targetCat);
+                  const isOver = dragOverCat === targetCat;
+                  return (
+                    <button key={targetCat}
+                      onDragOver={(e) => { e.preventDefault(); setDragOverCat(targetCat); }}
+                      onDragLeave={() => setDragOverCat(null)}
+                      onDrop={(e) => { e.preventDefault(); handleDropOnCat(targetCat); }}
+                      className="rounded-lg px-3 py-1.5 text-xs font-bold transition-all"
+                      style={{
+                        color: isOver ? "#04111a" : tc,
+                        backgroundColor: isOver ? tc : `${tc}18`,
+                        border: `1px solid ${tc}${isOver ? "" : "55"}`,
+                        transform: isOver ? "scale(1.1)" : "scale(1)",
+                        boxShadow: isOver ? `0 0 16px ${tc}55` : "none",
+                      }}>
+                      {targetCat}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 gap-4">
           {entries.map(([cat, arr]) => {
             const c = colorFor(cat);
@@ -2952,12 +3016,20 @@ export default function App() {
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat) && (
+                      <>
+                      <button onClick={() => { setCustomAddCat(customAddCat === cat ? null : cat); setCustomAddValue(""); }}
+                        title="Add custom IOC"
+                        className="rounded-md px-1.5 py-1 text-xs font-bold"
+                        style={{ color: customAddCat === cat ? "#04111a" : c, backgroundColor: customAddCat === cat ? c : `${c}14`, border: `1px solid ${c}55`, cursor: "pointer" }}>
+                        +
+                      </button>
                       <button onClick={() => { arr.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 1500)); setEnrichAllDone((p) => ({ ...p, [cat]: true })); setTimeout(() => setEnrichAllDone((p) => { const n = { ...p }; delete n[cat]; return n; }), 5000); }}
                         disabled={!!enrichAllDone[cat]}
                         className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
                         style={{ color: enrichAllDone[cat] ? "#5d7382" : "#2dd4bf", backgroundColor: enrichAllDone[cat] ? "rgba(120,160,180,0.06)" : "rgba(45,212,191,0.10)", border: `1px solid ${enrichAllDone[cat] ? "rgba(120,160,180,0.2)" : "rgba(45,212,191,0.4)"}`, cursor: enrichAllDone[cat] ? "not-allowed" : "pointer" }}>
                         <Search size={12} /> {enrichAllDone[cat] ? "Enriched" : "Enrich All"}
                       </button>
+                      </>
                     )}
                     <button onClick={() => toggleDefang(cat)} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
                       title="Defang this type for safe sharing (display, copy & export)"
@@ -2968,12 +3040,6 @@ export default function App() {
                       style={{ backgroundColor: `${c}22`, color: c, border: `1px solid ${c}66`, textShadow: `0 0 10px ${c}66` }}>
                       {arr.length}
                     </span>
-                    <button onClick={() => { setCustomAddCat(customAddCat === cat ? null : cat); setCustomAddValue(""); }}
-                      title="Add custom IOC"
-                      className="rounded-md px-1.5 py-1 text-xs font-bold"
-                      style={{ color: customAddCat === cat ? "#04111a" : c, backgroundColor: customAddCat === cat ? c : `${c}14`, border: `1px solid ${c}55`, cursor: "pointer" }}>
-                      +
-                    </button>
                   </div>
                 </div>
 
@@ -3012,7 +3078,11 @@ export default function App() {
                     return (
                       <div key={i}>
                         <div className="group flex items-start gap-1.5 py-0.5 leading-relaxed"
-                          title={huntReady ? "Hunt-ready: key + value captured — enriches the hunt queries below" : undefined}>
+                          draggable
+                          onDragStart={(e) => { e.dataTransfer.setData("text/plain", arr[i]); handleDragStart(cat, arr[i]); }}
+                          onDragEnd={handleDragEnd}
+                          title={huntReady ? "Hunt-ready: key + value captured — enriches the hunt queries below" : undefined}
+                          style={{ cursor: "grab" }}>
                           <span className="text-xs shrink-0" style={{ color: `${c}aa`, userSelect: "none" }}>›</span>
                           {isEditing ? (
                             <input
@@ -3112,9 +3182,9 @@ export default function App() {
                           const hasWhois = !!d.whois;
                           const hasPivotIP = hasUrlscan && d.urlscan.servingIP && d.urlscan.servingIP !== arr[i];
                           const secDivider = (label) => (
-                            <div className="flex items-center gap-2 mt-1.5 mb-1" style={{ opacity: 0.5 }}>
-                              <span className="text-[9px] uppercase tracking-widest font-bold" style={{ color: "#5d738288" }}>{label}</span>
-                              <div className="flex-1" style={{ height: "1px", background: "rgba(120,160,180,0.12)" }}></div>
+                            <div className="flex items-center gap-2 mt-1.5 mb-1">
+                              <span className="text-[9px] uppercase tracking-widest font-extrabold" style={{ color: "#5d7382" }}>{label}</span>
+                              <div className="flex-1" style={{ height: "1px", background: "rgba(120,160,180,0.15)" }}></div>
                             </div>
                           );
                           return (
@@ -3162,10 +3232,15 @@ export default function App() {
                             )}
 
                             {/* ── REPUTATION ── */}
-                            {(hasOtx || hasAbuse || hasValidin) && (
+                            {!condensed && (hasOtx || hasAbuse || hasValidin || d._verdict === "Unknown") && (
                               <div>
                                 {secDivider("Reputation")}
                                 <div className="flex flex-wrap gap-1">
+                                  {d._verdict === "Unknown" && d.domainReg?.state !== "deleted" && (
+                                    <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#5d7382", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.2)" }}>
+                                      ⚪ Unknown - check VirusTotal
+                                    </span>
+                                  )}
                                   {hasOtx && d._verdict !== "Unknown" && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#2dd4bf", backgroundColor: "rgba(45,212,191,0.12)", border: "1px solid rgba(45,212,191,0.3)" }}>
                                       OTX · {d.otx.pulses} pulses{d.otx.validation ? ` · ${d.otx.validation}` : ""}{d.otx.tags ? ` · ${d.otx.tags}` : ""}{d.otx.parentDomain ? ` (via ${d.otx.parentDomain})` : ""}
@@ -3194,7 +3269,7 @@ export default function App() {
                             )}
 
                             {/* ── INFRASTRUCTURE (skip for hashes) ── */}
-                            {!isHash && (hasGeo || hasUrlscan || hasWhois) && (
+                            {!condensed && !isHash && (hasGeo || hasUrlscan || hasWhois) && (
                               <div>
                                 {secDivider("Infrastructure")}
                                 <div className="flex flex-wrap gap-1">
@@ -3257,7 +3332,7 @@ export default function App() {
                             )}
 
                             {/* ── TIMELINE ── */}
-                            {(hasTimeline || (hasDomainReg && d.domainReg.state !== "deleted")) && (
+                            {!condensed && (hasTimeline || (hasDomainReg && d.domainReg.state !== "deleted")) && (
                               <div>
                                 {secDivider("Timeline")}
                                 <div className="flex flex-wrap gap-1">
@@ -3293,7 +3368,7 @@ export default function App() {
                             )}
 
                             {/* ── PIVOTS (skip for hashes) ── */}
-                            {!isHash && hasUrlscan && (() => {
+                            {!condensed && !isHash && hasUrlscan && (() => {
                               const existingUrls = new Set((displayData?.URL || []).map((u) => u.toLowerCase().replace(/\/+$/, "")));
                               const fileUrls = new Set((d.urlscan.files || []).map((f) => f.url?.toLowerCase().replace(/\/+$/, "")).filter(Boolean));
                               const iocNorm = arr[i].toLowerCase().replace(/\/+$/, "").replace(/^https?:\/\//i, "");
@@ -3374,10 +3449,7 @@ export default function App() {
                           );
                         })()}
                         {enr && !enr.loading && !enr.data && enr.error && (
-                          <p className="ml-4 mb-1 text-[10px] font-bold" style={{ color: "#5d7382" }}>⚪ Unknown to our integrated Enrichment Engines. Please check on VirusTotal.</p>
-                        )}
-                        {enr?.data && enr.data._verdict === "Unknown" && enr.data.domainReg?.state !== "deleted" && (
-                          <p className="ml-4 mb-1 text-[10px] font-bold" style={{ color: "#5d7382" }}>⚪ Unknown to our integrated Enrichment Engines. Please check on VirusTotal.</p>
+                          <p className="ml-4 mb-1 text-[10px] font-bold" style={{ color: "#5d7382" }}>⚪ Unknown - check VirusTotal.</p>
                         )}
                       </div>
                     );
