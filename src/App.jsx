@@ -2109,6 +2109,7 @@ export default function App() {
   const [customAddCat, setCustomAddCat] = useState(null);           // category currently showing add input
   const [customAddValue, setCustomAddValue] = useState("");
   const [condensed, setCondensed] = useState(false);
+  const [cardCondensed, setCardCondensed] = useState({});        // { cat: true } per-card collapse
   const [dragging, setDragging] = useState(null);               // { cat, value }
   const [dragOverCat, setDragOverCat] = useState(null);
   const copyTimer = useRef(null);
@@ -3031,6 +3032,12 @@ export default function App() {
                       </button>
                       </>
                     )}
+                    <button onClick={() => setCardCondensed((p) => ({ ...p, [cat]: !p[cat] }))}
+                      title={cardCondensed[cat] ? "Expand enrichment details" : "Collapse to verdicts only"}
+                      className="rounded-md px-1.5 py-1 text-xs font-bold"
+                      style={{ color: cardCondensed[cat] ? "#04111a" : "#c084fc", backgroundColor: cardCondensed[cat] ? "#c084fc" : "rgba(192,132,252,0.12)", border: "1px solid rgba(192,132,252,0.4)", cursor: "pointer" }}>
+                      {cardCondensed[cat] ? "▸" : "▾"}
+                    </button>
                     <button onClick={() => toggleDefang(cat)} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
                       title="Defang this type for safe sharing (display, copy & export)"
                       style={{ color: isDefanged ? "#04111a" : "#ffb84d", backgroundColor: isDefanged ? "#ffb84d" : "rgba(255,184,77,0.10)", border: "1px solid rgba(255,184,77,0.5)" }}>
@@ -3181,19 +3188,19 @@ export default function App() {
                           const hasDomainReg = isDomUrl && !isIpAsDomain && !!d.domainReg;
                           const hasWhois = !!d.whois;
                           const hasPivotIP = hasUrlscan && d.urlscan.servingIP && d.urlscan.servingIP !== arr[i];
-                          const secDivider = (label) => (
-                            <div className="flex items-center gap-2 mt-1.5 mb-1">
-                              <span className="text-[9px] uppercase tracking-widest font-extrabold" style={{ color: "#5d7382" }}>{label}</span>
-                              <div className="flex-1" style={{ height: "1px", background: "rgba(120,160,180,0.15)" }}></div>
+                          const isCondensed = condensed || !!cardCondensed[cat];
+                          // Compact row: bold label on the left, chips flowing right
+                          const secRow = (label, children) => (
+                            <div className="flex items-start gap-2 py-0.5">
+                              <span className="text-[9px] uppercase tracking-widest font-black shrink-0 pt-0.5" style={{ color: "#8aa0ad", width: "104px", letterSpacing: "1.5px" }}>{label}</span>
+                              <div className="flex flex-wrap gap-1 flex-1 min-w-0">{children}</div>
                             </div>
                           );
                           return (
                           <div className="ml-4 mb-1.5 text-[10px]">
                             {/* ── VERDICT & IDENTITY ── */}
-                            {(hasVerdict || hasThreatfox || hasMalBaz || hasUrlhaus) && (
-                              <div>
-                                {secDivider("Verdict & Identity")}
-                                <div className="flex flex-wrap gap-1">
+                            {(hasVerdict || hasThreatfox || hasMalBaz || hasUrlhaus) && secRow("Verdict & Identity", (
+                              <>
                                   {hasVerdict && (
                                     <span className="rounded-full px-2 py-0.5 font-bold" style={{
                                       color: d._verdict === "Malicious" ? "#ff4d6d" : d._verdict === "Suspicious" ? "#fbbf24" : d._verdict === "Whitelisted" ? "#00ff9c" : "#8aa0ad",
@@ -3227,15 +3234,12 @@ export default function App() {
                                       🔴 {d.malwarebazaar.fileName ? d.malwarebazaar.fileName + (d.malwarebazaar.detections ? " | " : "") : ""}{d.malwarebazaar.detections || ""}
                                     </span>
                                   )}
-                                </div>
-                              </div>
-                            )}
+                              </>
+                            ))}
 
                             {/* ── REPUTATION ── */}
-                            {!condensed && (hasOtx || hasAbuse || hasValidin || d._verdict === "Unknown") && (
-                              <div>
-                                {secDivider("Reputation")}
-                                <div className="flex flex-wrap gap-1">
+                            {!isCondensed && (hasOtx || hasAbuse || hasValidin || d._verdict === "Unknown") && secRow("Reputation", (
+                              <>
                                   {d._verdict === "Unknown" && d.domainReg?.state !== "deleted" && (
                                     <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#5d7382", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.2)" }}>
                                       ⚪ Unknown - check VirusTotal
@@ -3264,15 +3268,12 @@ export default function App() {
                                       Validin{d.validin.verdict ? ` · ${d.validin.verdict}` : ""}{d.validin.score !== null ? ` (${d.validin.score}/10)` : ""}{d.validin.maliciousCount > 0 ? ` · Malicious x ${d.validin.maliciousCount}` : ""}{d.validin.titles?.length ? ` · ${d.validin.titles.join(" · ")}` : ""}
                                     </span>
                                   )}
-                                </div>
-                              </div>
-                            )}
+                              </>
+                            ))}
 
                             {/* ── INFRASTRUCTURE (skip for hashes) ── */}
-                            {!condensed && !isHash && (hasGeo || hasUrlscan || hasWhois) && (
-                              <div>
-                                {secDivider("Infrastructure")}
-                                <div className="flex flex-wrap gap-1">
+                            {!isCondensed && !isHash && (hasGeo || hasUrlscan || hasWhois) && secRow("Infrastructure", (
+                              <>
                                   {hasGeo && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#a78bfa", backgroundColor: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)" }}>
                                       GEO/ASN{d.whoisASN.country ? <>{" · "}<span style={{ color: "#eafcff", fontWeight: 700 }}>{d.whoisASN.flag ? d.whoisASN.flag + " " : ""}{d.whoisASN.country}</span></> : ""}{d.whoisASN.city ? ` (${d.whoisASN.city}${d.whoisASN.region ? `, ${d.whoisASN.region}` : ""})` : ""}{d.whoisASN.asn ? ` · ${d.whoisASN.asn}` : ""}{d.whoisASN.asnOrg ? ` · ${d.whoisASN.asnOrg}` : ""}{d.whoisASN.privacy ? <>{" · "}<span style={{ color: "#fbbf24", fontWeight: 700 }}>{d.whoisASN.privacy}</span></> : ""}
@@ -3286,7 +3287,7 @@ export default function App() {
                                     }}>
                                       Urlscan.io · {d.urlscan.scans} Scan{d.urlscan.scans !== 1 ? "s" : ""}{d.urlscan.malicious > 0 ? ` · 🔴 ${d.urlscan.malicious} Malicious` : ""}{d.urlscan.title ? ` · "${d.urlscan.title}"` : ""}{d.urlscan.server ? ` · ${d.urlscan.server}` : ""}{d.urlscan.country && d.urlscan.flag ? ` · ${d.urlscan.flag}` : ""}
                                       {d.urlscan.link && <>{" · "}<a href={d.urlscan.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a></>}
-                                      {" · "}<a href={`https://urlscan.io/scan/?url=${encodeURIComponent(arr[i].includes("://") ? arr[i] : "https://" + arr[i])}`} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "#fbbf24" }}>Scan</a>
+                                      {" · "}<a href={isIP ? `https://urlscan.io/ip/${encodeURIComponent(arr[i])}` : `https://urlscan.io/domain/${encodeURIComponent(arr[i].replace(/^https?:\/\//i, "").split("/")[0])}`} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "#fbbf24" }}>History</a>
                                       {d.urlscan.screenshot && (
                                         <span className="relative inline-block ml-1" style={{ cursor: "pointer" }}>
                                           <a href={d.urlscan.screenshot} target="_blank" rel="noreferrer noopener"
@@ -3310,10 +3311,7 @@ export default function App() {
                                       WHOIS{d.whois.org ? ` · ${d.whois.org}` : ""}{d.whois.country ? ` · ${d.whois.country}` : ""}{d.whois.ageDays !== null ? ` · ${d.whois.ageDays}d old` : ""}
                                     </span>
                                   )}
-                                </div>
-                                {/* Serving IP */}
                                 {hasPivotIP && !dismissedPivots.has(`ip::${d.urlscan.servingIP}::${arr[i]}`) && (
-                                  <div className="flex flex-wrap gap-1 mt-1">
                                     <span className="rounded-full px-2 py-0.5 flex items-center gap-1.5 flex-wrap" style={{ color: "#22d3ee", backgroundColor: "rgba(34,211,238,0.08)", border: "1px solid rgba(34,211,238,0.25)" }}>
                                       <span>Serving IP: {d.urlscan.servingIP}{d.urlscan.servingASN ? ` · ${d.urlscan.servingASN}` : ""}{d.urlscan.servingASNName ? ` · ${d.urlscan.servingASNName}` : ""}</span>
                                       {isPivotAdded("IPV4", d.urlscan.servingIP) ? (
@@ -3326,16 +3324,13 @@ export default function App() {
                                       )}
                                       <button onClick={() => dismissPivot(`ip::${d.urlscan.servingIP}::${arr[i]}`)} className="rounded p-0.5" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
                                     </span>
-                                  </div>
                                 )}
-                              </div>
-                            )}
+                              </>
+                            ))}
 
                             {/* ── TIMELINE ── */}
-                            {!condensed && (hasTimeline || (hasDomainReg && d.domainReg.state !== "deleted")) && (
-                              <div>
-                                {secDivider("Timeline")}
-                                <div className="flex flex-wrap gap-1">
+                            {!isCondensed && (hasTimeline || (hasDomainReg && d.domainReg.state !== "deleted")) && secRow("Timeline", (
+                              <>
                                   {hasTimeline && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.25)" }}>
                                       🕐{d._timeline.firstFmt ? ` First Seen: ${d._timeline.firstFmt}` : ""}{d._timeline.lastFmt ? ` · Last Seen: ${d._timeline.lastFmt}` : ""}
@@ -3363,12 +3358,11 @@ export default function App() {
                                       </span>
                                     );
                                   })()}
-                                </div>
-                              </div>
-                            )}
+                              </>
+                            ))}
 
                             {/* ── PIVOTS (skip for hashes) ── */}
-                            {!condensed && !isHash && hasUrlscan && (() => {
+                            {!isCondensed && !isHash && hasUrlscan && (() => {
                               const existingUrls = new Set((displayData?.URL || []).map((u) => u.toLowerCase().replace(/\/+$/, "")));
                               const fileUrls = new Set((d.urlscan.files || []).map((f) => f.url?.toLowerCase().replace(/\/+$/, "")).filter(Boolean));
                               const iocNorm = arr[i].toLowerCase().replace(/\/+$/, "").replace(/^https?:\/\//i, "");
@@ -3389,16 +3383,26 @@ export default function App() {
                               });
                               const hasFiles = d.urlscan.files && d.urlscan.files.filter((f) => !dismissedPivots.has(`file::${f.sha256 || f.filename}::${arr[i]}`)).length > 0;
                               if (!newUrls.length && !hasFiles) return null;
-                              return (
-                                <div>
-                                  {secDivider("Pivots")}
-                                  <div className="flex flex-col gap-0.5">
+                              return secRow("Pivots", (
+                                  <div className="flex flex-col gap-0.5 w-full">
                                     {newUrls.map((u, ui) => {
                                       const uNorm = u.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
                                       const added = isPivotAdded("URL", uNorm);
                                       return (
                                         <span key={`u${ui}`} className="rounded-full px-2 py-0.5 flex items-center gap-1.5" style={{ color: "#7c9cff", backgroundColor: "rgba(124,156,255,0.06)", border: "1px solid rgba(124,156,255,0.2)" }}>
                                           <span className="break-all flex-1">{u}</span>
+                                          <span className="relative inline-block shrink-0">
+                                            <a href={`https://urlscan.io/domain/${encodeURIComponent(uNorm.split("/")[0])}`} target="_blank" rel="noreferrer noopener"
+                                              className="peer text-[9px] px-1 py-0.5 rounded inline-block"
+                                              style={{ color: "#c084fc", border: "1px solid rgba(192,132,252,0.3)", backgroundColor: "rgba(192,132,252,0.08)", textDecoration: "none" }}>🖥️</a>
+                                            <span className="hidden peer-hover:block fixed z-[9999] rounded-lg shadow-2xl pointer-events-none"
+                                              style={{ border: "2px solid rgba(192,132,252,0.5)", backgroundColor: "#0a0e14", padding: "4px", width: "400px", maxWidth: "90vw", left: "50%", top: "50%", transform: "translate(-50%, -50%)" }}>
+                                              <img src={`https://urlscan.io/liveshot/?width=800&height=600&url=${encodeURIComponent(u)}`} alt="Screenshot" loading="lazy"
+                                                style={{ width: "100%", borderRadius: "6px", display: "block" }}
+                                                onError={(e) => { e.target.parentElement.style.display = "none"; }} />
+                                              <p className="text-[9px] text-center mt-1" style={{ color: "#5d7382" }}>{uNorm}</p>
+                                            </span>
+                                          </span>
                                           {added ? (
                                             <>
                                               <span className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>Added to URL</span>
@@ -3442,8 +3446,7 @@ export default function App() {
                                       );
                                     })}
                                   </div>
-                                </div>
-                              );
+                              ));
                             })()}
                           </div>
                           );
