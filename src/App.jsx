@@ -307,17 +307,26 @@ const setFavicon = () => {
 // ============================================================
 let rdapMapPromise = null;
 
-// Registries that operate RDAP but never registered it in IANA's bootstrap
-// file (verified absent: .me, .io, .co, .sh, .ac, .tk). Probed for data, but
-// always non-authoritative — a 404 from these never implies deletion.
-const RDAP_EXTRA = {
-  me: "https://rdap.nic.me",
+// Registry-operator RDAP bases for TLDs absent from IANA's bootstrap.
+// Routing by *operator* rather than per-TLD hostname covers a long tail in
+// one shot (Identity Digital alone is the backend for dozens of ccTLDs).
+// Always probed as NON-authoritative: a 404 here never implies deletion.
+const RDAP_OPERATOR = {
+  // Identity Digital (formerly Afilias / Donuts) — registry backend
+  me: "https://rdap.identitydigital.services/rdap",
   io: "https://rdap.identitydigital.services/rdap",
   sh: "https://rdap.identitydigital.services/rdap",
   ac: "https://rdap.identitydigital.services/rdap",
-  co: "https://rdap.nic.co",
-  ws: "https://rdap.website.ws",
-  la: "https://rdap.nic.la",
+  mn: "https://rdap.identitydigital.services/rdap",
+  bz: "https://rdap.identitydigital.services/rdap",
+  lc: "https://rdap.identitydigital.services/rdap",
+  vc: "https://rdap.identitydigital.services/rdap",
+  ag: "https://rdap.identitydigital.services/rdap",
+  gi: "https://rdap.identitydigital.services/rdap",
+  // CentralNic
+  la: "https://rdap.centralnic.com/la",
+  pw: "https://rdap.centralnic.com/pw",
+  // Channel Islands
   gg: "https://rdap.channelisles.net",
   je: "https://rdap.channelisles.net",
 };
@@ -2045,9 +2054,14 @@ export default function App() {
             const usFirstSeen = allScanDates.length ? allScanDates[0].split("T")[0] : null;
             const usLastSeen = allScanDates.length > 1 ? allScanDates[allScanDates.length - 1].split("T")[0] : null;
 
-            // Subdomain age from domainAgeDays (observation-based, not WHOIS)
+            // Observation-based ages (urlscan's own first-sighting, not WHOIS).
+            // domainAgeDays  = the exact host queried (subdomain if applicable)
+            // apexDomainAgeDays = the registrable/apex domain — Layer 2 fallback
+            // when no RDAP registration date is available.
             const domainAgeDays = latest.page?.domainAgeDays ?? null;
             const subdomainCreated = domainAgeDays != null ? dateFromAgeDays(domainAgeDays, latest.task?.time) : null;
+            const apexAgeDays = latest.page?.apexDomainAgeDays ?? null;
+            const apexFirstSeen = apexAgeDays != null ? dateFromAgeDays(apexAgeDays, latest.task?.time) : null;
 
             results.urlscan = {
               scans: totalScans,
@@ -2063,6 +2077,8 @@ export default function App() {
               firstSeen: usFirstSeen,
               lastSeen: usLastSeen,
               subdomainAgeDays: domainAgeDays,
+              apexAgeDays,
+              apexFirstSeen,
               subdomainCreated,
               // Pivot points: serving IP
               servingIP: latest.page?.ip || null,
@@ -2127,7 +2143,7 @@ export default function App() {
           if (authoritative) rdapEndpoints.push({ url: authoritative.url, auth: true });
           // Registries missing from IANA's bootstrap (.me, .io, .co, ...). Probed
           // for data but marked non-authoritative so a 404 can never mark deleted.
-          const extra = RDAP_EXTRA[String(baseDomain).split(".").pop().toLowerCase()];
+          const extra = RDAP_OPERATOR[String(baseDomain).split(".").pop().toLowerCase()];
           if (extra && !authoritative) rdapEndpoints.push({ url: `${extra}/domain/${encodeURIComponent(baseDomain)}`, auth: false });
           rdapEndpoints.push({ url: `https://rdap.org/domain/${encodeURIComponent(baseDomain)}`, auth: false });
           rdapEndpoints.push({ url: `https://rdap-bootstrap.arin.net/bootstrap/domain/${encodeURIComponent(baseDomain)}`, auth: false });
@@ -2172,6 +2188,36 @@ export default function App() {
           }
         } catch (e) { console.warn("Enrich RDAP failed:", e.message); }
         } // end if (!isIP)
+
+        // ---- Layer 3: WhoisJSON fallback ----
+        // Only fires when Layer 1 (RDAP) produced no registration date AND
+        // authoritative RDAP hasn't confirmed the domain is gone. Skipped for
+        // IP-as-domain values. Fails silently if the key isn't configured.
+        if (!isIP && (!results.domainReg || results.domainReg.state === "unregistered" || (results.domainReg.state === "active" && results.domainReg.ageDays == null))) {
+          try {
+            const baseDomain = registrableDomain(rdapTarget);
+            const wj = await callEnrich("whoisjson", null, null, baseDomain);
+            // WhoisJSON returns flat fields at root: created, status, registered
+            const created = wj?.created || null;
+            const statusArr = Array.isArray(wj?.status) ? wj.status : null;
+            if (created) {
+              const cd = new Date(created);
+              if (!isNaN(cd)) {
+                const ageDays = Math.floor((Date.now() - cd.getTime()) / 86400000);
+                const eppStatus = statusArr && statusArr.length
+                  ? statusArr.filter((s) => typeof s === "string" && /^[a-zA-Z]/.test(s)).slice(0, 4).join(", ")
+                  : null;
+                results.domainReg = {
+                  date: created.split("T")[0],
+                  ageDays,
+                  status: eppStatus || null,
+                  state: "active",
+                  source: "whoisjson",
+                };
+              }
+            }
+          } catch (e) { console.warn("Enrich WhoisJSON failed:", e.message); }
+        }
       }
 
       // ---- Validin (fallback — only when other engines returned nothing useful) ----
@@ -3400,6 +3446,12 @@ export default function App() {
                           const hasUrlscan = !!d.urlscan;
                           const hasTimeline = !!d._timeline;
                           const hasDomainReg = isDomUrl && !isIpAsDomain && !!d.domainReg;
+                          // Layer 1 = RDAP registration date (authoritative).
+                          // Layer 2 = urlscan apex first-sighting (observational),
+                          // used only when Layer 1 produced no registration date.
+                          const layer1Ok = hasDomainReg && d.domainReg.state === "active" && d.domainReg.ageDays != null;
+                          const hasApexObs = isDomUrl && !isIpAsDomain && !layer1Ok
+                            && d.domainReg?.state !== "deleted" && d.urlscan?.apexAgeDays != null;
                           const hasWhois = !!d.whois;
                           const hasPivotIP = hasUrlscan && d.urlscan.servingIP && d.urlscan.servingIP !== arr[i];
                           const isCondensed = isRowCollapsed;
@@ -3543,7 +3595,7 @@ export default function App() {
                             ))}
 
                             {/* ── TIMELINE ── */}
-                            {!isCondensed && (hasTimeline || (hasDomainReg && d.domainReg.state !== "deleted")) && secRow("Timeline", (
+                            {!isCondensed && (hasTimeline || hasApexObs || (hasDomainReg && d.domainReg.state !== "deleted")) && secRow("Timeline", (
                               <>
                                   {hasTimeline && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.25)" }}>
@@ -3568,6 +3620,23 @@ export default function App() {
                                       }}>
                                         📋{dr?.state === "active" && dr.ageDays != null ? ` Domain: ${smartAge(dr.ageDays)} old (Reg. ${fmtDate(dr.date)})` : ""}{isUnregistered ? " ⚪ Domain Not Registered" : ""}{showSubdomainLine ? ` · Subdomain: ${smartAge(sd.subdomainAgeDays)} old (Active Since ${fmtDate(sd.subdomainCreated)})` : ""}{dr?.status ? ` · Status: ${dr.status}` : ""}
                                         {isNewSubdomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Subdomain</span>}
+                                      </span>
+                                    );
+                                  })()}
+                                  {hasApexObs && (() => {
+                                    const sd = d.urlscan;
+                                    const iocHost = arr[i].replace(/^https?:\/\//i, "").split("/")[0];
+                                    const isActualSubdomain = registrableDomain(iocHost) !== iocHost.toLowerCase();
+                                    const showSub = sd?.subdomainAgeDays != null && isActualSubdomain;
+                                    const isNewApex = sd.apexAgeDays < 30;
+                                    return (
+                                      <span className="rounded-full px-2 py-0.5" style={{
+                                        color: isNewApex ? "#ff4d6d" : "#8aa0ad",
+                                        backgroundColor: isNewApex ? "rgba(255,77,109,0.10)" : "rgba(148,163,184,0.05)",
+                                        border: `1px dashed ${isNewApex ? "rgba(255,77,109,0.35)" : "rgba(148,163,184,0.3)"}`,
+                                      }} title="Observational — urlscan first-sighting, not registry data">
+                                        👁️ Domain: ~{smartAge(sd.apexAgeDays)} old (First Observed {fmtDate(sd.apexFirstSeen)}){showSub ? ` · Subdomain: ${smartAge(sd.subdomainAgeDays)} old (Active Since ${fmtDate(sd.subdomainCreated)})` : ""}
+                                        {isNewApex && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Recently Observed Domain</span>}
                                       </span>
                                     );
                                   })()}
