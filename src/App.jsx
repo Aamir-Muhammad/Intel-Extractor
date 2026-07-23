@@ -306,6 +306,21 @@ const setFavicon = () => {
 //  own them and return 404, which we'd wrongly read as "deleted".
 // ============================================================
 let rdapMapPromise = null;
+
+// Registries that operate RDAP but never registered it in IANA's bootstrap
+// file (verified absent: .me, .io, .co, .sh, .ac, .tk). Probed for data, but
+// always non-authoritative — a 404 from these never implies deletion.
+const RDAP_EXTRA = {
+  me: "https://rdap.nic.me",
+  io: "https://rdap.identitydigital.services/rdap",
+  sh: "https://rdap.identitydigital.services/rdap",
+  ac: "https://rdap.identitydigital.services/rdap",
+  co: "https://rdap.nic.co",
+  ws: "https://rdap.website.ws",
+  la: "https://rdap.nic.la",
+  gg: "https://rdap.channelisles.net",
+  je: "https://rdap.channelisles.net",
+};
 const loadRdapMap = () => {
   if (rdapMapPromise) return rdapMapPromise;
   rdapMapPromise = fetch("https://data.iana.org/rdap/dns.json")
@@ -2104,14 +2119,18 @@ export default function App() {
           // Build endpoint list: IANA-authoritative server first, then generic
           // fallbacks. Only a 404 from an authoritative server proves the domain
           // is gone — a 404 from a server that doesn't own the TLD proves nothing.
+          // ONLY a server IANA explicitly maps to this TLD counts as authoritative.
+          // rdap.org and ARIN's bootstrap both proxy the same IANA file, so their
+          // 404s mean "unknown TLD", not "domain doesn't exist" — never trust them.
           const authoritative = await rdapServerFor(baseDomain);
           const rdapEndpoints = [];
           if (authoritative) rdapEndpoints.push({ url: authoritative.url, auth: true });
-          rdapEndpoints.push({ url: `https://rdap.org/domain/${encodeURIComponent(baseDomain)}`, auth: true });
+          // Registries missing from IANA's bootstrap (.me, .io, .co, ...). Probed
+          // for data but marked non-authoritative so a 404 can never mark deleted.
+          const extra = RDAP_EXTRA[String(baseDomain).split(".").pop().toLowerCase()];
+          if (extra && !authoritative) rdapEndpoints.push({ url: `${extra}/domain/${encodeURIComponent(baseDomain)}`, auth: false });
+          rdapEndpoints.push({ url: `https://rdap.org/domain/${encodeURIComponent(baseDomain)}`, auth: false });
           rdapEndpoints.push({ url: `https://rdap-bootstrap.arin.net/bootstrap/domain/${encodeURIComponent(baseDomain)}`, auth: false });
-          if (/\.(com|net)$/i.test(baseDomain)) {
-            rdapEndpoints.push({ url: `https://rdap.verisign.com/com/v1/domain/${encodeURIComponent(baseDomain)}`, auth: true });
-          }
           let rj = null;
           let rdapStatus = null;
           let got404FromAuthoritative = false;
