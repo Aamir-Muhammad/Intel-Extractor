@@ -1973,6 +1973,37 @@ export default function App() {
             };
           }
         } catch (e) { console.warn("Enrich IPLocate failed:", e.message); }
+
+        // Shodan InternetDB — no key, permissive CORS, free non-commercial.
+        // Adds open ports, tags, CPEs (services running), and known CVEs.
+        // Weekly refresh cadence, so it's exposure snapshot, not real-time.
+        try {
+          const r = await fetch(`https://internetdb.shodan.io/${encodeURIComponent(value)}`, {
+            headers: { "Accept": "application/json" },
+          });
+          if (r.ok) {
+            const sj = await r.json();
+            const ports = Array.isArray(sj.ports) ? sj.ports : [];
+            const vulns = Array.isArray(sj.vulns) ? sj.vulns : [];
+            const tags = Array.isArray(sj.tags) ? sj.tags : [];
+            const cpes = Array.isArray(sj.cpes) ? sj.cpes : [];
+            const hostnames = Array.isArray(sj.hostnames) ? sj.hostnames : [];
+            if (ports.length || vulns.length || tags.length || cpes.length || hostnames.length) {
+              results.shodan = {
+                ports: ports.slice(0, 20),
+                vulns: vulns.slice(0, 20),
+                tags: tags.slice(0, 10),
+                // Trim cpe:/a:vendor:product:version → vendor:product for readability
+                cpes: cpes.slice(0, 10).map((c) => {
+                  const parts = String(c).replace(/^cpe:[\/2].?:/, "").split(":");
+                  return parts.slice(0, 3).filter(Boolean).join(":");
+                }).filter(Boolean),
+                hostnames: hostnames.slice(0, 5),
+              };
+            }
+          }
+          // 404 = no data on this IP (not an error, just quiet)
+        } catch (e) { console.warn("Enrich Shodan InternetDB failed:", e.message); }
       }
       // OTX WHOIS for domains — registrant org, country, registration age
       if (cat === "DOMAIN") {
@@ -2768,7 +2799,7 @@ export default function App() {
   // Enrichment row builder — extracts structured data from enrichCache for export
   const enrichRow = (cat, value) => {
     const e = enrichCache[`${cat}::${value}`]?.data;
-    if (!e) return { verdict: "", malware: "", detections: "", fileName: "", pulses: "", country: "", asn: "", firstSeen: "", lastSeen: "", urlscan: "" };
+    if (!e) return { verdict: "", malware: "", detections: "", fileName: "", pulses: "", country: "", asn: "", firstSeen: "", lastSeen: "", urlscan: "", shodanPorts: "", shodanCVEs: "", shodanTags: "" };
     return {
       verdict: e._verdict || "",
       malware: e.threatfox?.malware || e.malwarebazaar?.family || "",
@@ -2780,10 +2811,13 @@ export default function App() {
       firstSeen: e._timeline?.firstSeen || "",
       lastSeen: e._timeline?.lastSeen || "",
       urlscan: e.urlscan ? `${e.urlscan.scans} scans${e.urlscan.malicious ? ` (${e.urlscan.malicious} malicious)` : ""}` : "",
+      shodanPorts: e.shodan?.ports?.join(" ") || "",
+      shodanCVEs: e.shodan?.vulns?.join(" ") || "",
+      shodanTags: e.shodan?.tags?.join(" ") || "",
     };
   };
-  const ENRICH_HEADERS = ["Verdict", "Malware", "Detections", "FileName", "OTX Pulses", "Country", "ASN", "First Seen", "Last Seen", "URLScan"];
-  const enrichVals = (r) => [r.verdict, r.malware, r.detections, r.fileName, r.pulses, r.country, r.asn, r.firstSeen, r.lastSeen, r.urlscan];
+  const ENRICH_HEADERS = ["Verdict", "Malware", "Detections", "FileName", "OTX Pulses", "Country", "ASN", "First Seen", "Last Seen", "URLScan", "Shodan Ports", "Shodan CVEs", "Shodan Tags"];
+  const enrichVals = (r) => [r.verdict, r.malware, r.detections, r.fileName, r.pulses, r.country, r.asn, r.firstSeen, r.lastSeen, r.urlscan, r.shodanPorts, r.shodanCVEs, r.shodanTags];
 
   const exportAllCSV = () => {
     const rows = [["Type", "IOC", ...ENRICH_HEADERS]];
@@ -3453,6 +3487,7 @@ export default function App() {
                           const hasApexObs = isDomUrl && !isIpAsDomain && !layer1Ok
                             && d.domainReg?.state !== "deleted" && d.urlscan?.apexAgeDays != null;
                           const hasWhois = !!d.whois;
+                          const hasShodan = !!d.shodan;
                           const hasPivotIP = hasUrlscan && d.urlscan.servingIP && d.urlscan.servingIP !== arr[i];
                           const isCondensed = isRowCollapsed;
                           // Compact row: bold label on the left, chips flowing right
@@ -3538,7 +3573,7 @@ export default function App() {
                             ))}
 
                             {/* ── INFRASTRUCTURE (skip for hashes) ── */}
-                            {!isCondensed && !isHash && (hasGeo || hasUrlscan || hasWhois) && secRow("Infrastructure", (
+                            {!isCondensed && !isHash && (hasGeo || hasUrlscan || hasWhois || hasShodan) && secRow("Infrastructure", (
                               <>
                                   {hasGeo && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#a78bfa", backgroundColor: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)" }}>
@@ -3577,6 +3612,28 @@ export default function App() {
                                       WHOIS{d.whois.org ? ` · ${d.whois.org}` : ""}{d.whois.country ? ` · ${d.whois.country}` : ""}{d.whois.ageDays !== null ? ` · ${d.whois.ageDays}d old` : ""}
                                     </span>
                                   )}
+                                  {hasShodan && (() => {
+                                    const s = d.shodan;
+                                    const vulnCount = s.vulns.length;
+                                    // Bare-minimum snapshot always fits: N ports · CPEs · tags · CVEs.
+                                    // Vulnerabilities carry the strongest signal → gate the colour on them.
+                                    const hasCritical = vulnCount > 0;
+                                    return (
+                                      <span className="rounded-full px-2 py-0.5" style={{
+                                        color: hasCritical ? "#fbbf24" : "#4ade80",
+                                        backgroundColor: hasCritical ? "rgba(251,191,36,0.10)" : "rgba(74,222,128,0.08)",
+                                        border: `1px solid ${hasCritical ? "rgba(251,191,36,0.35)" : "rgba(74,222,128,0.3)"}`,
+                                      }} title="Shodan InternetDB — weekly refresh, exposure snapshot">
+                                        🛰️ Shodan
+                                        {s.ports.length ? ` · ${s.ports.length} port${s.ports.length !== 1 ? "s" : ""}: ${s.ports.slice(0, 8).join(", ")}${s.ports.length > 8 ? "…" : ""}` : ""}
+                                        {s.tags.length ? ` · ${s.tags.join(", ")}` : ""}
+                                        {s.cpes.length ? ` · ${s.cpes.slice(0, 3).join(", ")}${s.cpes.length > 3 ? "…" : ""}` : ""}
+                                        {vulnCount ? (
+                                          <> · <span style={{ color: "#ff4d6d", fontWeight: 700 }}>🔴 {vulnCount} CVE{vulnCount !== 1 ? "s" : ""}: {s.vulns.slice(0, 3).join(", ")}{vulnCount > 3 ? "…" : ""}</span></>
+                                        ) : null}
+                                      </span>
+                                    );
+                                  })()}
                                 {hasPivotIP && !dismissedPivots.has(`ip::${d.urlscan.servingIP}::${arr[i]}`) && (
                                     <span className="rounded-full px-2 py-0.5 flex items-center gap-1.5 flex-wrap" style={{ color: "#22d3ee", backgroundColor: "rgba(34,211,238,0.08)", border: "1px solid rgba(34,211,238,0.25)" }}>
                                       <span>Serving IP: {d.urlscan.servingIP}{d.urlscan.servingASN ? ` · ${d.urlscan.servingASN}` : ""}{d.urlscan.servingASNName ? ` · ${d.urlscan.servingASNName}` : ""}</span>
