@@ -2278,6 +2278,7 @@ export default function App() {
   const [customAddValue, setCustomAddValue] = useState("");
   const [condensed, setCondensed] = useState(false);
   const [cardCondensed, setCardCondensed] = useState({});        // { cat: true } per-card collapse
+  const [rowOverride, setRowOverride] = useState({});            // { "cat::value": bool } per-IOC override
   const [dragging, setDragging] = useState(null);               // { cat, value }
   const [dragOverCat, setDragOverCat] = useState(null);
   const copyTimer = useRef(null);
@@ -2825,7 +2826,7 @@ export default function App() {
           <span className="text-3xl font-medium tabular-nums" style={{ color: "#00e5ff", letterSpacing: "-1px" }}>{entries.length}</span>
           <span className="text-[10px] uppercase" style={{ color: "#5d7382", letterSpacing: "1.5px" }}>types</span>
           <div className="ml-auto flex items-center gap-2">
-            <button onClick={() => setCondensed((v) => !v)}
+            <button onClick={() => { setCondensed((v) => !v); setRowOverride({}); setCardCondensed({}); }}
               title={condensed ? "Expand all enrichment sections" : "Collapse to verdicts only"}
               className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold"
               style={{
@@ -3200,11 +3201,12 @@ export default function App() {
                       </button>
                       </>
                     )}
-                    <button onClick={() => setCardCondensed((p) => ({ ...p, [cat]: !p[cat] }))}
+                    <button onClick={() => { setCardCondensed((p) => ({ ...p, [cat]: !p[cat] })); setRowOverride((p) => { const n = { ...p }; arr.forEach((v) => delete n[`${cat}::${v}`]); return n; }); }}
                       title={cardCondensed[cat] ? "Expand enrichment details" : "Collapse to verdicts only"}
-                      className="rounded-md px-1.5 py-1 text-xs font-bold"
+                      className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold"
                       style={{ color: cardCondensed[cat] ? "#04111a" : "#c084fc", backgroundColor: cardCondensed[cat] ? "#c084fc" : "rgba(192,132,252,0.12)", border: "1px solid rgba(192,132,252,0.4)", cursor: "pointer" }}>
-                      {cardCondensed[cat] ? "▸" : "▾"}
+                      <ChevronDown size={11} style={{ transform: cardCondensed[cat] ? "rotate(-90deg)" : "rotate(0deg)", transition: "transform 0.2s" }} />
+                      {cardCondensed[cat] ? "Expand" : "Collapse"}
                     </button>
                     <button onClick={() => toggleDefang(cat)} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
                       title="Defang this type for safe sharing (display, copy & export)"
@@ -3250,6 +3252,8 @@ export default function App() {
                     const eKey = `${cat}::${arr[i]}`;
                     const enr = enrichCache[eKey];
                     const enrichable = ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat);
+                    const inheritedCollapse = condensed || !!cardCondensed[cat];
+                    const isRowCollapsed = rowOverride[eKey] !== undefined ? rowOverride[eKey] : inheritedCollapse;
                     return (
                       <div key={i}>
                         <div className="group flex items-start gap-1.5 py-0.5 leading-relaxed"
@@ -3294,7 +3298,7 @@ export default function App() {
                                 🔴 Newly Created Domain
                               </span>
                             )}
-                            {(condensed || cardCondensed[cat]) && enr?.data?._verdict && (
+                            {isRowCollapsed && enr?.data?._verdict && (
                               <span className="ml-1.5 text-[9px] rounded px-1.5 py-0.5 align-middle font-bold" style={{
                                 color: enr.data._verdict === "Malicious" ? "#ff4d6d" : enr.data._verdict === "Suspicious" ? "#fbbf24" : enr.data._verdict === "Whitelisted" ? "#00ff9c" : "#8aa0ad",
                                 backgroundColor: enr.data._verdict === "Malicious" ? "rgba(255,77,109,0.15)" : enr.data._verdict === "Suspicious" ? "rgba(251,191,36,0.15)" : enr.data._verdict === "Whitelisted" ? "rgba(0,255,156,0.15)" : "rgba(138,160,173,0.15)",
@@ -3316,6 +3320,14 @@ export default function App() {
                               </span>
                             )}
                           </span>
+                          )}
+                          {enr?.data && (
+                            <button onClick={() => setRowOverride((p) => ({ ...p, [eKey]: !isRowCollapsed }))}
+                              title={isRowCollapsed ? "Expand this indicator" : "Collapse this indicator"}
+                              className="shrink-0 rounded-md p-1 opacity-60 hover:opacity-100 transition-opacity"
+                              style={{ color: c }}>
+                              <ChevronDown size={14} style={{ transform: isRowCollapsed ? "rotate(-90deg)" : "rotate(0deg)", transition: "transform 0.2s ease" }} />
+                            </button>
                           )}
                           {enrichable && (
                             <button onClick={() => enrichIOC(cat, arr[i])}
@@ -3371,7 +3383,7 @@ export default function App() {
                           const hasDomainReg = isDomUrl && !isIpAsDomain && !!d.domainReg;
                           const hasWhois = !!d.whois;
                           const hasPivotIP = hasUrlscan && d.urlscan.servingIP && d.urlscan.servingIP !== arr[i];
-                          const isCondensed = condensed || !!cardCondensed[cat];
+                          const isCondensed = isRowCollapsed;
                           // Compact row: bold label on the left, chips flowing right
                           const secRow = (label, children) => (
                             <div className="flex items-start gap-2 py-0.5">
