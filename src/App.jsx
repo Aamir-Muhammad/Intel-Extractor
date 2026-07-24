@@ -1877,6 +1877,20 @@ export default function App() {
             const hasMalicious = detections.some((det) => !CLEAN_LABELS.has(det.toLowerCase()));
             if (hasMalicious) detections = detections.filter((det) => !CLEAN_LABELS.has(det.toLowerCase()));
             detections = detections.slice(0, 3);
+            // Code signing extraction — signed malware is a real thing
+            // (stolen certs, LOLBIN wrappers). Publisher CN is the useful field.
+            let codeSign = null;
+            if (Array.isArray(d.code_sign) && d.code_sign.length) {
+              const cs = d.code_sign[0];
+              if (cs && (cs.subject_cn || cs.issuer_cn)) {
+                codeSign = {
+                  subject: cs.subject_cn || null,
+                  issuer: cs.issuer_cn || null,
+                  algorithm: cs.algorithm || null,
+                  serial: cs.serial_number || null,
+                };
+              }
+            }
             results.malwarebazaar = {
               family: d.signature || "unknown",
               type: d.file_type || "—",
@@ -1887,9 +1901,43 @@ export default function App() {
               tags: Array.isArray(d.tags) ? d.tags.filter((t) => t && !GENERIC_TAGS.has(t.toLowerCase())).slice(0, 4).join(", ") : null,
               detections: detections.length ? detections.join(" | ") : null,
               fileName: d.file_name || null,
+              codeSign,
             };
           }
         } catch (e) { console.warn("Enrich MalwareBazaar failed:", e.message); }
+
+        // CIRCL hashlookup — free, no key, permissive CORS.
+        // Whitelist-oriented: NSRL + community databases of known-legit files.
+        // Answers "is this file benign?" — a strong signal when MalBazaar/OTX
+        // return nothing but the hash is clearly a Windows/macOS/Linux DLL.
+        try {
+          const algo = { MD5: "md5", SHA1: "sha1", SHA256: "sha256" }[cat];
+          if (algo) {
+            const r = await fetch(`https://hashlookup.circl.lu/lookup/${algo}/${encodeURIComponent(value)}`, {
+              headers: { "Accept": "application/json" },
+            });
+            if (r.ok) {
+              const cj = await r.json();
+              // 404s come back with {message:"..."} — real hits have FileName/MD5.
+              if (cj && !cj.message && (cj.FileName || cj.SHA1 || cj["SHA-1"] || cj.MD5)) {
+                const trust = typeof cj["hashlookup:trust"] === "number" ? cj["hashlookup:trust"] : null;
+                const pc = cj.ProductCode || {};
+                results.circl = {
+                  fileName: cj.FileName || null,
+                  fileSize: cj.FileSize ? `${Math.round(Number(cj.FileSize) / 1024)}KB` : null,
+                  trust,
+                  productName: pc.ProductName || null,
+                  productType: pc.ApplicationType || null,
+                  productLanguage: pc.Language || null,
+                  os: cj.OpSystemCode?.OpSystemName || null,
+                  // If CIRCL knows about it AND says trusted (>50), it's a legit file
+                  legit: trust != null && trust > 50,
+                };
+              }
+            }
+          }
+          // 404 = hash unknown to CIRCL (not an error, just quiet)
+        } catch (e) { console.warn("Enrich CIRCL failed:", e.message); }
       }
       // AlienVault OTX — general (pulses, reputation, ASN, country, high-fidelity tags)
       if (["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat)) {
@@ -2344,6 +2392,9 @@ export default function App() {
       else if (results.malwarebazaar) verdict = "Malicious";
       else if (results.urlhaus?.status === "offline") verdict = "Suspicious";
       else if (results.otx?.whitelisted === true) verdict = "Whitelisted";
+      // CIRCL known-legitimate: NSRL/community-attested legit file, trust > 50.
+      // Lower priority than active-threat signals above, higher than everything else.
+      else if (results.circl?.legit) verdict = "Whitelisted";
       else if (results.otx?.validation) verdict = "Suspicious"; // OTX flagged (DGA, blocklist, etc.)
       else if ((results.otx?.pulses || 0) >= 9) verdict = "Malicious";
       else if ((results.abuseipdb?.score || 0) >= 80) verdict = "Malicious";
@@ -2361,7 +2412,7 @@ export default function App() {
       }
 
       // OTX-only with 0 pulses and no other signals → Unknown
-      const hasNonOtx = results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin || results.abuseipdb || results.urlscan;
+      const hasNonOtx = results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin || results.abuseipdb || results.urlscan || results.circl;
       if (!hasNonOtx && results.otx && results.otx.pulses === 0 && !results.otx.validation) verdict = "Unknown";
 
       // Final verdict normalization — catch any non-standard strings
@@ -2829,7 +2880,8 @@ export default function App() {
   // Enrichment row builder — extracts structured data from enrichCache for export
   const enrichRow = (cat, value) => {
     const e = enrichCache[`${cat}::${value}`]?.data;
-    if (!e) return { verdict: "", malware: "", detections: "", fileName: "", pulses: "", country: "", asn: "", firstSeen: "", lastSeen: "", urlscan: "", shodanPorts: "", shodanCVEs: "", shodanTags: "" };
+    if (!e) return { verdict: "", malware: "", detections: "", fileName: "", pulses: "", country: "", asn: "", firstSeen: "", lastSeen: "", urlscan: "", shodanPorts: "", shodanCVEs: "", shodanTags: "", signer: "", circl: "" };
+    const cs = e.malwarebazaar?.codeSign;
     return {
       verdict: e._verdict || "",
       malware: e.threatfox?.malware || e.malwarebazaar?.family || "",
@@ -2844,10 +2896,12 @@ export default function App() {
       shodanPorts: e.shodan?.ports?.join(" ") || "",
       shodanCVEs: e.shodan?.vulns?.join(" ") || "",
       shodanTags: e.shodan?.tags?.join(" ") || "",
+      signer: cs ? [cs.subject && `Subject: ${cs.subject}`, cs.issuer && `Issuer: ${cs.issuer}`, cs.algorithm].filter(Boolean).join(" | ") : "",
+      circl: e.circl ? [e.circl.legit ? "Known Legitimate" : "CIRCL Known", e.circl.fileName, e.circl.productName, e.circl.trust != null ? `Trust ${e.circl.trust}` : null].filter(Boolean).join(" · ") : "",
     };
   };
-  const ENRICH_HEADERS = ["Verdict", "Malware", "Detections", "FileName", "OTX Pulses", "Country", "ASN", "First Seen", "Last Seen", "URLScan", "Shodan Ports", "Shodan CVEs", "Shodan Tags"];
-  const enrichVals = (r) => [r.verdict, r.malware, r.detections, r.fileName, r.pulses, r.country, r.asn, r.firstSeen, r.lastSeen, r.urlscan, r.shodanPorts, r.shodanCVEs, r.shodanTags];
+  const ENRICH_HEADERS = ["Verdict", "Malware", "Detections", "FileName", "OTX Pulses", "Country", "ASN", "First Seen", "Last Seen", "URLScan", "Shodan Ports", "Shodan CVEs", "Shodan Tags", "Signer", "CIRCL"];
+  const enrichVals = (r) => [r.verdict, r.malware, r.detections, r.fileName, r.pulses, r.country, r.asn, r.firstSeen, r.lastSeen, r.urlscan, r.shodanPorts, r.shodanCVEs, r.shodanTags, r.signer, r.circl];
 
   const exportAllCSV = () => {
     const rows = [["Type", "IOC", ...ENRICH_HEADERS]];
@@ -3518,6 +3572,7 @@ export default function App() {
                             && d.domainReg?.state !== "deleted" && d.urlscan?.apexAgeDays != null;
                           const hasWhois = !!d.whois;
                           const hasShodan = !!d.shodan;
+                          const hasCircl = !!d.circl;
                           const hasPivotIP = hasUrlscan && d.urlscan.servingIP && d.urlscan.servingIP !== arr[i];
                           const isCondensed = isRowCollapsed;
                           // Compact row: bold label on the left, chips flowing right
@@ -3530,7 +3585,7 @@ export default function App() {
                           return (
                           <div className="ml-4 mb-1.5 text-[10px]">
                             {/* ── VERDICT & IDENTITY ── */}
-                            {!isCondensed && (hasVerdict || hasThreatfox || hasMalBaz || hasUrlhaus) && secRow("Verdict & Identity", (
+                            {!isCondensed && (hasVerdict || hasThreatfox || hasMalBaz || hasUrlhaus || hasCircl) && secRow("Verdict & Identity", (
                               <>
                                   {hasVerdict && (
                                     <span className="rounded-full px-2 py-0.5 font-bold" style={{
@@ -3565,6 +3620,26 @@ export default function App() {
                                       🔴 {d.malwarebazaar.fileName ? d.malwarebazaar.fileName + (d.malwarebazaar.detections ? " | " : "") : ""}{d.malwarebazaar.detections || ""}
                                     </span>
                                   )}
+                                  {d.malwarebazaar?.codeSign && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#fbbf24", backgroundColor: "rgba(251,191,36,0.10)", border: "1px solid rgba(251,191,36,0.35)" }}
+                                      title="Code-signed malware — stolen or abused certificate">
+                                      ✍️ Signed{d.malwarebazaar.codeSign.subject ? ` · Subject: ${d.malwarebazaar.codeSign.subject}` : ""}{d.malwarebazaar.codeSign.issuer ? ` · Issuer: ${d.malwarebazaar.codeSign.issuer}` : ""}{d.malwarebazaar.codeSign.algorithm ? ` · ${d.malwarebazaar.codeSign.algorithm}` : ""}
+                                    </span>
+                                  )}
+                                  {d.circl && (
+                                    <span className="rounded-full px-2 py-0.5" style={{
+                                      color: d.circl.legit ? "#4ade80" : "#94a3b8",
+                                      backgroundColor: d.circl.legit ? "rgba(74,222,128,0.10)" : "rgba(148,163,184,0.08)",
+                                      border: `1px solid ${d.circl.legit ? "rgba(74,222,128,0.35)" : "rgba(148,163,184,0.25)"}`,
+                                    }} title="CIRCL hashlookup — NSRL and community-attested known files">
+                                      {d.circl.legit ? "🟢 Known Legitimate" : "🔵 CIRCL Known"}
+                                      {d.circl.fileName ? ` · ${d.circl.fileName}` : ""}
+                                      {d.circl.productName ? ` · ${d.circl.productName}` : ""}
+                                      {d.circl.productType ? ` · ${d.circl.productType}` : ""}
+                                      {d.circl.os ? ` · ${d.circl.os}` : ""}
+                                      {d.circl.trust != null ? ` · Trust ${d.circl.trust}/100` : ""}
+                                    </span>
+                                  )}
                               </>
                             ))}
 
@@ -3587,7 +3662,7 @@ export default function App() {
                                       backgroundColor: (d.abuseipdb.score || 0) >= 80 ? "rgba(255,77,109,0.12)" : (d.abuseipdb.score || 0) >= 25 ? "rgba(251,191,36,0.12)" : "rgba(45,212,191,0.08)",
                                       border: `1px solid ${(d.abuseipdb.score || 0) >= 80 ? "rgba(255,77,109,0.3)" : (d.abuseipdb.score || 0) >= 25 ? "rgba(251,191,36,0.3)" : "rgba(45,212,191,0.25)"}`,
                                     }}>
-                                      AbuseIPDB · {d.abuseipdb.score}% Confidence · {d.abuseipdb.reports} Report{d.abuseipdb.reports !== 1 ? "s" : ""}{d.abuseipdb.categories ? ` · ${d.abuseipdb.categories}` : ""}{d.abuseipdb.isp ? ` · ${d.abuseipdb.isp}` : ""}{d.abuseipdb.usageType ? ` · ${d.abuseipdb.usageType}` : ""}{d.abuseipdb.lastReported ? ` · Last: ${d.abuseipdb.lastReported}` : ""}
+                                      AbuseIPDB · {d.abuseipdb.score}% Confidence · {d.abuseipdb.reports} Report{d.abuseipdb.reports !== 1 ? "s" : ""}{d.abuseipdb.categories ? ` · ${d.abuseipdb.categories}` : ""}{d.abuseipdb.lastReported ? ` · Last: ${d.abuseipdb.lastReported}` : ""}
                                     </span>
                                   )}
                                   {hasValidin && (
