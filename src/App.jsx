@@ -10,7 +10,7 @@ import {
 //  Backend proxy
 // ============================================================
 const WORKER_BASE = "https://ioc-parser.aamirmuhd.workers.dev";
-const APP_VERSION = "v69";
+const APP_VERSION = "v70";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -1761,10 +1761,11 @@ export default function App() {
     if (enrichCache[key]) return;
     setEnrichCache((c) => ({ ...c, [key]: { loading: true } }));
     const results = {};
-    const callEnrich = async (api, otxType, otxSection, overrideValue) => {
+    const callEnrich = async (api, otxType, otxSection, overrideValue, extra) => {
       const body = { api, value: overrideValue || value };
       if (otxType) body.otx_type = otxType;
       if (otxSection) body.otx_section = otxSection;
+      if (extra && typeof extra === "object") Object.assign(body, extra);
       const r = await fetch(`${WORKER_BASE}/enrich`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -2083,6 +2084,43 @@ export default function App() {
           // 404 = no data on this IP (not an error, just quiet)
         } catch (e) { console.warn("Enrich Shodan InternetDB failed:", e.message); }
       }
+
+      // Kaspersky OpenTIP — hash / IP / domain / URL enrichment.
+      // Free tier 500/day. Zone (Red/Yellow/Green) is the headline signal.
+      // Returns 401 when token expired, 429 when rate-limited — both silent.
+      const kMap = { MD5: "hash", SHA1: "hash", SHA256: "hash", IPV4: "ip", IPV6: "ip", DOMAIN: "domain", URL: "url" };
+      const kType = kMap[cat];
+      if (kType) {
+        try {
+          const kj = await callEnrich("kaspersky", null, null, undefined, { kaspersky_type: kType });
+          if (kj && !kj.error && kj.Zone) {
+            // Extract shape-varying fields per IOC type into a normalised chip.
+            const zone = String(kj.Zone).toLowerCase(); // "red" | "yellow" | "green" | "grey"
+            const generalInfo = kj.FileGeneralInfo || kj.IpGeneralInfo || kj.DomainGeneralInfo || kj.UrlGeneralInfo || {};
+            const detections = kj.DetectionsInfo || [];
+            const detectionNames = Array.isArray(detections)
+              ? detections.map((d) => d.DetectionName).filter(Boolean).slice(0, 3)
+              : [];
+            const categories = Array.isArray(kj.CategoriesWithZone)
+              ? kj.CategoriesWithZone.map((c) => c.Name).filter(Boolean).slice(0, 3)
+              : (Array.isArray(kj.Categories) ? kj.Categories.slice(0, 3) : []);
+            results.kaspersky = {
+              zone, // red/yellow/green/grey
+              fileStatus: generalInfo.FileStatus || null,     // hash only
+              signer: generalInfo.Signer || null,             // hash only
+              productName: generalInfo.ProductName || null,   // hash only
+              firstSeen: generalInfo.FirstSeen ? String(generalInfo.FirstSeen).split("T")[0] : null,
+              lastSeen: generalInfo.LastSeen ? String(generalInfo.LastSeen).split("T")[0] : null,
+              hits: typeof generalInfo.HitsCount === "number" ? generalInfo.HitsCount : null,
+              country: generalInfo.CountryCode || generalInfo.Country || null, // ip/domain
+              detections: detectionNames.length ? detectionNames.join(", ") : null,
+              categories: categories.length ? categories.join(", ") : null,
+              size: generalInfo.Size ? `${Math.round(Number(generalInfo.Size) / 1024)}KB` : null,
+            };
+          }
+          // 401/403 = expired/invalid key; 404 = not in DB; 429 = rate limited — all silent
+        } catch (e) { console.warn("Enrich Kaspersky failed:", e.message); }
+      }
       // OTX WHOIS for domains — registrant org, country, registration age
       if (cat === "DOMAIN") {
         try {
@@ -2387,11 +2425,16 @@ export default function App() {
       // MalwareBazaar only indexes confirmed malware — existence = Malicious.
       // Individual vendor verdicts (NO_THREAT, LIKELY_MALICIOUS) are ignored.
       let verdict = "Unknown";
-      if (results.threatfox) verdict = "Malicious";
+      // Kaspersky Zone=Red is a strong signal from a first-party AV vendor —
+      // check it first alongside the explicit threat feeds.
+      if (results.kaspersky?.zone === "red") verdict = "Malicious";
+      else if (results.threatfox) verdict = "Malicious";
       else if (results.urlhaus?.status === "online") verdict = "Malicious";
       else if (results.malwarebazaar) verdict = "Malicious";
       else if (results.urlhaus?.status === "offline") verdict = "Suspicious";
       else if (results.otx?.whitelisted === true) verdict = "Whitelisted";
+      // Kaspersky green zone = whitelisted per Kaspersky's own reputation database.
+      else if (results.kaspersky?.zone === "green") verdict = "Whitelisted";
       // CIRCL known-legitimate: NSRL/community-attested legit file, trust > 50.
       // Lower priority than active-threat signals above, higher than everything else.
       else if (results.circl?.legit) verdict = "Whitelisted";
@@ -2399,6 +2442,7 @@ export default function App() {
       else if ((results.otx?.pulses || 0) >= 9) verdict = "Malicious";
       else if ((results.abuseipdb?.score || 0) >= 80) verdict = "Malicious";
       else if ((results.abuseipdb?.score || 0) >= 25) verdict = "Suspicious";
+      else if (results.kaspersky?.zone === "yellow") verdict = "Suspicious";
       else if ((results.otx?.pulses || 0) > 0) verdict = "Suspicious";
       // Recently registered domain with OTX data = suspicious
       else if (results.whois && results.whois.ageDays !== null && results.whois.ageDays < 90 && results.otx) verdict = "Suspicious";
@@ -2412,7 +2456,7 @@ export default function App() {
       }
 
       // OTX-only with 0 pulses and no other signals → Unknown
-      const hasNonOtx = results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin || results.abuseipdb || results.urlscan || results.circl;
+      const hasNonOtx = results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin || results.abuseipdb || results.urlscan || results.circl || results.kaspersky;
       if (!hasNonOtx && results.otx && results.otx.pulses === 0 && !results.otx.validation) verdict = "Unknown";
 
       // Final verdict normalization — catch any non-standard strings
@@ -2899,7 +2943,7 @@ export default function App() {
   // Enrichment row builder — extracts structured data from enrichCache for export
   const enrichRow = (cat, value) => {
     const e = enrichCache[`${cat}::${value}`]?.data;
-    if (!e) return { verdict: "", malware: "", detections: "", fileName: "", pulses: "", country: "", asn: "", firstSeen: "", lastSeen: "", urlscan: "", shodanPorts: "", shodanCVEs: "", shodanTags: "", signer: "", circl: "" };
+    if (!e) return { verdict: "", malware: "", detections: "", fileName: "", pulses: "", country: "", asn: "", firstSeen: "", lastSeen: "", urlscan: "", shodanPorts: "", shodanCVEs: "", shodanTags: "", signer: "", circl: "", kaspersky: "" };
     const cs = e.malwarebazaar?.codeSign;
     return {
       verdict: e._verdict || "",
@@ -2917,10 +2961,17 @@ export default function App() {
       shodanTags: e.shodan?.tags?.join(" ") || "",
       signer: cs ? [cs.subject && `Subject: ${cs.subject}`, cs.issuer && `Issuer: ${cs.issuer}`, cs.algorithm].filter(Boolean).join(" | ") : "",
       circl: e.circl ? [e.circl.legit ? "Known Legitimate" : "CIRCL Known", e.circl.fileName, e.circl.productName, e.circl.trust != null ? `Trust ${e.circl.trust}` : null].filter(Boolean).join(" · ") : "",
+      kaspersky: e.kaspersky ? [
+        `${e.kaspersky.zone.charAt(0).toUpperCase() + e.kaspersky.zone.slice(1)} Zone`,
+        e.kaspersky.fileStatus,
+        e.kaspersky.detections,
+        e.kaspersky.categories,
+        e.kaspersky.hits != null ? `${e.kaspersky.hits} hits` : null,
+      ].filter(Boolean).join(" · ") : "",
     };
   };
-  const ENRICH_HEADERS = ["Verdict", "Malware", "Detections", "FileName", "OTX Pulses", "Country", "ASN", "First Seen", "Last Seen", "URLScan", "Shodan Ports", "Shodan CVEs", "Shodan Tags", "Signer", "CIRCL"];
-  const enrichVals = (r) => [r.verdict, r.malware, r.detections, r.fileName, r.pulses, r.country, r.asn, r.firstSeen, r.lastSeen, r.urlscan, r.shodanPorts, r.shodanCVEs, r.shodanTags, r.signer, r.circl];
+  const ENRICH_HEADERS = ["Verdict", "Malware", "Detections", "FileName", "OTX Pulses", "Country", "ASN", "First Seen", "Last Seen", "URLScan", "Shodan Ports", "Shodan CVEs", "Shodan Tags", "Signer", "CIRCL", "Kaspersky"];
+  const enrichVals = (r) => [r.verdict, r.malware, r.detections, r.fileName, r.pulses, r.country, r.asn, r.firstSeen, r.lastSeen, r.urlscan, r.shodanPorts, r.shodanCVEs, r.shodanTags, r.signer, r.circl, r.kaspersky];
 
   const exportAllCSV = () => {
     const rows = [["Type", "IOC", ...ENRICH_HEADERS]];
@@ -3630,6 +3681,7 @@ export default function App() {
                           const hasWhois = !!d.whois;
                           const hasShodan = !!d.shodan;
                           const hasCircl = !!d.circl;
+                          const hasKaspersky = !!d.kaspersky;
                           const hasPivotIP = hasUrlscan && d.urlscan.servingIP && d.urlscan.servingIP !== arr[i];
                           const isCondensed = isRowCollapsed;
                           // Compact row: bold label on the left, chips flowing right
@@ -3642,7 +3694,7 @@ export default function App() {
                           return (
                           <div className="ml-4 mb-1.5 text-[10px]">
                             {/* ── VERDICT & IDENTITY ── */}
-                            {!isCondensed && (hasVerdict || hasThreatfox || hasMalBaz || hasUrlhaus || hasCircl) && secRow("Verdict & Identity", (
+                            {!isCondensed && (hasVerdict || hasThreatfox || hasMalBaz || hasUrlhaus || hasCircl || (hasKaspersky && isHash)) && secRow("Verdict & Identity", (
                               <>
                                   {hasVerdict && (
                                     <span className="rounded-full px-2 py-0.5 font-bold" style={{
@@ -3697,11 +3749,29 @@ export default function App() {
                                       {d.circl.trust != null ? ` · Trust ${d.circl.trust}/100` : ""}
                                     </span>
                                   )}
+                                  {isHash && d.kaspersky && (() => {
+                                    const z = d.kaspersky.zone;
+                                    const c = z === "red" ? "#ff4d6d" : z === "yellow" ? "#fbbf24" : z === "green" ? "#4ade80" : "#94a3b8";
+                                    const bg = z === "red" ? "rgba(255,77,109,0.12)" : z === "yellow" ? "rgba(251,191,36,0.10)" : z === "green" ? "rgba(74,222,128,0.10)" : "rgba(148,163,184,0.08)";
+                                    const bd = z === "red" ? "rgba(255,77,109,0.35)" : z === "yellow" ? "rgba(251,191,36,0.35)" : z === "green" ? "rgba(74,222,128,0.35)" : "rgba(148,163,184,0.25)";
+                                    const icon = z === "red" ? "🔴" : z === "yellow" ? "🟡" : z === "green" ? "🟢" : "⚪";
+                                    return (
+                                      <span className="rounded-full px-2 py-0.5" style={{ color: c, backgroundColor: bg, border: `1px solid ${bd}` }}
+                                        title="Kaspersky OpenTIP — vendor threat intelligence">
+                                        {icon} Kaspersky · {z.charAt(0).toUpperCase() + z.slice(1)} Zone
+                                        {d.kaspersky.fileStatus ? ` · ${d.kaspersky.fileStatus}` : ""}
+                                        {d.kaspersky.detections ? ` · ${d.kaspersky.detections}` : ""}
+                                        {d.kaspersky.productName ? ` · ${d.kaspersky.productName}` : ""}
+                                        {d.kaspersky.size ? ` · ${d.kaspersky.size}` : ""}
+                                        {d.kaspersky.signer ? ` · Signer: ${d.kaspersky.signer}` : ""}
+                                      </span>
+                                    );
+                                  })()}
                               </>
                             ))}
 
                             {/* ── REPUTATION ── */}
-                            {!isCondensed && (hasOtx || hasAbuse || hasValidin || d._verdict === "Unknown") && secRow("Reputation", (
+                            {!isCondensed && (hasOtx || hasAbuse || hasValidin || (hasKaspersky && !isHash) || d._verdict === "Unknown") && secRow("Reputation", (
                               <>
                                   {d._verdict === "Unknown" && d.domainReg?.state !== "deleted" && (
                                     <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#5d7382", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.2)" }}>
@@ -3731,6 +3801,22 @@ export default function App() {
                                       Validin{d.validin.verdict ? ` · ${d.validin.verdict}` : ""}{d.validin.score !== null ? ` (${d.validin.score}/10)` : ""}{d.validin.maliciousCount > 0 ? ` · Malicious x ${d.validin.maliciousCount}` : ""}{d.validin.titles?.length ? ` · ${d.validin.titles.join(" · ")}` : ""}
                                     </span>
                                   )}
+                                  {!isHash && d.kaspersky && (() => {
+                                    const z = d.kaspersky.zone;
+                                    const c = z === "red" ? "#ff4d6d" : z === "yellow" ? "#fbbf24" : z === "green" ? "#4ade80" : "#94a3b8";
+                                    const bg = z === "red" ? "rgba(255,77,109,0.12)" : z === "yellow" ? "rgba(251,191,36,0.10)" : z === "green" ? "rgba(74,222,128,0.10)" : "rgba(148,163,184,0.08)";
+                                    const bd = z === "red" ? "rgba(255,77,109,0.35)" : z === "yellow" ? "rgba(251,191,36,0.35)" : z === "green" ? "rgba(74,222,128,0.35)" : "rgba(148,163,184,0.25)";
+                                    const icon = z === "red" ? "🔴" : z === "yellow" ? "🟡" : z === "green" ? "🟢" : "⚪";
+                                    return (
+                                      <span className="rounded-full px-2 py-0.5" style={{ color: c, backgroundColor: bg, border: `1px solid ${bd}` }}
+                                        title="Kaspersky OpenTIP — vendor threat intelligence">
+                                        {icon} Kaspersky · {z.charAt(0).toUpperCase() + z.slice(1)} Zone
+                                        {d.kaspersky.categories ? ` · ${d.kaspersky.categories}` : ""}
+                                        {d.kaspersky.hits != null ? ` · ${d.kaspersky.hits} hits` : ""}
+                                        {d.kaspersky.country ? ` · ${d.kaspersky.country}` : ""}
+                                      </span>
+                                    );
+                                  })()}
                               </>
                             ))}
 
