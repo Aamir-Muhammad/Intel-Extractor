@@ -2454,6 +2454,8 @@ export default function App() {
   const [customAddCat, setCustomAddCat] = useState(null);           // category currently showing add input
   const [customAddValue, setCustomAddValue] = useState("");
   const [condensed, setCondensed] = useState(false);
+  const [expiringTokens, setExpiringTokens] = useState([]);
+  const [tokenBannerDismissed, setTokenBannerDismissed] = useState(false);
   const [cardCondensed, setCardCondensed] = useState({});        // { cat: true } per-card collapse
   const [rowOverride, setRowOverride] = useState({});            // { "cat::value": bool } per-IOC override
   const [dragging, setDragging] = useState(null);               // { cat, value }
@@ -2840,6 +2842,23 @@ export default function App() {
     return () => clearTimeout(t);
   }, [cooldown]);
 
+  // Token expiry check — runs once on mount. Populates the top banner
+  // when any tracked API key is within 30 days of expiring.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${WORKER_BASE}/token-status`);
+        if (!r.ok) return;
+        const j = await r.json();
+        if (cancelled || !Array.isArray(j?.tokens)) return;
+        const expiring = j.tokens.filter((t) => typeof t.daysLeft === "number" && t.daysLeft <= 30);
+        setExpiringTokens(expiring);
+      } catch { /* endpoint not deployed yet — silent */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   const runPaste = () => {
     resetResults();
     try {
@@ -2961,6 +2980,44 @@ export default function App() {
         *::-webkit-scrollbar-corner { background: #070b10; }
       `}</style>
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
+        {!tokenBannerDismissed && expiringTokens.length > 0 && (() => {
+          const mostUrgent = expiringTokens.reduce((a, b) => (a.daysLeft <= b.daysLeft ? a : b));
+          const isCritical = mostUrgent.daysLeft <= 7;
+          const isExpired = mostUrgent.daysLeft < 0;
+          const color = isExpired || isCritical ? "#ff4d6d" : "#fbbf24";
+          const bg = isExpired || isCritical ? "rgba(255,77,109,0.10)" : "rgba(251,191,36,0.10)";
+          const border = isExpired || isCritical ? "rgba(255,77,109,0.4)" : "rgba(251,191,36,0.4)";
+          return (
+            <div className="mb-4 rounded-xl px-4 py-3 flex items-start gap-3 flex-wrap"
+              style={{ backgroundColor: bg, border: `1px solid ${border}`, color }}>
+              <span className="text-lg leading-none">{isExpired || isCritical ? "🔴" : "⚠️"}</span>
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-semibold mb-1">
+                  {expiringTokens.length === 1
+                    ? isExpired
+                      ? `${mostUrgent.label} token has expired (${Math.abs(mostUrgent.daysLeft)} days ago)`
+                      : `${mostUrgent.label} token expires in ${mostUrgent.daysLeft} day${mostUrgent.daysLeft !== 1 ? "s" : ""}`
+                    : `${expiringTokens.length} API tokens are near expiry`}
+                </div>
+                <div className="text-xs opacity-90 flex flex-wrap gap-x-3 gap-y-1">
+                  {expiringTokens.map((t) => (
+                    <span key={t.label}>
+                      <span className="font-semibold">{t.label}</span>: {t.daysLeft < 0 ? `expired ${Math.abs(t.daysLeft)}d ago` : `${t.daysLeft}d left`} · <a href={t.portal} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline" }}>renew</a>
+                    </span>
+                  ))}
+                </div>
+                <div className="text-[10px] opacity-70 mt-1">
+                  After renewing, update <code style={{ fontFamily: "monospace" }}>*_TOKEN_ISSUED</code> in the Cloudflare Worker variables.
+                </div>
+              </div>
+              <button onClick={() => setTokenBannerDismissed(true)}
+                className="rounded-md p-1 opacity-60 hover:opacity-100 shrink-0"
+                title="Hide until next reload">
+                <X size={14} />
+              </button>
+            </div>
+          );
+        })()}
         <div className="flex items-start gap-3 mb-5 flex-wrap">
           <div className="flex h-11 w-11 items-center justify-center rounded-lg shrink-0"
             style={{ backgroundColor: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.35)", boxShadow: "0 0 22px rgba(0,229,255,0.25)" }}>
