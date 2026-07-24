@@ -1948,6 +1948,36 @@ export default function App() {
             };
           }
         } catch (e) { console.warn("Enrich OTX failed:", e.message); }
+
+        // OTX Passive DNS — historical resolution records for infrastructure pivoting.
+        // Domain query returns every IP the domain resolved to (with dates).
+        // IP query returns every hostname that pointed to the IP.
+        // Free-tier friendly — uses the existing OTX key.
+        if (["IPV4","IPV6","DOMAIN"].includes(cat)) {
+          try {
+            const otxTypeMap = { IPV4: "IPv4", IPV6: "IPv6", DOMAIN: "domain" };
+            const pd = await callEnrich("otx", otxTypeMap[cat], "passive_dns");
+            if (pd && !pd.error && Array.isArray(pd.passive_dns) && pd.passive_dns.length) {
+              // Sort by 'last' timestamp descending (freshest first) and cap at 20
+              const sorted = pd.passive_dns
+                .filter((r) => r.hostname || r.address)
+                .sort((a, b) => String(b.last || "").localeCompare(String(a.last || "")))
+                .slice(0, 20)
+                .map((r) => ({
+                  hostname: r.hostname || null,
+                  address: r.address || null,
+                  first: r.first ? String(r.first).split("T")[0] : null,
+                  last: r.last ? String(r.last).split("T")[0] : null,
+                  recordType: r.record_type || null,
+                  asn: r.asn || null,
+                  country: r.flag_title || null,
+                }));
+              if (sorted.length) {
+                results.otxPDNS = { total: pd.count || pd.passive_dns.length, records: sorted };
+              }
+            }
+          } catch (e) { console.warn("Enrich OTX Passive DNS failed:", e.message); }
+        }
       }
       // Dedicated WHOIS/ASN + Geo lookup for IP addresses via IPLocate.io
       // Returns country (full name), city, ASN, company, and threat flags (VPN/proxy/hosting)
@@ -3701,13 +3731,14 @@ export default function App() {
                             ))}
 
                             {/* ── PIVOTS (skip for hashes) ── */}
-                            {!isCondensed && !isHash && hasUrlscan && (() => {
+                            {!isCondensed && !isHash && (hasUrlscan || !!d.otxPDNS) && (() => {
                               const existingUrls = new Set((displayData?.URL || []).map((u) => u.toLowerCase().replace(/\/+$/, "")));
-                              const fileUrls = new Set((d.urlscan.files || []).map((f) => f.url?.toLowerCase().replace(/\/+$/, "")).filter(Boolean));
+                              const fileUrls = new Set((d.urlscan?.files || []).map((f) => f.url?.toLowerCase().replace(/\/+$/, "")).filter(Boolean));
                               const iocNorm = arr[i].toLowerCase().replace(/\/+$/, "").replace(/^https?:\/\//i, "");
                               const seenNorm = new Set();
                               const existingDomains = new Set((displayData?.DOMAIN || []).map((x) => x.toLowerCase()));
-                              const newUrls = (d.urlscan.scannedUrls || []).filter((su) => {
+                              const existingIPs = new Set([...(displayData?.IPV4 || []), ...(displayData?.IPV6 || [])].map((x) => x.toLowerCase()));
+                              const newUrls = (d.urlscan?.scannedUrls || []).filter((su) => {
                                 const u = typeof su === "string" ? su : su.url;
                                 const stripped = u.replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
                                 if (seenNorm.has(stripped)) return false;
@@ -3724,8 +3755,23 @@ export default function App() {
                                 if (dismissedPivots.has(`url::${stripped}::${arr[i]}`)) return false;
                                 return true;
                               });
-                              const hasFiles = d.urlscan.files && d.urlscan.files.filter((f) => !dismissedPivots.has(`file::${f.sha256 || f.filename}::${arr[i]}`)).length > 0;
-                              if (!newUrls.length && !hasFiles) return null;
+                              const hasFiles = d.urlscan?.files && d.urlscan.files.filter((f) => !dismissedPivots.has(`file::${f.sha256 || f.filename}::${arr[i]}`)).length > 0;
+                              // Passive DNS pivots — filter out anything already in cards
+                              const pdnsRecords = (d.otxPDNS?.records || []).filter((r) => {
+                                const target = cat === "DOMAIN" ? r.address : r.hostname;
+                                if (!target) return false;
+                                const t = target.toLowerCase();
+                                if (t === iocNorm) return false;
+                                if (dismissedPivots.has(`pdns::${t}::${arr[i]}`)) return false;
+                                // Filter out ones already in cards (unless previously added as pivot)
+                                if (cat === "DOMAIN") {
+                                  if (!isPivotAdded("IPV4", t) && existingIPs.has(t)) return false;
+                                } else {
+                                  if (!isPivotAdded("DOMAIN", t) && existingDomains.has(t)) return false;
+                                }
+                                return true;
+                              });
+                              if (!newUrls.length && !hasFiles && !pdnsRecords.length) return null;
                               return secRow("Pivots", (
                                   <div className="flex flex-col gap-0.5 w-full">
                                     {newUrls.map((su, ui) => {
@@ -3763,7 +3809,7 @@ export default function App() {
                                         </span>
                                       );
                                     })}
-                                    {(d.urlscan.files || []).filter((f) => !dismissedPivots.has(`file::${f.sha256 || f.filename}::${arr[i]}`)).map((f, fi) => {
+                                    {(d.urlscan?.files || []).filter((f) => !dismissedPivots.has(`file::${f.sha256 || f.filename}::${arr[i]}`)).map((f, fi) => {
                                       const hashAdded = f.sha256 && isPivotAdded("SHA256", f.sha256);
                                       const fileAdded = f.filename && isPivotAdded("FILE_NAME", f.filename);
                                       const urlAdded = f.url && isPivotAdded("URL", f.url.replace(/^https?:\/\//i, "").replace(/\/+$/, ""));
@@ -3790,6 +3836,38 @@ export default function App() {
                                             )}
                                           </span>
                                           <button onClick={() => dismissPivot(`file::${f.sha256 || f.filename}::${arr[i]}`)} className="rounded p-0.5 shrink-0" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
+                                        </span>
+                                      );
+                                    })}
+                                    {pdnsRecords.length > 0 && (
+                                      <div className="flex items-center gap-1.5 mt-1 mb-0.5">
+                                        <span className="text-[9px] uppercase tracking-widest font-bold" style={{ color: "#5d7382" }}>Passive DNS</span>
+                                        <span className="text-[9px]" style={{ color: "#5d7382" }}>({d.otxPDNS.total} total observations, showing top {pdnsRecords.length} by recency)</span>
+                                      </div>
+                                    )}
+                                    {pdnsRecords.map((r, pi) => {
+                                      // For DOMAIN queries, pivot the IP addresses. For IP queries, pivot the hostnames.
+                                      const target = cat === "DOMAIN" ? r.address : r.hostname;
+                                      const targetCat = cat === "DOMAIN" ? "IPV4" : "DOMAIN";
+                                      const added = isPivotAdded(targetCat, target);
+                                      return (
+                                        <span key={`pd${pi}`} className="rounded-full px-2 py-0.5 flex items-center gap-1.5" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.05)", border: "1px solid rgba(148,163,184,0.2)" }}>
+                                          <span className="flex-1 min-w-0 flex flex-wrap items-center gap-1.5">
+                                            <span style={{ color: "#7c9cff", fontWeight: 600 }}>{target}</span>
+                                            {r.recordType && <span className="text-[9px] px-1 rounded" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.12)" }}>{r.recordType}</span>}
+                                            <span className="text-[10px]" style={{ color: "#5d7382" }}>{r.first} → {r.last}</span>
+                                            {r.asn && <span className="text-[10px]" style={{ color: "#8aa0ad" }}>· {r.asn}</span>}
+                                            {r.country && <span className="text-[10px]" style={{ color: "#8aa0ad" }}>· {r.country}</span>}
+                                          </span>
+                                          {added ? (
+                                            <>
+                                              <span className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>Added</span>
+                                              <button onClick={() => removePivotIOC(targetCat, target)} className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove</button>
+                                            </>
+                                          ) : (
+                                            <button onClick={() => addPivotIOC(targetCat, target, `Passive DNS of ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#04111a", backgroundColor: "#7c9cff", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>+ Add as IOC</button>
+                                          )}
+                                          <button onClick={() => dismissPivot(`pdns::${target.toLowerCase()}::${arr[i]}`)} className="rounded p-0.5 shrink-0" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
                                         </span>
                                       );
                                     })}
