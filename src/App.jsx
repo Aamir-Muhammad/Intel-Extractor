@@ -37,7 +37,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v71";
+const APP_VERSION = "v73";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
