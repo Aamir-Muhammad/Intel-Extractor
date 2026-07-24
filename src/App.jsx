@@ -10,7 +10,34 @@ import {
 //  Backend proxy
 // ============================================================
 const WORKER_BASE = "https://ioc-parser.aamirmuhd.workers.dev";
-const APP_VERSION = "v70";
+
+// Anonymous per-browser session id for usage analytics. Generated once,
+// persisted in localStorage. No PII — just a random string so the dashboard
+// can group activity by browser. Cleared if the user clears site data.
+const getSessionId = () => {
+  try {
+    let sid = localStorage.getItem("intel-session-id");
+    if (!sid) {
+      sid = "s-" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+      localStorage.setItem("intel-session-id", sid);
+    }
+    return sid;
+  } catch { return "s-nostorage"; }
+};
+const SESSION_ID = getSessionId();
+
+// Fire-and-forget analytics beacon. Never blocks, never throws into the UI.
+const logEvent = (payload) => {
+  try {
+    fetch(`${WORKER_BASE}/log`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, session_id: SESSION_ID }),
+      keepalive: true, // allows the request to outlive the page if needed
+    }).catch(() => {});
+  } catch { /* analytics must never break the app */ }
+};
+const APP_VERSION = "v71";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -1761,15 +1788,19 @@ export default function App() {
     if (enrichCache[key]) return;
     setEnrichCache((c) => ({ ...c, [key]: { loading: true } }));
     const results = {};
+    const _t0 = Date.now();
+    const _apiLog = []; // { api, ms } per upstream call, for analytics
     const callEnrich = async (api, otxType, otxSection, overrideValue, extra) => {
       const body = { api, value: overrideValue || value };
       if (otxType) body.otx_type = otxType;
       if (otxSection) body.otx_section = otxSection;
       if (extra && typeof extra === "object") Object.assign(body, extra);
+      const _apiT0 = Date.now();
       const r = await fetch(`${WORKER_BASE}/enrich`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+      _apiLog.push({ api, status: r.status, ms: Date.now() - _apiT0 });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const text = await r.text();
       try { return JSON.parse(text); } catch {
@@ -2467,9 +2498,30 @@ export default function App() {
       const hasData = Object.keys(results).length > 0;
       if (hasData) results._verdict = verdict;
       setEnrichCache((c) => ({ ...c, [key]: { loading: false, data: hasData ? results : null, error: !hasData } }));
+      logEvent({
+        event_type: "enrich",
+        ioc_type: cat,
+        ioc_value: value,
+        verdict: hasData ? verdict : "Unknown",
+        duration_ms: Date.now() - _t0,
+        upstream_apis: _apiLog,
+        extra: {
+          malware: results.threatfox?.malware || results.malwarebazaar?.family || null,
+          kaspersky_zone: results.kaspersky?.zone || null,
+        },
+      });
     } catch (e) {
       console.warn("Enrich overall failed:", e.message);
       setEnrichCache((c) => ({ ...c, [key]: { loading: false, data: null, error: true } }));
+      logEvent({
+        event_type: "enrich",
+        ioc_type: cat,
+        ioc_value: value,
+        verdict: "Error",
+        duration_ms: Date.now() - _t0,
+        upstream_apis: _apiLog,
+        error: String(e.message || e).slice(0, 200),
+      });
     }
   };
 
@@ -2834,6 +2886,8 @@ export default function App() {
     if (articleText) setRawArticle(articleText);
     if (articleBody) setArticleClean(articleBody);
     setLoading(false);
+    const _iocCount = Object.values(data || {}).reduce((s, arr) => s + (Array.isArray(arr) ? arr.length : 0), 0);
+    logEvent({ event_type: "parse_url", extra: { url, ioc_count: _iocCount, via: apiMeta?.via || null } });
   };
 
   // ---- On-demand AI summary: fires only when the user opens the dropdown,
@@ -2923,6 +2977,7 @@ export default function App() {
       Object.entries(parsed).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "api"; }); });
       { const { data: wd, refs: wr } = applyWhitelistAndRefs(parsed); setIocData(wd); setReferences(wr); } setOriginData(origin); setRegistryDetails(details);
       setSourceUrl("(pasted JSON)");
+      logEvent({ event_type: "parse_paste", extra: { ioc_count: Object.values(parsed).reduce((s, a) => s + (Array.isArray(a) ? a.length : 0), 0) } });
     } catch (e) { setError(`Could not parse JSON: ${e.message}`); }
   };
 
@@ -2937,6 +2992,7 @@ export default function App() {
     Object.entries(ex.data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "eng"; }); });
     { const { data: wd, refs: wr } = applyWhitelistAndRefs(ex.data); setIocData(wd); setReferences(wr); } setOriginData(origin); setRegistryDetails(ex.registryDetails);
     setSourceUrl("(raw paste)");
+    logEvent({ event_type: "parse_raw", extra: { ioc_count: Object.values(ex.data).reduce((s, a) => s + (Array.isArray(a) ? a.length : 0), 0) } });
   };
 
 
@@ -2980,6 +3036,7 @@ export default function App() {
       arr.forEach((orig, i) => rows.push([cat, shown[i], ...enrichVals(enrichRow(cat, orig))]));
     });
     downloadBlob(new Blob([toCSV(rows)], { type: "text/csv;charset=utf-8" }), "all_iocs.csv");
+    logEvent({ event_type: "export", extra: { format: "csv", scope: "all", ioc_count: total } });
   };
   const exportAllXLSX = () => {
     const all = [["Type", "IOC", ...ENRICH_HEADERS]];
@@ -2993,6 +3050,7 @@ export default function App() {
       sheets.push({ name: cat, rows: [["IOC", ...ENRICH_HEADERS], ...arr.map((orig, i) => [shown[i], ...enrichVals(enrichRow(cat, orig))])] });
     });
     downloadBlob(buildWorkbook(sheets), "all_iocs.xlsx");
+    logEvent({ event_type: "export", extra: { format: "xlsx", scope: "all", ioc_count: total } });
   };
   const exportTypeCSV = (cat, arr) => {
     const shown = proc(arr, cat);
