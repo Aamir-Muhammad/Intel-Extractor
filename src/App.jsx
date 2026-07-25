@@ -3,7 +3,7 @@ import * as XLSX from "xlsx";
 import {
   Shield, Search, Download, Copy, Check, Loader2, Globe,
   ClipboardPaste, AlertTriangle, ShieldOff, Trash2, Wand2,
-  Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles, ChevronDown, RefreshCw, FileUp, Pencil
+  Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles, ChevronDown, RefreshCw, FileUp, Pencil, Share2
 } from "lucide-react";
 
 // ============================================================
@@ -37,7 +37,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v73";
+const APP_VERSION = "v74";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -2550,6 +2550,7 @@ export default function App() {
   const [customAddCat, setCustomAddCat] = useState(null);           // category currently showing add input
   const [customAddValue, setCustomAddValue] = useState("");
   const [condensed, setCondensed] = useState(false);
+  const [graphView, setGraphView] = useState(false);
   const [expiringTokens, setExpiringTokens] = useState([]);
   const [tokenBannerDismissed, setTokenBannerDismissed] = useState(false);
   const [cardCondensed, setCardCondensed] = useState({});        // { cat: true } per-card collapse
@@ -3175,6 +3176,17 @@ export default function App() {
           <span className="text-3xl font-medium tabular-nums" style={{ color: "#00e5ff", letterSpacing: "-1px" }}>{entries.length}</span>
           <span className="text-[10px] uppercase" style={{ color: "#5d7382", letterSpacing: "1.5px" }}>types</span>
           <div className="ml-auto flex items-center gap-2">
+            <button onClick={() => setGraphView((v) => !v)}
+              title={graphView ? "Switch to card view" : "Switch to infrastructure graph"}
+              className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold"
+              style={{
+                color: graphView ? "#04111a" : "#00e5ff",
+                backgroundColor: graphView ? "#00e5ff" : "rgba(0,229,255,0.14)",
+                border: `1px solid rgba(0,229,255,${graphView ? "1" : "0.55"})`,
+                boxShadow: graphView ? "0 0 18px rgba(0,229,255,0.5)" : "none",
+              }}>
+              <Share2 size={15} /> {graphView ? "Cards" : "Graph"}
+            </button>
             <button onClick={() => { setCondensed((v) => !v); setRowOverride({}); setCardCondensed({}); }}
               title={condensed ? "Expand all enrichment sections" : "Collapse to verdicts only"}
               className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold"
@@ -3514,7 +3526,13 @@ export default function App() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 gap-4">
+        {graphView && entries.length > 0 && (
+          <div className="mb-4">
+            <ThreatGraph iocData={iocData} enrichCache={enrichCache} colorFor={colorFor} />
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-4" style={{ display: graphView ? "none" : "grid" }}>
           {entries.map(([cat, arr]) => {
             const c = colorFor(cat);
             const isDefanged = defangAll || !!defangMap[cat];
@@ -4240,6 +4258,414 @@ export default function App() {
           IOC EXTRACTION · THREAT HUNTING ARTIFACTS · HUNTING QUERY GENERATION
         </p>
       </div>
+    </div>
+  );
+}
+
+// ============================================================
+//  ThreatGraph — force-directed infrastructure graph on Canvas.
+//  Nodes: IOCs + derived infrastructure (serving IPs, passive-DNS
+//  IPs, hosted file hashes). Edges: real hunting relationships.
+//  Verdict-driven glow, particle-flow edges, hover spotlight,
+//  drag, zoom, entrance animation.
+// ============================================================
+function ThreatGraph({ iocData, enrichCache, colorFor }) {
+  const canvasRef = useRef(null);
+  const wrapRef = useRef(null);
+  const stateRef = useRef({ nodes: [], edges: [], t: 0 });
+  const camRef = useRef({ x: 0, y: 0, zoom: 1, dragNode: null, panning: false, lastX: 0, lastY: 0, hover: null });
+  const [dims, setDims] = useState({ w: 900, h: 600 });
+  const [hoverInfo, setHoverInfo] = useState(null);
+  const [selected, setSelected] = useState(null);
+
+  // ---- Build the graph model from IOCs + enrichment ----
+  const model = useMemo(() => {
+    if (!iocData) return { nodes: [], edges: [], stats: { nodes: 0, edges: 0, derived: 0 } };
+    const nodes = new Map(); // id -> node
+    const edges = [];
+    const norm = (v) => String(v).toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+
+    const verdictOf = (cat, val) => enrichCache[`${cat}::${val}`]?.data?._verdict || null;
+    const addNode = (id, label, cat, derived, verdict) => {
+      const key = norm(id);
+      if (nodes.has(key)) {
+        // Upgrade a derived node to a real one if it also appears as an IOC
+        if (!derived) { const n = nodes.get(key); n.derived = false; if (verdict) n.verdict = verdict; }
+        return nodes.get(key);
+      }
+      const n = {
+        id: key, label: label || id, cat, derived: !!derived,
+        verdict: verdict || null,
+        x: (Math.random() - 0.5) * 200, y: (Math.random() - 0.5) * 200,
+        vx: 0, vy: 0,
+        r: derived ? 7 : 11,
+      };
+      nodes.set(key, n);
+      return n;
+    };
+    const addEdge = (aId, bId, kind, color) => {
+      const a = norm(aId), b = norm(bId);
+      if (a === b || !nodes.has(a) || !nodes.has(b)) return;
+      edges.push({ a, b, kind, color: color || "rgba(120,160,180,0.35)" });
+    };
+
+    // 1. Primary IOC nodes
+    Object.entries(iocData).forEach(([cat, arr]) => {
+      if (!Array.isArray(arr)) return;
+      arr.forEach((val) => addNode(val, val, cat, false, verdictOf(cat, val)));
+    });
+
+    // 2. Derived nodes + edges from enrichment
+    Object.entries(iocData).forEach(([cat, arr]) => {
+      if (!Array.isArray(arr)) return;
+      arr.forEach((val) => {
+        const d = enrichCache[`${cat}::${val}`]?.data;
+        if (!d) return;
+        const srcId = norm(val);
+
+        // Serving IP (strong: same box)
+        if (d.urlscan?.servingIP && norm(d.urlscan.servingIP) !== srcId) {
+          const ipNode = addNode(d.urlscan.servingIP, d.urlscan.servingIP, "IPV4", true, null);
+          if (d.urlscan.servingASNName) ipNode.asn = d.urlscan.servingASNName;
+          addEdge(val, d.urlscan.servingIP, "serves", "rgba(0,229,255,0.5)");
+        }
+
+        // Passive DNS (strong: historical resolution)
+        (d.otxPDNS?.records || []).forEach((r) => {
+          const target = cat === "DOMAIN" ? r.address : r.hostname;
+          if (!target) return;
+          const tcat = cat === "DOMAIN" ? "IPV4" : "DOMAIN";
+          addNode(target, target, tcat, true, null);
+          addEdge(val, target, "resolved", "rgba(45,212,191,0.4)");
+        });
+
+        // Hosted files (strong: same payload)
+        (d.urlscan?.files || []).forEach((f) => {
+          if (f.sha256) {
+            addNode(f.sha256, f.filename ? `${f.filename}` : f.sha256.slice(0, 12) + "…", "SHA256", true, null);
+            addEdge(val, f.sha256, "hosts", "rgba(255,77,109,0.45)");
+          }
+        });
+
+        // Scanned URLs on this host
+        (d.urlscan?.scannedUrls || []).forEach((su) => {
+          const u = typeof su === "string" ? su : su.url;
+          if (!u) return;
+          const un = norm(u);
+          if (un === srcId) return;
+          const ucat = un.includes("/") ? "URL" : "DOMAIN";
+          addNode(u, u, ucat, true, null);
+          addEdge(val, u, "scanned", "rgba(124,156,255,0.3)");
+        });
+      });
+    });
+
+    // 3. Shared-ASN grouping edges (faint — infrastructure signal)
+    const asnGroups = {};
+    nodes.forEach((n) => {
+      const d = enrichCache[`${n.cat}::${n.id}`]?.data;
+      const asn = d?.whoisASN?.asn || d?.urlscan?.servingASN || n.asn;
+      if (asn) { (asnGroups[asn] = asnGroups[asn] || []).push(n.id); }
+    });
+    Object.values(asnGroups).forEach((ids) => {
+      if (ids.length < 2 || ids.length > 8) return; // skip singletons and huge shared hosts
+      for (let i = 0; i < ids.length - 1; i++) addEdge(ids[i], ids[i + 1], "asn", "rgba(167,139,250,0.18)");
+    });
+
+    const nodeArr = Array.from(nodes.values());
+    return {
+      nodes: nodeArr, edges,
+      stats: { nodes: nodeArr.length, edges: edges.length, derived: nodeArr.filter((n) => n.derived).length },
+    };
+  }, [iocData, enrichCache]);
+
+  // Seed physics state when model changes
+  useEffect(() => {
+    stateRef.current.nodes = model.nodes;
+    stateRef.current.edges = model.edges;
+    stateRef.current.t = 0;
+    // reset camera to center
+    camRef.current.x = 0; camRef.current.y = 0; camRef.current.zoom = 1;
+  }, [model]);
+
+  // Resize observer
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const r = el.getBoundingClientRect();
+      setDims({ w: Math.max(320, r.width), h: Math.max(420, Math.min(720, r.width * 0.62)) });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // ---- Physics + render loop ----
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = dims.w * dpr;
+    canvas.height = dims.h * dpr;
+    ctx.scale(dpr, dpr);
+    let raf;
+
+    const catColor = (n) => colorFor(n.cat);
+    const verdictColor = (v) => v === "Malicious" ? "#ff4d6d" : v === "Suspicious" ? "#fbbf24" : v === "Whitelisted" ? "#00ff9c" : null;
+
+    const step = () => {
+      const S = stateRef.current;
+      const cam = camRef.current;
+      S.t += 1;
+      const N = S.nodes, E = S.edges;
+      const cx = dims.w / 2, cy = dims.h / 2;
+
+      // Force simulation (only run actively early, then settle to save CPU)
+      const active = S.t < 600 || cam.dragNode;
+      if (active) {
+        // Repulsion
+        for (let i = 0; i < N.length; i++) {
+          const a = N[i];
+          for (let j = i + 1; j < N.length; j++) {
+            const b = N[j];
+            let dx = a.x - b.x, dy = a.y - b.y;
+            let dist2 = dx * dx + dy * dy || 0.01;
+            const dist = Math.sqrt(dist2);
+            const force = 2600 / dist2;
+            const fx = (dx / dist) * force, fy = (dy / dist) * force;
+            a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+          }
+        }
+        // Spring along edges
+        for (const e of E) {
+          const a = N.find((n) => n.id === e.a), b = N.find((n) => n.id === e.b);
+          if (!a || !b) continue;
+          const dx = b.x - a.x, dy = b.y - a.y;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+          const target = e.kind === "asn" ? 160 : 95;
+          const k = (dist - target) * 0.012;
+          const fx = (dx / dist) * k, fy = (dy / dist) * k;
+          a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+        }
+        // Centering + integrate
+        for (const n of N) {
+          n.vx += (0 - n.x) * 0.0016;
+          n.vy += (0 - n.y) * 0.0016;
+          if (cam.dragNode === n) { n.vx = 0; n.vy = 0; continue; }
+          n.vx *= 0.86; n.vy *= 0.86;
+          n.x += n.vx; n.y += n.vy;
+        }
+      }
+
+      // ---- Draw ----
+      ctx.clearRect(0, 0, dims.w, dims.h);
+      // Background vignette
+      const bg = ctx.createRadialGradient(cx, cy, 40, cx, cy, Math.max(dims.w, dims.h) * 0.7);
+      bg.addColorStop(0, "rgba(8,12,18,0)");
+      bg.addColorStop(1, "rgba(2,4,7,0.5)");
+      ctx.fillStyle = bg; ctx.fillRect(0, 0, dims.w, dims.h);
+
+      const toScreen = (n) => ({ x: cx + (n.x + cam.x) * cam.zoom, y: cy + (n.y + cam.y) * cam.zoom });
+      const hoverId = cam.hover;
+      const neighbors = new Set();
+      if (hoverId) {
+        for (const e of E) { if (e.a === hoverId) neighbors.add(e.b); if (e.b === hoverId) neighbors.add(e.a); }
+      }
+
+      // Edges (with flow particles)
+      for (const e of E) {
+        const a = N.find((n) => n.id === e.a), b = N.find((n) => n.id === e.b);
+        if (!a || !b) continue;
+        const pa = toScreen(a), pb = toScreen(b);
+        const dim = hoverId && !(e.a === hoverId || e.b === hoverId);
+        ctx.strokeStyle = dim ? "rgba(120,160,180,0.06)" : e.color;
+        ctx.lineWidth = e.kind === "asn" ? 0.6 : 1.1;
+        ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
+        // Flow particle
+        if (!dim && e.kind !== "asn") {
+          const prog = ((S.t * 0.01) + (e.a.charCodeAt(0) % 10) * 0.1) % 1;
+          const px = pa.x + (pb.x - pa.x) * prog, py = pa.y + (pb.y - pa.y) * prog;
+          ctx.fillStyle = e.color.replace(/[\d.]+\)$/, "0.9)");
+          ctx.beginPath(); ctx.arc(px, py, 1.8, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+
+      // Nodes
+      for (const n of N) {
+        const p = toScreen(n);
+        const base = catColor(n);
+        const vc = verdictColor(n.verdict);
+        const isHover = hoverId === n.id;
+        const isNeighbor = neighbors.has(n.id);
+        const dim = hoverId && !isHover && !isNeighbor;
+        const R = n.r * cam.zoom * (isHover ? 1.4 : 1);
+
+        // Pulsing glow for malicious/suspicious
+        let glowR = R * 2.4;
+        if (n.verdict === "Malicious") glowR *= 1.15 + 0.12 * Math.sin(S.t * 0.08);
+        else if (n.verdict === "Suspicious") glowR *= 1.05 + 0.08 * Math.sin(S.t * 0.06);
+
+        if (!dim) {
+          const g = ctx.createRadialGradient(p.x, p.y, R * 0.5, p.x, p.y, glowR);
+          const glowColor = vc || base;
+          g.addColorStop(0, glowColor + (isHover ? "cc" : "66"));
+          g.addColorStop(1, glowColor + "00");
+          ctx.fillStyle = g;
+          ctx.beginPath(); ctx.arc(p.x, p.y, glowR, 0, Math.PI * 2); ctx.fill();
+        }
+
+        // Node body
+        ctx.globalAlpha = dim ? 0.25 : 1;
+        const body = ctx.createRadialGradient(p.x - R * 0.3, p.y - R * 0.3, R * 0.2, p.x, p.y, R);
+        body.addColorStop(0, "#ffffff");
+        body.addColorStop(0.3, base);
+        body.addColorStop(1, vc || base);
+        ctx.fillStyle = body;
+        ctx.beginPath(); ctx.arc(p.x, p.y, R, 0, Math.PI * 2); ctx.fill();
+
+        // Ring for derived vs primary
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = n.derived ? "rgba(255,255,255,0.25)" : (vc || base);
+        if (n.derived) ctx.setLineDash([2, 2]);
+        ctx.beginPath(); ctx.arc(p.x, p.y, R + 1.5, 0, Math.PI * 2); ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Label (only when zoomed enough or hovered)
+        if ((cam.zoom > 0.75 || isHover) && !dim) {
+          ctx.globalAlpha = isHover ? 1 : 0.85;
+          ctx.font = `${isHover ? 12 : 10}px ui-monospace, monospace`;
+          ctx.fillStyle = isHover ? "#eafcff" : "#9fb3bd";
+          ctx.textAlign = "center";
+          const lbl = n.label.length > 26 ? n.label.slice(0, 24) + "…" : n.label;
+          ctx.fillText(lbl, p.x, p.y + R + 12);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [dims, model, colorFor]);
+
+  // ---- Pointer interaction ----
+  const pick = (mx, my) => {
+    const S = stateRef.current, cam = camRef.current;
+    const cx = dims.w / 2, cy = dims.h / 2;
+    for (let i = S.nodes.length - 1; i >= 0; i--) {
+      const n = S.nodes[i];
+      const px = cx + (n.x + cam.x) * cam.zoom, py = cy + (n.y + cam.y) * cam.zoom;
+      const R = n.r * cam.zoom + 4;
+      if ((mx - px) ** 2 + (my - py) ** 2 <= R * R) return n;
+    }
+    return null;
+  };
+  const relPos = (e) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  };
+  const onDown = (e) => {
+    const { x, y } = relPos(e);
+    const n = pick(x, y);
+    const cam = camRef.current;
+    if (n) { cam.dragNode = n; setSelected(n); }
+    else { cam.panning = true; cam.lastX = x; cam.lastY = y; }
+  };
+  const onMove = (e) => {
+    const { x, y } = relPos(e);
+    const cam = camRef.current;
+    if (cam.dragNode) {
+      const cx = dims.w / 2, cy = dims.h / 2;
+      cam.dragNode.x = (x - cx) / cam.zoom - cam.x;
+      cam.dragNode.y = (y - cy) / cam.zoom - cam.y;
+    } else if (cam.panning) {
+      cam.x += (x - cam.lastX) / cam.zoom; cam.y += (y - cam.lastY) / cam.zoom;
+      cam.lastX = x; cam.lastY = y;
+    } else {
+      const n = pick(x, y);
+      cam.hover = n ? n.id : null;
+      if (n) {
+        const d = enrichCache[`${n.cat}::${n.id}`]?.data;
+        setHoverInfo({ x, y, node: n, verdict: n.verdict, asn: n.asn || d?.whoisASN?.asn || null, country: d?.whoisASN?.country || null });
+      } else setHoverInfo(null);
+      canvasRef.current.style.cursor = n ? "pointer" : "grab";
+    }
+  };
+  const onUp = () => { const cam = camRef.current; cam.dragNode = null; cam.panning = false; };
+  const onWheel = (e) => {
+    e.preventDefault();
+    const cam = camRef.current;
+    const factor = e.deltaY < 0 ? 1.12 : 0.89;
+    cam.zoom = Math.max(0.3, Math.min(3.5, cam.zoom * factor));
+  };
+
+  if (!iocData || model.nodes.length === 0) {
+    return (
+      <div className="rounded-xl p-10 text-center" style={{ background: "rgba(10,14,20,0.72)", border: "1px solid rgba(120,160,180,0.16)" }}>
+        <p className="text-sm" style={{ color: "#5d7382" }}>No IOCs to graph yet. Extract and enrich indicators to see the infrastructure graph.</p>
+      </div>
+    );
+  }
+
+  const legendItems = [
+    ["IPV4", "IP address"], ["DOMAIN", "Domain"], ["URL", "URL"],
+    ["SHA256", "File hash"], ["EMAIL", "Email"],
+  ];
+
+  return (
+    <div ref={wrapRef} className="rounded-xl overflow-hidden relative"
+      style={{ background: "radial-gradient(1200px 600px at 50% 0%, rgba(0,229,255,0.06), transparent 60%), #05070a", border: "1px solid rgba(120,160,180,0.2)" }}>
+      {/* Stats bar */}
+      <div className="absolute top-3 left-3 z-10 flex items-center gap-3 rounded-lg px-3 py-1.5 text-[11px]"
+        style={{ background: "rgba(10,14,20,0.8)", border: "1px solid rgba(120,160,180,0.2)", backdropFilter: "blur(6px)", color: "#9fb3bd" }}>
+        <span><span style={{ color: "#00ff9c", fontWeight: 700 }}>{model.stats.nodes}</span> nodes</span>
+        <span><span style={{ color: "#00e5ff", fontWeight: 700 }}>{model.stats.edges}</span> links</span>
+        <span><span style={{ color: "#c084fc", fontWeight: 700 }}>{model.stats.derived}</span> derived</span>
+      </div>
+      {/* Legend */}
+      <div className="absolute top-3 right-3 z-10 flex flex-wrap gap-2 rounded-lg px-3 py-1.5 max-w-[60%] justify-end"
+        style={{ background: "rgba(10,14,20,0.8)", border: "1px solid rgba(120,160,180,0.2)", backdropFilter: "blur(6px)" }}>
+        {legendItems.map(([cat, label]) => (
+          <span key={cat} className="flex items-center gap-1 text-[10px]" style={{ color: "#9fb3bd" }}>
+            <span style={{ width: 8, height: 8, borderRadius: 99, background: colorFor(cat), boxShadow: `0 0 6px ${colorFor(cat)}` }} />
+            {label}
+          </span>
+        ))}
+        <span className="flex items-center gap-1 text-[10px]" style={{ color: "#9fb3bd" }}>
+          <span style={{ width: 8, height: 8, borderRadius: 99, border: "1.5px dashed rgba(255,255,255,0.4)" }} /> derived
+        </span>
+      </div>
+      {/* Hint */}
+      <div className="absolute bottom-3 left-3 z-10 text-[10px]" style={{ color: "#5d7382" }}>
+        drag nodes · scroll to zoom · drag canvas to pan · hover to focus
+      </div>
+
+      <canvas ref={canvasRef}
+        style={{ width: dims.w, height: dims.h, display: "block", touchAction: "none" }}
+        onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp} onWheel={onWheel}
+      />
+
+      {/* Hover card */}
+      {hoverInfo && (
+        <div className="absolute z-20 pointer-events-none rounded-lg px-3 py-2 text-[11px]"
+          style={{
+            left: Math.min(hoverInfo.x + 14, dims.w - 220), top: Math.min(hoverInfo.y + 14, dims.h - 90),
+            background: "rgba(10,14,20,0.95)", border: `1px solid ${colorFor(hoverInfo.node.cat)}66`,
+            backdropFilter: "blur(8px)", minWidth: 180, maxWidth: 260,
+            boxShadow: `0 0 24px ${colorFor(hoverInfo.node.cat)}33`,
+          }}>
+          <div className="font-bold break-all mb-1" style={{ color: colorFor(hoverInfo.node.cat) }}>{hoverInfo.node.label}</div>
+          <div style={{ color: "#7f95a3" }}>{hoverInfo.node.cat}{hoverInfo.node.derived ? " · derived" : ""}</div>
+          {hoverInfo.verdict && (
+            <div style={{ color: hoverInfo.verdict === "Malicious" ? "#ff4d6d" : hoverInfo.verdict === "Suspicious" ? "#fbbf24" : "#00ff9c", fontWeight: 700, marginTop: 2 }}>
+              {hoverInfo.verdict === "Malicious" ? "🔴" : hoverInfo.verdict === "Suspicious" ? "🟡" : "🟢"} {hoverInfo.verdict}
+            </div>
+          )}
+          {hoverInfo.asn && <div style={{ color: "#a78bfa", marginTop: 2 }}>{hoverInfo.asn}</div>}
+          {hoverInfo.country && <div style={{ color: "#8aa0ad" }}>{hoverInfo.country}</div>}
+        </div>
+      )}
     </div>
   );
 }
