@@ -37,7 +37,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v75";
+const APP_VERSION = "v76";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -302,14 +302,18 @@ const dateFromAgeDays = (ageDays, refDateStr) => {
   return ref.toISOString().split("T")[0];
 };
 
-// Smart age: "18 Hours", "28 Days", "1.2 Years"
+// Smart age: "18 Hours", "28 Days", "5 Months", "1.2 Years"
 const smartAge = (days) => {
   if (days == null) return "";
   if (days < 1) {
     const hours = Math.max(1, Math.round(days * 24));
     return `${hours} Hour${hours !== 1 ? "s" : ""}`;
   }
-  if (days < 365) return `${days} Day${days !== 1 ? "s" : ""}`;
+  if (days < 60) return `${days} Day${days !== 1 ? "s" : ""}`;
+  if (days < 365) {
+    const months = Math.round(days / 30.44);
+    return `${months} Month${months !== 1 ? "s" : ""}`;
+  }
   const years = (days / 365.25).toFixed(1);
   return `${years} Year${parseFloat(years) !== 1 ? "s" : ""}`;
 };
@@ -2077,11 +2081,21 @@ export default function App() {
                 groups.set(key, g);
               });
               const grouped = Array.from(groups.values())
-                .map((g) => ({ ...g, windows: g.windows.sort((a, b) => String(b.last || "").localeCompare(String(a.last || ""))) }))
-                .sort((a, b) => String(b.last || "").localeCompare(String(a.last || "")))
+                .map((g) => {
+                  // Current = last observation within ~30 days of today; else Historical.
+                  let current = false;
+                  if (g.last) {
+                    const lastMs = new Date(g.last).getTime();
+                    if (!isNaN(lastMs)) current = (Date.now() - lastMs) <= 30 * 86400000;
+                  }
+                  return { ...g, current, windows: g.windows.sort((a, b) => String(b.last || "").localeCompare(String(a.last || ""))) };
+                })
+                // Current first, then by most-recent last-seen
+                .sort((a, b) => (b.current - a.current) || String(b.last || "").localeCompare(String(a.last || "")))
                 .slice(0, 40);
               if (grouped.length) {
-                results.otxPDNS = { total: rawTotal, unique: grouped.length, records: grouped };
+                const currentCount = grouped.filter((g) => g.current).length;
+                results.otxPDNS = { total: rawTotal, unique: grouped.length, currentCount, records: grouped };
               }
             }
           } catch (e) { console.warn("Enrich OTX Passive DNS failed:", e.message); }
@@ -2484,6 +2498,7 @@ export default function App() {
       // MalwareBazaar only indexes confirmed malware — existence = Malicious.
       // Individual vendor verdicts (NO_THREAT, LIKELY_MALICIOUS) are ignored.
       let verdict = "Unknown";
+      const _isHashCat = ["MD5", "SHA1", "SHA256", "SHA512"].includes(cat);
       // Kaspersky Zone=Red is a strong signal from a first-party AV vendor —
       // check it first alongside the explicit threat feeds.
       if (results.kaspersky?.zone === "red") verdict = "Malicious";
@@ -2492,16 +2507,23 @@ export default function App() {
       else if (results.malwarebazaar) verdict = "Malicious";
       else if (results.urlhaus?.status === "offline") verdict = "Suspicious";
       else if (results.otx?.whitelisted === true) verdict = "Whitelisted";
-      // Kaspersky green zone = whitelisted per Kaspersky's own reputation database.
-      else if (results.kaspersky?.zone === "green") verdict = "Whitelisted";
+      // Kaspersky green: for a HASH it means the file is in Kaspersky's known-clean
+      // DB (reliable — file hashes are immutable). For a DOMAIN/URL/IP, green only
+      // means "no current malicious classification" — NOT trusted. A fresh
+      // impersonation domain (onedrive.cv, seha.hospital) defaults to green before
+      // classification, which would wrongly whitelist it. So green whitelists hashes only.
+      else if (results.kaspersky?.zone === "green" && _isHashCat) verdict = "Whitelisted";
       // CIRCL known-legitimate: NSRL/community-attested legit file, trust > 50.
-      // Lower priority than active-threat signals above, higher than everything else.
+      // (CIRCL is hash-only, so no domain risk here.)
       else if (results.circl?.legit) verdict = "Whitelisted";
       else if (results.otx?.validation) verdict = "Suspicious"; // OTX flagged (DGA, blocklist, etc.)
       else if ((results.otx?.pulses || 0) >= 9) verdict = "Malicious";
       else if ((results.abuseipdb?.score || 0) >= 80) verdict = "Malicious";
       else if ((results.abuseipdb?.score || 0) >= 25) verdict = "Suspicious";
       else if (results.kaspersky?.zone === "yellow") verdict = "Suspicious";
+      // EPP hold / withheld status = registry/registrar intervention → suspicious.
+      // Catches withheld impersonation domains that engines haven't classified yet.
+      else if (results.domainReg?.status && /hold|withheld|pendingdelete|redemption/i.test(results.domainReg.status)) verdict = "Suspicious";
       else if ((results.otx?.pulses || 0) > 0) verdict = "Suspicious";
       // Recently registered domain with OTX data = suspicious
       else if (results.whois && results.whois.ageDays !== null && results.whois.ageDays < 90 && results.otx) verdict = "Suspicious";
@@ -3393,6 +3415,19 @@ export default function App() {
                     click to generate
                   </span>
                 )}
+                <button onClick={(e) => { e.stopPropagation(); runAIScan(); }}
+                  disabled={aiScanState === "loading" || aiScanState === "done"}
+                  title="Deep artifact extraction — scheduled tasks, services, registry ops, command lines, file paths"
+                  className="flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-semibold shrink-0"
+                  style={{
+                    color: aiScanState === "done" ? "#5d7382" : "#04111a",
+                    backgroundColor: aiScanState === "done" ? "rgba(120,160,180,0.06)" : "#fde047",
+                    border: `1px solid ${aiScanState === "done" ? "rgba(120,160,180,0.25)" : "rgba(253,224,71,0.6)"}`,
+                    cursor: (aiScanState === "loading" || aiScanState === "done") ? "not-allowed" : "pointer",
+                  }}>
+                  {aiScanState === "loading" ? <Loader2 size={12} className="animate-spin" /> : aiScanState === "done" ? <Check size={12} /> : <span style={{ fontSize: 11 }}>🧠</span>}
+                  {aiScanState === "loading" ? "Scanning…" : aiScanState === "done" ? "Scanned" : "AI Scan Artifacts"}
+                </button>
               </span>
               <ChevronDown size={18} className="shrink-0 transition-transform"
                 style={{ color: "#c084fc", transform: aiOpen ? "rotate(180deg)" : "rotate(0deg)" }} />
@@ -3459,7 +3494,7 @@ export default function App() {
           </div>
         )}
 
-        {(articleClean || rawArticle) && sourceUrl && (
+        {(articleClean || rawArticle) && sourceUrl && aiScanState !== "idle" && (
           <div className="rounded-xl mb-4 overflow-hidden" style={{ ...panel, borderColor: "rgba(253,224,71,0.35)" }}>
             <div className="flex items-center justify-between px-4 py-3 gap-3 flex-wrap">
               <span className="flex items-center gap-2.5 min-w-0">
@@ -3468,10 +3503,9 @@ export default function App() {
                   <span style={{ fontSize: 14 }}>🧠</span>
                 </span>
                 <span className="text-sm font-bold tracking-wide" style={{ color: "#fde047" }}>AI Scan Threat Hunting Artifacts</span>
-                {aiScanState === "idle" && (
-                  <span className="text-[10px] uppercase tracking-widest rounded-full px-2 py-0.5 hidden sm:inline"
-                    style={{ color: "#8aa0ad", border: "1px solid rgba(120,160,180,0.3)" }}>
-                    deep artifact extraction
+                {aiScanState === "loading" && (
+                  <span className="text-[10px] uppercase tracking-widest flex items-center gap-1" style={{ color: "#8aa0ad" }}>
+                    <Loader2 size={11} className="animate-spin" /> scanning
                   </span>
                 )}
                 {aiScanState === "done" && aiScanCounts && (
@@ -3481,17 +3515,12 @@ export default function App() {
                   </span>
                 )}
               </span>
-              <button onClick={runAIScan} disabled={aiScanState === "loading" || aiScanState === "done"}
-                className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold"
-                style={{
-                  color: aiScanState === "done" ? "#5d7382" : "#04111a",
-                  backgroundColor: aiScanState === "done" ? "rgba(120,160,180,0.06)" : "#fde047",
-                  border: `1px solid ${aiScanState === "done" ? "rgba(120,160,180,0.25)" : "rgba(253,224,71,0.6)"}`,
-                  cursor: (aiScanState === "loading" || aiScanState === "done") ? "not-allowed" : "pointer",
-                }}>
-                {aiScanState === "loading" ? <Loader2 size={13} className="animate-spin" /> : aiScanState === "done" ? <Check size={13} /> : <span style={{ fontSize: 12 }}>🧠</span>}
-                {aiScanState === "loading" ? "Scanning…" : aiScanState === "done" ? "Scan complete" : "Run AI Scan"}
-              </button>
+              {aiScanState === "done" && (
+                <button onClick={() => { setAiScanState("idle"); setAiScanCounts(null); }}
+                  className="text-[11px] underline shrink-0" style={{ color: "#8aa0ad", cursor: "pointer", background: "none", border: "none" }}>
+                  re-scan
+                </button>
+              )}
             </div>
             {aiScanState === "error" && (
               <div className="px-4 pb-3 pt-1 text-xs" style={{ color: "#ffb4b4", borderTop: "1px solid rgba(255,77,77,0.2)" }}>
@@ -3565,6 +3594,9 @@ export default function App() {
         <div className="grid grid-cols-1 gap-4" style={{ display: graphView ? "none" : "grid" }}>
           {entries.map(([cat, arr]) => {
             const c = colorFor(cat);
+            // Card-level effective collapse: explicit card state wins over global.
+            const cardCollapseState = cardCondensed[cat];
+            const inheritedCollapse = cardCollapseState !== undefined ? cardCollapseState : condensed;
             const isDefanged = defangAll || !!defangMap[cat];
             const shown = proc(arr, cat);
             const fmt = {
@@ -3598,12 +3630,12 @@ export default function App() {
                       </button>
                       </>
                     )}
-                    <button onClick={() => { setCardCondensed((p) => ({ ...p, [cat]: !p[cat] })); setRowOverride((p) => { const n = { ...p }; arr.forEach((v) => delete n[`${cat}::${v}`]); return n; }); }}
-                      title={cardCondensed[cat] ? "Expand enrichment details" : "Collapse to verdicts only"}
+                    <button onClick={() => { setCardCondensed((p) => ({ ...p, [cat]: !inheritedCollapse })); setRowOverride((p) => { const n = { ...p }; arr.forEach((v) => delete n[`${cat}::${v}`]); return n; }); }}
+                      title={inheritedCollapse ? "Expand enrichment details" : "Collapse to verdicts only"}
                       className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold"
-                      style={{ color: cardCondensed[cat] ? "#04111a" : "#c084fc", backgroundColor: cardCondensed[cat] ? "#c084fc" : "rgba(192,132,252,0.12)", border: "1px solid rgba(192,132,252,0.4)", cursor: "pointer" }}>
-                      <ChevronDown size={11} style={{ transform: cardCondensed[cat] ? "rotate(-90deg)" : "rotate(0deg)", transition: "transform 0.2s" }} />
-                      {cardCondensed[cat] ? "Expand" : "Collapse"}
+                      style={{ color: inheritedCollapse ? "#04111a" : "#c084fc", backgroundColor: inheritedCollapse ? "#c084fc" : "rgba(192,132,252,0.12)", border: "1px solid rgba(192,132,252,0.4)", cursor: "pointer" }}>
+                      <ChevronDown size={11} style={{ transform: inheritedCollapse ? "rotate(-90deg)" : "rotate(0deg)", transition: "transform 0.2s" }} />
+                      {inheritedCollapse ? "Expand" : "Collapse"}
                     </button>
                     <button onClick={() => toggleDefang(cat)} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
                       title="Defang this type for safe sharing (display, copy & export)"
@@ -3649,7 +3681,7 @@ export default function App() {
                     const eKey = `${cat}::${arr[i]}`;
                     const enr = enrichCache[eKey];
                     const enrichable = ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat);
-                    const inheritedCollapse = condensed || !!cardCondensed[cat];
+                    // Precedence: row override > card/global effective (inheritedCollapse from card scope).
                     const isRowCollapsed = rowOverride[eKey] !== undefined ? rowOverride[eKey] : inheritedCollapse;
                     return (
                       <div key={i}>
@@ -3701,7 +3733,7 @@ export default function App() {
                                 backgroundColor: enr.data._verdict === "Malicious" ? "rgba(255,77,109,0.15)" : enr.data._verdict === "Suspicious" ? "rgba(251,191,36,0.15)" : enr.data._verdict === "Whitelisted" ? "rgba(0,255,156,0.15)" : "rgba(138,160,173,0.15)",
                                 border: `1px solid ${enr.data._verdict === "Malicious" ? "rgba(255,77,109,0.4)" : enr.data._verdict === "Suspicious" ? "rgba(251,191,36,0.4)" : enr.data._verdict === "Whitelisted" ? "rgba(0,255,156,0.4)" : "rgba(138,160,173,0.3)"}`,
                               }}>
-                                {enr.data._verdict === "Malicious" ? "🔴" : enr.data._verdict === "Suspicious" ? "🟡" : enr.data._verdict === "Whitelisted" ? "🟢" : "⚪"} {enr.data._verdict}
+                                {enr.data._verdict === "Malicious" ? "🔴" : enr.data._verdict === "Suspicious" ? "🟡" : enr.data._verdict === "Whitelisted" ? "🟢" : "⚪"} {enr.data._verdict === "Unknown" ? "Unknown - Check VirusTotal" : enr.data._verdict}
                               </span>
                             )}
                             {enr?.data?.domainReg?.state === "active" && enr?.data?.domainReg?.status && /client.?hold|server.?hold/i.test(enr.data.domainReg.status) && (
@@ -3881,7 +3913,7 @@ export default function App() {
                               <>
                                   {d._verdict === "Unknown" && d.domainReg?.state !== "deleted" && (
                                     <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#5d7382", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.2)" }}>
-                                      ⚪ Unknown - check VirusTotal
+                                      ⚪ Unknown - Check VirusTotal
                                     </span>
                                   )}
                                   {hasOtx && d._verdict !== "Unknown" && (
@@ -3909,16 +3941,19 @@ export default function App() {
                                   )}
                                   {!isHash && d.kaspersky && (() => {
                                     const z = d.kaspersky.zone;
-                                    const c = z === "red" ? "#ff4d6d" : z === "yellow" ? "#fbbf24" : z === "green" ? "#4ade80" : "#94a3b8";
-                                    const bg = z === "red" ? "rgba(255,77,109,0.12)" : z === "yellow" ? "rgba(251,191,36,0.10)" : z === "green" ? "rgba(74,222,128,0.10)" : "rgba(148,163,184,0.08)";
-                                    const bd = z === "red" ? "rgba(255,77,109,0.35)" : z === "yellow" ? "rgba(251,191,36,0.35)" : z === "green" ? "rgba(74,222,128,0.35)" : "rgba(148,163,184,0.25)";
-                                    const icon = z === "red" ? "🔴" : z === "yellow" ? "🟡" : z === "green" ? "🟢" : "⚪";
+                                    // For domain/URL/IP, green means "unclassified", not trusted → show as Unknown.
+                                    const greenIsUnknown = z === "green";
+                                    const c = z === "red" ? "#ff4d6d" : z === "yellow" ? "#fbbf24" : "#8aa0ad";
+                                    const bg = z === "red" ? "rgba(255,77,109,0.12)" : z === "yellow" ? "rgba(251,191,36,0.10)" : "rgba(148,163,184,0.08)";
+                                    const bd = z === "red" ? "rgba(255,77,109,0.35)" : z === "yellow" ? "rgba(251,191,36,0.35)" : "rgba(148,163,184,0.25)";
+                                    const icon = z === "red" ? "🔴" : z === "yellow" ? "🟡" : "⚪";
+                                    const label = greenIsUnknown ? "Unknown" : (z.charAt(0).toUpperCase() + z.slice(1) + " Zone");
                                     return (
                                       <span className="rounded-full px-2 py-0.5" style={{ color: c, backgroundColor: bg, border: `1px solid ${bd}` }}
-                                        title="Kaspersky OpenTIP — vendor threat intelligence">
-                                        {icon} Kaspersky · {z.charAt(0).toUpperCase() + z.slice(1)} Zone
-                                        {d.kaspersky.categories ? ` · ${d.kaspersky.categories}` : ""}
-                                        {d.kaspersky.hits != null ? ` · ${d.kaspersky.hits} hits` : ""}
+                                        title="Kaspersky OpenTIP — for domains/IPs, green means unclassified, not trusted">
+                                        {icon} Kaspersky · {label}
+                                        {!greenIsUnknown && d.kaspersky.categories ? ` · ${d.kaspersky.categories}` : ""}
+                                        {!greenIsUnknown && d.kaspersky.hits != null ? ` · ${d.kaspersky.hits} hits` : ""}
                                         {d.kaspersky.country ? ` · ${d.kaspersky.country}` : ""}
                                       </span>
                                     );
@@ -4166,7 +4201,7 @@ export default function App() {
                                     {pdnsRecords.length > 0 && (
                                       <div className="flex items-center gap-1.5 mt-1 mb-0.5">
                                         <span className="text-[9px] uppercase tracking-widest font-bold" style={{ color: "#5d7382" }}>Passive DNS</span>
-                                        <span className="text-[9px]" style={{ color: "#5d7382" }}>· {d.otxPDNS.unique || pdnsRecords.length} unique {cat === "DOMAIN" ? "IPs" : "hosts"} from {d.otxPDNS.total} observations</span>
+                                        <span className="text-[9px]" style={{ color: "#5d7382" }}>· {d.otxPDNS.unique || pdnsRecords.length} unique {cat === "DOMAIN" ? "IPs" : "hosts"} from {d.otxPDNS.total} observations{d.otxPDNS.currentCount != null ? ` · ${d.otxPDNS.currentCount} current` : ""}</span>
                                         <button onClick={() => setPdnsExpanded((p) => ({ ...p, [eKey]: !p[eKey] }))}
                                           className="text-[9px] rounded px-1.5 py-0.5 font-bold ml-1"
                                           style={{ color: "#7c9cff", backgroundColor: "rgba(124,156,255,0.1)", border: "1px solid rgba(124,156,255,0.3)", cursor: "pointer" }}>
@@ -4188,7 +4223,12 @@ export default function App() {
                                           <span className="flex-1 min-w-0 flex flex-wrap items-center gap-1.5">
                                             <span style={{ color: "#7c9cff", fontWeight: 600 }}>{target}</span>
                                             {r.recordType && <span className="text-[9px] px-1 rounded" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.12)" }}>{r.recordType}</span>}
-                                            <span className="text-[10px]" style={{ color: "#5d7382" }}>{r.first} → {r.last}</span>
+                                            <span className="text-[9px] px-1 rounded font-bold" style={{
+                                              color: r.current ? "#00ff9c" : "#8aa0ad",
+                                              backgroundColor: r.current ? "rgba(0,255,156,0.12)" : "rgba(138,160,173,0.1)",
+                                              border: `1px solid ${r.current ? "rgba(0,255,156,0.3)" : "rgba(138,160,173,0.25)"}`,
+                                            }}>{r.current ? "CURRENT" : "HISTORICAL"}</span>
+                                            <span className="text-[10px]" style={{ color: "#5d7382" }}>{fmtDate(r.first)} → {fmtDate(r.last)}</span>
                                             {multiObs && (
                                               <button onClick={() => setPdnsRowOpen((p) => ({ ...p, [rowKey]: !p[rowKey] }))}
                                                 className="text-[9px] px-1 rounded font-bold"
@@ -4214,7 +4254,7 @@ export default function App() {
                                           <div className="ml-4 mt-0.5 mb-1 flex flex-col gap-0.5">
                                             {r.windows.map((w, wi) => (
                                               <span key={wi} className="text-[9px]" style={{ color: "#5d7382" }}>
-                                                ↳ {w.first} → {w.last}
+                                                ↳ {fmtDate(w.first)} → {fmtDate(w.last)}
                                               </span>
                                             ))}
                                           </div>
@@ -4229,7 +4269,7 @@ export default function App() {
                           );
                         })()}
                         {enr && !enr.loading && !enr.data && enr.error && (
-                          <p className="ml-4 mb-1 text-[10px] font-bold" style={{ color: "#5d7382" }}>⚪ Unknown - check VirusTotal.</p>
+                          <p className="ml-4 mb-1 text-[10px] font-bold" style={{ color: "#5d7382" }}>⚪ Unknown - Check VirusTotal.</p>
                         )}
                       </div>
                     );
@@ -4334,6 +4374,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
   const [dims, setDims] = useState({ w: 900, h: 600 });
   const [hoverInfo, setHoverInfo] = useState(null);
   const [selected, setSelected] = useState(null);
+  const [fullscreen, setFullscreen] = useState(false);
 
   // ---- Build the graph model from IOCs + enrichment ----
   const model = useMemo(() => {
@@ -4451,11 +4492,49 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
     if (!el) return;
     const ro = new ResizeObserver(() => {
       const r = el.getBoundingClientRect();
-      setDims({ w: Math.max(320, r.width), h: Math.max(420, Math.min(720, r.width * 0.62)) });
+      if (fullscreen) {
+        setDims({ w: window.innerWidth, h: window.innerHeight });
+      } else {
+        setDims({ w: Math.max(320, r.width), h: Math.max(420, Math.min(720, r.width * 0.62)) });
+      }
     });
     ro.observe(el);
     return () => ro.disconnect();
+  }, [fullscreen]);
+
+  // Non-passive wheel listener — React's onWheel is passive and can't preventDefault,
+  // so the page scrolls while zooming. Attach natively to trap it inside the canvas.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onWheelNative = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const cam = camRef.current;
+      const factor = e.deltaY < 0 ? 1.12 : 0.89;
+      cam.zoom = Math.max(0.3, Math.min(3.5, cam.zoom * factor));
+    };
+    canvas.addEventListener("wheel", onWheelNative, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheelNative);
   }, []);
+
+  // Fullscreen: resize canvas to viewport, lock body scroll, ESC to exit.
+  useEffect(() => {
+    if (fullscreen) {
+      setDims({ w: window.innerWidth, h: window.innerHeight });
+      const prevOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      const onKey = (e) => { if (e.key === "Escape") setFullscreen(false); };
+      const onResize = () => setDims({ w: window.innerWidth, h: window.innerHeight });
+      window.addEventListener("keydown", onKey);
+      window.addEventListener("resize", onResize);
+      return () => {
+        document.body.style.overflow = prevOverflow;
+        window.removeEventListener("keydown", onKey);
+        window.removeEventListener("resize", onResize);
+      };
+    }
+  }, [fullscreen]);
 
   // ---- Physics + render loop ----
   useEffect(() => {
@@ -4650,13 +4729,6 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
     }
   };
   const onUp = () => { const cam = camRef.current; cam.dragNode = null; cam.panning = false; };
-  const onWheel = (e) => {
-    e.preventDefault();
-    const cam = camRef.current;
-    const factor = e.deltaY < 0 ? 1.12 : 0.89;
-    cam.zoom = Math.max(0.3, Math.min(3.5, cam.zoom * factor));
-  };
-
   if (!iocData || model.nodes.length === 0) {
     return (
       <div className="rounded-xl p-10 text-center" style={{ background: "rgba(10,14,20,0.72)", border: "1px solid rgba(120,160,180,0.16)" }}>
@@ -4671,8 +4743,37 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
   ];
 
   return (
-    <div ref={wrapRef} className="rounded-xl overflow-hidden relative"
-      style={{ background: "radial-gradient(1200px 600px at 50% 0%, rgba(0,229,255,0.06), transparent 60%), #05070a", border: "1px solid rgba(120,160,180,0.2)" }}>
+    <div ref={wrapRef} className={fullscreen ? "overflow-hidden relative" : "rounded-xl overflow-hidden relative"}
+      style={fullscreen
+        ? { position: "fixed", inset: 0, zIndex: 9999, background: "radial-gradient(1200px 600px at 50% 0%, rgba(0,229,255,0.06), transparent 60%), #05070a" }
+        : { background: "radial-gradient(1200px 600px at 50% 0%, rgba(0,229,255,0.06), transparent 60%), #05070a", border: "1px solid rgba(120,160,180,0.2)" }}>
+      {/* Fullscreen toggle */}
+      <button onClick={() => setFullscreen((v) => !v)}
+        className="absolute z-20 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-semibold"
+        title={fullscreen ? "Exit fullscreen (Esc)" : "Enter fullscreen"}
+        style={{
+          bottom: 12, right: 12,
+          background: fullscreen ? "#ff4d6d" : "rgba(0,229,255,0.14)",
+          color: fullscreen ? "#fff" : "#00e5ff",
+          border: `1px solid ${fullscreen ? "rgba(255,77,109,0.8)" : "rgba(0,229,255,0.5)"}`,
+          backdropFilter: "blur(6px)", cursor: "pointer",
+          boxShadow: fullscreen ? "0 0 18px rgba(255,77,109,0.5)" : "none",
+        }}>
+        {fullscreen ? <><X size={13} /> Exit Fullscreen</> : <><Share2 size={13} /> Fullscreen</>}
+      </button>
+      {/* Persistent exit bar in fullscreen (top center) so it's always obvious how to leave */}
+      {fullscreen && (
+        <button onClick={() => setFullscreen(false)}
+          className="absolute z-20 flex items-center gap-1.5 rounded-full px-4 py-1.5 text-xs font-semibold"
+          style={{
+            top: 12, left: "50%", transform: "translateX(-50%)",
+            background: "rgba(255,77,109,0.9)", color: "#fff",
+            border: "1px solid rgba(255,77,109,1)", cursor: "pointer",
+            boxShadow: "0 0 20px rgba(255,77,109,0.5)",
+          }}>
+          <X size={13} /> Exit Fullscreen (Esc)
+        </button>
+      )}
       {/* Stats bar */}
       <div className="absolute top-3 left-3 z-10 flex items-center gap-3 rounded-lg px-3 py-1.5 text-[11px]"
         style={{ background: "rgba(10,14,20,0.8)", border: "1px solid rgba(120,160,180,0.2)", backdropFilter: "blur(6px)", color: "#9fb3bd" }}>
@@ -4700,7 +4801,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
 
       <canvas ref={canvasRef}
         style={{ width: dims.w, height: dims.h, display: "block", touchAction: "none" }}
-        onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp} onWheel={onWheel}
+        onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp}
       />
 
       {/* Hover card */}
