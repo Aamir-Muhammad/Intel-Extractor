@@ -37,7 +37,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v74";
+const APP_VERSION = "v75";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -2038,22 +2038,50 @@ export default function App() {
             const otxTypeMap = { IPV4: "IPv4", IPV6: "IPv6", DOMAIN: "domain" };
             const pd = await callEnrich("otx", otxTypeMap[cat], "passive_dns");
             if (pd && !pd.error && Array.isArray(pd.passive_dns) && pd.passive_dns.length) {
-              // Sort by 'last' timestamp descending (freshest first) and cap at 20
-              const sorted = pd.passive_dns
-                .filter((r) => r.hostname || r.address)
+              const rawTotal = pd.count || pd.passive_dns.length;
+              // For DOMAIN queries the useful pivot is the IP it resolved to (A/AAAA).
+              // NS/SOA/CNAME/MX/TXT point at DNS infrastructure (often shared, e.g.
+              // Cloudflare nameservers) — noise for hunting, so we drop them.
+              // NXDOMAIN entries are failed lookups with no usable target.
+              const KEEP_TYPES = new Set(["A", "AAAA", null, ""]); // null = IP-query results (hostnames)
+              const cleaned = pd.passive_dns.filter((r) => {
+                const rt = (r.record_type || "").toUpperCase();
+                if (rt === "NXDOMAIN") return false;
+                // For domain queries keep only A/AAAA. For IP queries record_type is
+                // usually absent and the field of interest is hostname.
+                if (cat === "DOMAIN") return rt === "A" || rt === "AAAA";
+                return !!r.hostname;
+              });
+              // Group by the pivot target (address for domain-queries, hostname for IP-queries),
+              // merging multiple observation windows into one first→last span.
+              const groups = new Map();
+              cleaned.forEach((r) => {
+                const target = cat === "DOMAIN" ? r.address : r.hostname;
+                if (!target) return;
+                const key = String(target).toLowerCase();
+                const first = r.first ? String(r.first).split("T")[0] : null;
+                const last = r.last ? String(r.last).split("T")[0] : null;
+                const g = groups.get(key) || {
+                  hostname: cat === "DOMAIN" ? null : target,
+                  address: cat === "DOMAIN" ? target : null,
+                  recordType: (r.record_type || (cat === "DOMAIN" ? "A" : null)),
+                  first, last, obs: 0, asn: r.asn || null, country: r.flag_title || null,
+                  windows: [],
+                };
+                if (first && (!g.first || first < g.first)) g.first = first;
+                if (last && (!g.last || last > g.last)) g.last = last;
+                if (!g.asn && r.asn) g.asn = r.asn;
+                if (!g.country && r.flag_title) g.country = r.flag_title;
+                g.obs += 1;
+                if (first || last) g.windows.push({ first, last });
+                groups.set(key, g);
+              });
+              const grouped = Array.from(groups.values())
+                .map((g) => ({ ...g, windows: g.windows.sort((a, b) => String(b.last || "").localeCompare(String(a.last || ""))) }))
                 .sort((a, b) => String(b.last || "").localeCompare(String(a.last || "")))
-                .slice(0, 20)
-                .map((r) => ({
-                  hostname: r.hostname || null,
-                  address: r.address || null,
-                  first: r.first ? String(r.first).split("T")[0] : null,
-                  last: r.last ? String(r.last).split("T")[0] : null,
-                  recordType: r.record_type || null,
-                  asn: r.asn || null,
-                  country: r.flag_title || null,
-                }));
-              if (sorted.length) {
-                results.otxPDNS = { total: pd.count || pd.passive_dns.length, records: sorted };
+                .slice(0, 40);
+              if (grouped.length) {
+                results.otxPDNS = { total: rawTotal, unique: grouped.length, records: grouped };
               }
             }
           } catch (e) { console.warn("Enrich OTX Passive DNS failed:", e.message); }
@@ -2551,6 +2579,8 @@ export default function App() {
   const [customAddValue, setCustomAddValue] = useState("");
   const [condensed, setCondensed] = useState(false);
   const [graphView, setGraphView] = useState(false);
+  const [pdnsExpanded, setPdnsExpanded] = useState({});   // { "cat::ioc": bool } show all raw obs
+  const [pdnsRowOpen, setPdnsRowOpen] = useState({});     // { "cat::ioc::target": bool } per-IP expand
   const [expiringTokens, setExpiringTokens] = useState([]);
   const [tokenBannerDismissed, setTokenBannerDismissed] = useState(false);
   const [cardCondensed, setCardCondensed] = useState({});        // { cat: true } per-card collapse
@@ -4136,7 +4166,12 @@ export default function App() {
                                     {pdnsRecords.length > 0 && (
                                       <div className="flex items-center gap-1.5 mt-1 mb-0.5">
                                         <span className="text-[9px] uppercase tracking-widest font-bold" style={{ color: "#5d7382" }}>Passive DNS</span>
-                                        <span className="text-[9px]" style={{ color: "#5d7382" }}>({d.otxPDNS.total} total observations, showing top {pdnsRecords.length} by recency)</span>
+                                        <span className="text-[9px]" style={{ color: "#5d7382" }}>· {d.otxPDNS.unique || pdnsRecords.length} unique {cat === "DOMAIN" ? "IPs" : "hosts"} from {d.otxPDNS.total} observations</span>
+                                        <button onClick={() => setPdnsExpanded((p) => ({ ...p, [eKey]: !p[eKey] }))}
+                                          className="text-[9px] rounded px-1.5 py-0.5 font-bold ml-1"
+                                          style={{ color: "#7c9cff", backgroundColor: "rgba(124,156,255,0.1)", border: "1px solid rgba(124,156,255,0.3)", cursor: "pointer" }}>
+                                          {pdnsExpanded[eKey] ? "Grouped view" : "Show all records"}
+                                        </button>
                                       </div>
                                     )}
                                     {pdnsRecords.map((r, pi) => {
@@ -4144,12 +4179,24 @@ export default function App() {
                                       const target = cat === "DOMAIN" ? r.address : r.hostname;
                                       const targetCat = cat === "DOMAIN" ? "IPV4" : "DOMAIN";
                                       const added = isPivotAdded(targetCat, target);
+                                      const rowKey = `${eKey}::${String(target).toLowerCase()}`;
+                                      const multiObs = (r.obs || 1) > 1;
+                                      const rowOpen = pdnsExpanded[eKey] || pdnsRowOpen[rowKey];
                                       return (
-                                        <span key={`pd${pi}`} className="rounded-full px-2 py-0.5 flex items-center gap-1.5" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.05)", border: "1px solid rgba(148,163,184,0.2)" }}>
+                                        <div key={`pd${pi}`}>
+                                        <span className="rounded-full px-2 py-0.5 flex items-center gap-1.5" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.05)", border: "1px solid rgba(148,163,184,0.2)" }}>
                                           <span className="flex-1 min-w-0 flex flex-wrap items-center gap-1.5">
                                             <span style={{ color: "#7c9cff", fontWeight: 600 }}>{target}</span>
                                             {r.recordType && <span className="text-[9px] px-1 rounded" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.12)" }}>{r.recordType}</span>}
                                             <span className="text-[10px]" style={{ color: "#5d7382" }}>{r.first} → {r.last}</span>
+                                            {multiObs && (
+                                              <button onClick={() => setPdnsRowOpen((p) => ({ ...p, [rowKey]: !p[rowKey] }))}
+                                                className="text-[9px] px-1 rounded font-bold"
+                                                style={{ color: "#c084fc", backgroundColor: "rgba(192,132,252,0.12)", border: "1px solid rgba(192,132,252,0.3)", cursor: "pointer" }}
+                                                title="Show individual observation windows">
+                                                {r.obs} obs {rowOpen ? "▾" : "▸"}
+                                              </button>
+                                            )}
                                             {r.asn && <span className="text-[10px]" style={{ color: "#8aa0ad" }}>· {r.asn}</span>}
                                             {r.country && <span className="text-[10px]" style={{ color: "#8aa0ad" }}>· {r.country}</span>}
                                           </span>
@@ -4163,6 +4210,16 @@ export default function App() {
                                           )}
                                           <button onClick={() => dismissPivot(`pdns::${target.toLowerCase()}::${arr[i]}`)} className="rounded p-0.5 shrink-0" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
                                         </span>
+                                        {multiObs && rowOpen && (r.windows || []).length > 0 && (
+                                          <div className="ml-4 mt-0.5 mb-1 flex flex-col gap-0.5">
+                                            {r.windows.map((w, wi) => (
+                                              <span key={wi} className="text-[9px]" style={{ color: "#5d7382" }}>
+                                                ↳ {w.first} → {w.last}
+                                              </span>
+                                            ))}
+                                          </div>
+                                        )}
+                                        </div>
                                       );
                                     })}
                                   </div>
