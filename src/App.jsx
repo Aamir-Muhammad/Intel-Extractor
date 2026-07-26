@@ -37,7 +37,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v78";
+const APP_VERSION = "v80";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -2116,7 +2116,9 @@ export default function App() {
                 if (!g.asn && r.asn) g.asn = r.asn;
                 if (!g.country && r.flag_title) g.country = r.flag_title;
                 g.obs += 1;
-                if (first || last) g.windows.push({ first, last });
+                if ((first || last) && !g.windows.some((w) => w.first === first && w.last === last)) {
+                  g.windows.push({ first, last });
+                }
                 groups.set(key, g);
               });
               const grouped = Array.from(groups.values())
@@ -2299,71 +2301,91 @@ export default function App() {
           const uj = await callEnrich("urlscan", searchField, searchValue);
           if (uj && !uj.error && Array.isArray(uj.results) && uj.results.length > 0) {
             const totalScans = uj.total || uj.results.length;
-            const malCount = uj.results.filter((r) => r.verdicts?.overall?.malicious || r.verdicts?.urlscan?.malicious).length;
-            // urlscan search matches the apex/registrable domain, so results[0]
-            // (newest) may be a DIFFERENT subdomain than the exact IOC. Prefer the
-            // newest scan whose host actually equals the queried host; only fall
-            // back to the apex-newest if none match exactly.
+            // The IOC host we're actually enriching.
             const iocHostExact = (() => {
               if (cat === "IPV4" || cat === "IPV6") return String(value).toLowerCase();
               try { return new URL(value.includes("://") ? value : "https://" + value).hostname.toLowerCase(); }
               catch { return String(value).toLowerCase().replace(/^https?:\/\//, "").split("/")[0]; }
             })();
-            const hostOfResult = (r) => {
-              const h = r.page?.domain || (() => { try { return new URL(r.page?.url || r.task?.url).hostname; } catch { return null; } })();
+            // urlscan's domain: search returns EVERY scan that merely *contacted*
+            // the host — including scans of a DIFFERENT submitted URL where our host
+            // was only a redirect hop or resource server (e.g. a bitbucket.org
+            // download that redirects through an Atlassian S3 bucket). Those scans
+            // are "about" the other target: their page.domain / page.title / age all
+            // describe bitbucket.org, not our host. So a scan counts as being ABOUT
+            // our host ONLY when its PRIMARY page (page.domain, i.e. where the scan
+            // ended up) equals our host. task.domain (what was submitted) matching
+            // is a strong signal too. Everything else is incidental contact.
+            const finalHostOf = (r) => {
+              const h = r.page?.domain || (() => { try { return new URL(r.page?.url || "").hostname; } catch { return null; } })();
               return h ? String(h).toLowerCase() : null;
             };
-            const exactMatch = uj.results.find((r) => hostOfResult(r) === iocHostExact);
-            const latest = exactMatch || uj.results[0]; // prefer exact host, else apex-newest
-            const latestIsExactHost = !!exactMatch; // false = latest is a sibling subdomain
+            const submittedHostOf = (r) => {
+              const h = r.task?.domain || (() => { try { return new URL(r.task?.url || "").hostname; } catch { return null; } })();
+              return h ? String(h).toLowerCase() : null;
+            };
+            // Scans genuinely about our host: primary page IS our host.
+            const primaryScans = uj.results.filter((r) => finalHostOf(r) === iocHostExact);
+            // Among those, prefer ones that were also SUBMITTED as our host (cleanest).
+            const submittedPrimary = primaryScans.filter((r) => submittedHostOf(r) === iocHostExact);
+            const chosenPool = submittedPrimary.length ? submittedPrimary : primaryScans;
+            const isPrimaryTarget = chosenPool.length > 0;
+            // Pick newest from the chosen pool; if none, we have only incidental
+            // contact scans — we DON'T show their host-specific data as ours.
+            const latest = isPrimaryTarget ? chosenPool[0] : uj.results[0];
+            // malicious count only over scans actually about our host (avoids
+            // counting a malicious bitbucket scan as our host being malicious).
+            const scoringPool = isPrimaryTarget ? chosenPool : [];
+            const malCount = scoringPool.filter((r) => r.verdicts?.overall?.malicious || r.verdicts?.urlscan?.malicious).length;
             const oldest = uj.results[uj.results.length - 1];
-            const pageTitle = latest.page?.title || null;
-            const pageServer = latest.page?.server || null;
-            const pageCountry = latest.page?.country || null;
+            // Host-specific fields ONLY when we have a primary-target scan.
+            const pageTitle = isPrimaryTarget ? (latest.page?.title || null) : null;
+            const pageServer = isPrimaryTarget ? (latest.page?.server || null) : null;
+            const pageCountry = isPrimaryTarget ? (latest.page?.country || null) : null;
             const scanDate = latest.task?.time ? latest.task.time.split("T")[0] : null;
             const resultUrl = latest.result || null;
 
-            // First Seen / Last Seen from scan dates
-            const allScanDates = uj.results.map((r) => r.task?.time).filter(Boolean).sort();
+            // First Seen / Last Seen — only from scans about our host.
+            const datePool = isPrimaryTarget ? chosenPool : [];
+            const allScanDates = datePool.map((r) => r.task?.time).filter(Boolean).sort();
             const usFirstSeen = allScanDates.length ? allScanDates[0].split("T")[0] : null;
             const usLastSeen = allScanDates.length > 1 ? allScanDates[allScanDates.length - 1].split("T")[0] : null;
 
-            // Observation-based ages (urlscan's own first-sighting, not WHOIS).
-            // domainAgeDays  = the exact host queried (subdomain if applicable)
-            // apexDomainAgeDays = the registrable/apex domain — Layer 2 fallback
-            // when no RDAP registration date is available.
-            const domainAgeDays = latest.page?.domainAgeDays ?? null;
+            // Observation-based ages — ONLY read from a primary-target scan, else
+            // they'd describe the wrong host (e.g. bitbucket.org's 13yr age).
+            const domainAgeDays = isPrimaryTarget ? (latest.page?.domainAgeDays ?? null) : null;
             const subdomainCreated = domainAgeDays != null ? dateFromAgeDays(domainAgeDays, latest.task?.time) : null;
-            const apexAgeDays = latest.page?.apexDomainAgeDays ?? null;
+            const apexAgeDays = isPrimaryTarget ? (latest.page?.apexDomainAgeDays ?? null) : null;
             const apexFirstSeen = apexAgeDays != null ? dateFromAgeDays(apexAgeDays, latest.task?.time) : null;
 
             results.urlscan = {
               scans: totalScans,
+              primaryScans: chosenPool.length, // scans actually ABOUT this host
+              isPrimaryTarget,                  // false = host only appears as contacted/redirect hop
               malicious: malCount,
-              verdict: malCount > 0 ? "malicious" : totalScans > 3 ? "seen" : "low data",
+              verdict: malCount > 0 ? "malicious" : (isPrimaryTarget && chosenPool.length > 3) ? "seen" : "low data",
               title: pageTitle,
               server: pageServer,
               country: pageCountry,
               flag: countryFlag(pageCountry),
               scanDate,
-              link: resultUrl ? `https://urlscan.io/result/${latest._id}/` : null,
-              // True only when the linked scan is for the exact IOC host. When false,
-              // the View link / title / screenshot are for a sibling subdomain on the
-              // same apex — the UI labels them accordingly so they aren't mistaken
-              // for the IOC's own page.
-              linkIsExactHost: latestIsExactHost,
-              linkedHost: hostOfResult(latest),
-              screenshot: latest.screenshot || null,
+              // Link ONLY to a scan that's about our host. If our host only appears
+              // as an incidental contact in scans of other URLs, we don't link to
+              // one of those (it'd open bitbucket.org etc.) — we point to the host's
+              // own urlscan search page instead.
+              link: (isPrimaryTarget && resultUrl) ? `https://urlscan.io/result/${latest._id}/` : null,
+              hostSearchLink: `https://urlscan.io/search/#page.domain%3A%22${encodeURIComponent(iocHostExact)}%22`,
+              screenshot: isPrimaryTarget ? (latest.screenshot || null) : null,
               firstSeen: usFirstSeen,
               lastSeen: usLastSeen,
               subdomainAgeDays: domainAgeDays,
               apexAgeDays,
               apexFirstSeen,
               subdomainCreated,
-              // Pivot points: serving IP
-              servingIP: latest.page?.ip || null,
-              servingASN: latest.page?.asn || null,
-              servingASNName: latest.page?.asnname || null,
+              // Pivot points: serving IP (only from a primary-target scan)
+              servingIP: isPrimaryTarget ? (latest.page?.ip || null) : null,
+              servingASN: isPrimaryTarget ? (latest.page?.asn || null) : null,
+              servingASNName: isPrimaryTarget ? (latest.page?.asnname || null) : null,
               // Scanned URLs from all results (for showing as additional info)
               scannedUrls: (() => {
                 const seen = new Set();
@@ -2399,6 +2421,9 @@ export default function App() {
 
             // ---- Deep result fetch: contacted infra, brand impersonation, loaded resources ----
             // The search API omits these; fetch the latest scan's full document.
+            // Only when the latest scan is actually ABOUT our host — otherwise we'd
+            // pull bitbucket.org's contacted infra / brands, not our host's.
+            if (isPrimaryTarget) {
             try {
               const detail = await callEnrich("urlscan_result", null, latest._id);
               if (detail && !detail.error) {
@@ -2450,6 +2475,7 @@ export default function App() {
                 results.urlscan.resourceHashes = resourceHashes.length ? resourceHashes : null;
               }
             } catch (e) { console.warn("urlscan result detail failed:", e.message); }
+            } // end if (isPrimaryTarget)
           }
         } catch (e) { console.warn("Enrich urlscan.io failed:", e.message); }
       }
@@ -4094,13 +4120,13 @@ export default function App() {
                                       backgroundColor: d.urlscan.malicious > 0 ? "rgba(255,77,109,0.12)" : "rgba(56,189,248,0.10)",
                                       border: `1px solid ${d.urlscan.malicious > 0 ? "rgba(255,77,109,0.3)" : "rgba(56,189,248,0.3)"}`,
                                     }}>
-                                      Urlscan.io · {d.urlscan.scans} Scan{d.urlscan.scans !== 1 ? "s" : ""}{d.urlscan.malicious > 0 ? ` · 🔴 ${d.urlscan.malicious} Malicious` : ""}{d.urlscan.linkIsExactHost && d.urlscan.title ? ` · "${d.urlscan.title}"` : ""}{d.urlscan.server ? ` · ${d.urlscan.server}` : ""}{d.urlscan.country && d.urlscan.flag ? ` · ${d.urlscan.flag}` : ""}
-                                      {d.urlscan.link && <>{" · "}<a href={d.urlscan.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>{d.urlscan.linkIsExactHost ? "View" : "View (sibling host)"}</a></>}
-                                      {!d.urlscan.linkIsExactHost && d.urlscan.linkedHost && (
-                                        <span className="text-[9px] ml-1" style={{ color: "#fbbf24" }} title={`No exact scan for this host; latest scan on the apex is for ${d.urlscan.linkedHost}`}>⚠ no exact-host scan</span>
+                                      Urlscan.io · {d.urlscan.isPrimaryTarget ? `${d.urlscan.primaryScans} Scan${d.urlscan.primaryScans !== 1 ? "s" : ""}` : `${d.urlscan.scans} apex scan${d.urlscan.scans !== 1 ? "s" : ""}`}{d.urlscan.isPrimaryTarget && d.urlscan.malicious > 0 ? ` · 🔴 ${d.urlscan.malicious} Malicious` : ""}{d.urlscan.isPrimaryTarget && d.urlscan.title ? ` · "${d.urlscan.title}"` : ""}{d.urlscan.isPrimaryTarget && d.urlscan.server ? ` · ${d.urlscan.server}` : ""}{d.urlscan.isPrimaryTarget && d.urlscan.country && d.urlscan.flag ? ` · ${d.urlscan.flag}` : ""}
+                                      {!d.urlscan.isPrimaryTarget && (
+                                        <span className="text-[9px] ml-1" style={{ color: "#fbbf24" }} title="No urlscan scan targets this exact host. It only appears as a contacted domain / redirect hop inside scans of other URLs, so no host-specific verdict, title, or screenshot is shown.">⚠ host only seen as contacted domain — no direct scan</span>
                                       )}
-                                      {" · "}<a href={isIP ? `https://urlscan.io/ip/${encodeURIComponent(arr[i])}` : `https://urlscan.io/domain/${encodeURIComponent(arr[i].replace(/^https?:\/\//i, "").split("/")[0])}`} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "#fbbf24" }}>History</a>
-                                      {d.urlscan.linkIsExactHost && d.urlscan.screenshot && (
+                                      {d.urlscan.link && <>{" · "}<a href={d.urlscan.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a></>}
+                                      {" · "}<a href={d.urlscan.hostSearchLink || (isIP ? `https://urlscan.io/ip/${encodeURIComponent(arr[i])}` : `https://urlscan.io/domain/${encodeURIComponent(arr[i].replace(/^https?:\/\//i, "").split("/")[0])}`)} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "#fbbf24" }}>History</a>
+                                      {d.urlscan.isPrimaryTarget && d.urlscan.screenshot && (
                                         <span className="relative inline-block ml-1" style={{ cursor: "pointer" }}>
                                           <a href={d.urlscan.screenshot} target="_blank" rel="noreferrer noopener"
                                             className="peer text-[10px] px-1 py-0.5 rounded inline-block"
@@ -4594,14 +4620,20 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
       edges.push({ a, b, kind, color: color || "rgba(120,160,180,0.35)" });
     };
 
+    // Categories that don't represent network/file infrastructure and add no
+    // value as graph nodes (MITRE techniques, CVEs, YARA rules, etc.).
+    const GRAPH_SKIP_CATS = new Set(["MITRE_ATTACK", "CVE", "YARA"]);
+
     // 1. Primary IOC nodes
     Object.entries(iocData).forEach(([cat, arr]) => {
       if (!Array.isArray(arr)) return;
+      if (GRAPH_SKIP_CATS.has(cat)) return;
       arr.forEach((val) => addNode(val, val, cat, false, verdictOf(cat, val)));
     });
 
     // 2. Derived nodes + edges from enrichment
     Object.entries(iocData).forEach(([cat, arr]) => {
+      if (GRAPH_SKIP_CATS.has(cat)) return;
       if (!Array.isArray(arr)) return;
       arr.forEach((val) => {
         const d = enrichCache[`${cat}::${val}`]?.data;
@@ -4679,9 +4711,37 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
     });
 
     const nodeArr = Array.from(nodes.values());
+
+    // Mark "bridge" nodes: infrastructure shared between 2+ distinct primary
+    // IOCs (e.g. an IP that both abc.com and xyz.com resolve to). These are the
+    // most valuable pivots in a graph, so we flag them for standout coloring.
+    const primaryNeighbors = {}; // nodeId -> Set of primary IOC ids connected to it
+    const primaryIds = new Set(nodeArr.filter((n) => !n.derived).map((n) => n.id));
+    edges.forEach((e) => {
+      if (e.kind === "asn") return; // ASN grouping edges don't count as pivots
+      const aPrim = primaryIds.has(e.a), bPrim = primaryIds.has(e.b);
+      if (aPrim && !bPrim) { (primaryNeighbors[e.b] = primaryNeighbors[e.b] || new Set()).add(e.a); }
+      if (bPrim && !aPrim) { (primaryNeighbors[e.a] = primaryNeighbors[e.a] || new Set()).add(e.b); }
+      // primary-to-primary direct link also makes both bridges
+      if (aPrim && bPrim) {
+        (primaryNeighbors[e.a] = primaryNeighbors[e.a] || new Set()).add(e.b);
+        (primaryNeighbors[e.b] = primaryNeighbors[e.b] || new Set()).add(e.a);
+      }
+    });
+    nodeArr.forEach((n) => {
+      n.bridge = (primaryNeighbors[n.id]?.size || 0) >= 2;
+    });
+    // Flag edges touching a bridge node so they can be drawn to stand out.
+    edges.forEach((e) => {
+      const aB = nodeArr.find((n) => n.id === e.a)?.bridge;
+      const bB = nodeArr.find((n) => n.id === e.b)?.bridge;
+      e.toBridge = !!(aB || bB) && e.kind !== "asn";
+    });
+
+    const bridgeCount = nodeArr.filter((n) => n.bridge).length;
     return {
       nodes: nodeArr, edges,
-      stats: { nodes: nodeArr.length, edges: edges.length, derived: nodeArr.filter((n) => n.derived).length },
+      stats: { nodes: nodeArr.length, edges: edges.length, derived: nodeArr.filter((n) => n.derived).length, bridges: bridgeCount },
     };
   }, [iocData, enrichCache]);
 
@@ -4727,8 +4787,11 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
   }, []);
 
   // Fullscreen: resize canvas to viewport, lock body scroll, ESC to exit.
+  // Capture scroll position before locking so we can restore it on exit —
+  // position:fixed + overflow:hidden otherwise jumps the page to the top.
   useEffect(() => {
     if (fullscreen) {
+      const savedScrollY = window.scrollY || window.pageYOffset || 0;
       setDims({ w: window.innerWidth, h: window.innerHeight });
       const prevOverflow = document.body.style.overflow;
       document.body.style.overflow = "hidden";
@@ -4740,6 +4803,8 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
         document.body.style.overflow = prevOverflow;
         window.removeEventListener("keydown", onKey);
         window.removeEventListener("resize", onResize);
+        // Restore scroll to where the user was before entering fullscreen.
+        window.scrollTo(0, savedScrollY);
       };
     }
   }, [fullscreen]);
@@ -4823,15 +4888,17 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
         if (!a || !b) continue;
         const pa = toScreen(a), pb = toScreen(b);
         const dim = hoverId && !(e.a === hoverId || e.b === hoverId);
-        ctx.strokeStyle = dim ? "rgba(120,160,180,0.06)" : e.color;
-        ctx.lineWidth = e.kind === "asn" ? 0.6 : 1.1;
+        // Bridge edges (touching shared-infrastructure pivot nodes) stand out in gold.
+        const edgeColor = e.toBridge ? "rgba(255,209,102,0.75)" : e.color;
+        ctx.strokeStyle = dim ? "rgba(120,160,180,0.06)" : edgeColor;
+        ctx.lineWidth = e.kind === "asn" ? 0.6 : (e.toBridge ? 1.8 : 1.1);
         ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
         // Flow particle
         if (!dim && e.kind !== "asn") {
           const prog = ((S.t * 0.01) + (e.a.charCodeAt(0) % 10) * 0.1) % 1;
           const px = pa.x + (pb.x - pa.x) * prog, py = pa.y + (pb.y - pa.y) * prog;
-          ctx.fillStyle = e.color.replace(/[\d.]+\)$/, "0.9)");
-          ctx.beginPath(); ctx.arc(px, py, 1.8, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = e.toBridge ? "rgba(255,209,102,0.95)" : e.color.replace(/[\d.]+\)$/, "0.9)");
+          ctx.beginPath(); ctx.arc(px, py, e.toBridge ? 2.4 : 1.8, 0, Math.PI * 2); ctx.fill();
         }
       }
 
@@ -4845,15 +4912,17 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
         const dim = hoverId && !isHover && !isNeighbor;
         const R = n.r * cam.zoom * (isHover ? 1.4 : 1);
 
-        // Pulsing glow for malicious/suspicious
+        // Pulsing glow for malicious/suspicious; bridge nodes always pulse gold.
+        const BRIDGE_GOLD = "#ffd166";
         let glowR = R * 2.4;
-        if (n.verdict === "Malicious") glowR *= 1.15 + 0.12 * Math.sin(S.t * 0.08);
+        if (n.bridge) glowR *= 1.2 + 0.14 * Math.sin(S.t * 0.07);
+        else if (n.verdict === "Malicious") glowR *= 1.15 + 0.12 * Math.sin(S.t * 0.08);
         else if (n.verdict === "Suspicious") glowR *= 1.05 + 0.08 * Math.sin(S.t * 0.06);
 
         if (!dim) {
           const g = ctx.createRadialGradient(p.x, p.y, R * 0.5, p.x, p.y, glowR);
-          const glowColor = vc || base;
-          g.addColorStop(0, glowColor + (isHover ? "cc" : "66"));
+          const glowColor = n.bridge ? BRIDGE_GOLD : (vc || base);
+          g.addColorStop(0, glowColor + (isHover ? "cc" : n.bridge ? "88" : "66"));
           g.addColorStop(1, glowColor + "00");
           ctx.fillStyle = g;
           ctx.beginPath(); ctx.arc(p.x, p.y, glowR, 0, Math.PI * 2); ctx.fill();
@@ -4863,17 +4932,23 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
         ctx.globalAlpha = dim ? 0.25 : 1;
         const body = ctx.createRadialGradient(p.x - R * 0.3, p.y - R * 0.3, R * 0.2, p.x, p.y, R);
         body.addColorStop(0, "#ffffff");
-        body.addColorStop(0.3, base);
-        body.addColorStop(1, vc || base);
+        body.addColorStop(0.3, n.bridge ? BRIDGE_GOLD : base);
+        body.addColorStop(1, n.bridge ? "#f59e0b" : (vc || base));
         ctx.fillStyle = body;
         ctx.beginPath(); ctx.arc(p.x, p.y, R, 0, Math.PI * 2); ctx.fill();
 
-        // Ring for derived vs primary
-        ctx.lineWidth = 1.5;
-        ctx.strokeStyle = n.derived ? "rgba(255,255,255,0.25)" : (vc || base);
-        if (n.derived) ctx.setLineDash([2, 2]);
-        ctx.beginPath(); ctx.arc(p.x, p.y, R + 1.5, 0, Math.PI * 2); ctx.stroke();
-        ctx.setLineDash([]);
+        // Ring: bridge = solid gold (thicker), else derived dashed / primary solid.
+        if (n.bridge) {
+          ctx.lineWidth = 2.5;
+          ctx.strokeStyle = BRIDGE_GOLD;
+          ctx.beginPath(); ctx.arc(p.x, p.y, R + 2, 0, Math.PI * 2); ctx.stroke();
+        } else {
+          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = n.derived ? "rgba(255,255,255,0.25)" : (vc || base);
+          if (n.derived) ctx.setLineDash([2, 2]);
+          ctx.beginPath(); ctx.arc(p.x, p.y, R + 1.5, 0, Math.PI * 2); ctx.stroke();
+          ctx.setLineDash([]);
+        }
 
         // Label (only when zoomed enough or hovered)
         if ((cam.zoom > 0.75 || isHover) && !dim) {
@@ -4969,25 +5044,13 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
         }}>
         {fullscreen ? <><X size={13} /> Exit Fullscreen</> : <><Share2 size={13} /> Fullscreen</>}
       </button>
-      {/* Persistent exit bar in fullscreen (top center) so it's always obvious how to leave */}
-      {fullscreen && (
-        <button onClick={() => setFullscreen(false)}
-          className="absolute z-20 flex items-center gap-1.5 rounded-full px-4 py-1.5 text-xs font-semibold"
-          style={{
-            top: 12, left: "50%", transform: "translateX(-50%)",
-            background: "rgba(255,77,109,0.9)", color: "#fff",
-            border: "1px solid rgba(255,77,109,1)", cursor: "pointer",
-            boxShadow: "0 0 20px rgba(255,77,109,0.5)",
-          }}>
-          <X size={13} /> Exit Fullscreen (Esc)
-        </button>
-      )}
       {/* Stats bar */}
       <div className="absolute top-3 left-3 z-10 flex items-center gap-3 rounded-lg px-3 py-1.5 text-[11px]"
         style={{ background: "rgba(10,14,20,0.8)", border: "1px solid rgba(120,160,180,0.2)", backdropFilter: "blur(6px)", color: "#9fb3bd" }}>
         <span><span style={{ color: "#00ff9c", fontWeight: 700 }}>{model.stats.nodes}</span> nodes</span>
         <span><span style={{ color: "#00e5ff", fontWeight: 700 }}>{model.stats.edges}</span> links</span>
         <span><span style={{ color: "#c084fc", fontWeight: 700 }}>{model.stats.derived}</span> derived</span>
+        {model.stats.bridges > 0 && <span><span style={{ color: "#ffd166", fontWeight: 700 }}>{model.stats.bridges}</span> shared</span>}
       </div>
       {/* Legend */}
       <div className="absolute top-3 right-3 z-10 flex flex-wrap gap-2 rounded-lg px-3 py-1.5 max-w-[60%] justify-end"
@@ -5000,6 +5063,9 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
         ))}
         <span className="flex items-center gap-1 text-[10px]" style={{ color: "#9fb3bd" }}>
           <span style={{ width: 8, height: 8, borderRadius: 99, border: "1.5px dashed rgba(255,255,255,0.4)" }} /> derived
+        </span>
+        <span className="flex items-center gap-1 text-[10px]" style={{ color: "#ffd166" }}>
+          <span style={{ width: 8, height: 8, borderRadius: 99, background: "#ffd166", boxShadow: "0 0 6px #ffd166" }} /> shared pivot
         </span>
       </div>
       {/* Hint */}
