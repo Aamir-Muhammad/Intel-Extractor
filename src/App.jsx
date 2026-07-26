@@ -37,7 +37,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v81";
+const APP_VERSION = "v82";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -3374,17 +3374,6 @@ export default function App() {
           <span className="text-3xl font-medium tabular-nums" style={{ color: "#00e5ff", letterSpacing: "-1px" }}>{entries.length}</span>
           <span className="text-[10px] uppercase" style={{ color: "#5d7382", letterSpacing: "1.5px" }}>types</span>
           <div className="flex items-center gap-2 flex-wrap w-full sm:w-auto sm:ml-auto">
-            <button onClick={() => setGraphView((v) => !v)}
-              title={graphView ? "Switch to card view" : "Switch to infrastructure graph"}
-              className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold"
-              style={{
-                color: graphView ? "#04111a" : "#00e5ff",
-                backgroundColor: graphView ? "#00e5ff" : "rgba(0,229,255,0.14)",
-                border: `1px solid rgba(0,229,255,${graphView ? "1" : "0.55"})`,
-                boxShadow: graphView ? "0 0 18px rgba(0,229,255,0.5)" : "none",
-              }}>
-              <Share2 size={15} /> {graphView ? "Cards" : "Graph"}
-            </button>
             <button onClick={() => { setCondensed((v) => !v); setRowOverride({}); setCardCondensed({}); }}
               title={condensed ? "Expand all enrichment sections" : "Collapse to verdicts only"}
               className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold"
@@ -3731,7 +3720,7 @@ export default function App() {
           </div>
         )}
 
-        {graphView && entries.length > 0 && (
+        {entries.length > 0 && (
           <div className="mb-4">
             <ThreatGraph iocData={iocData} enrichCache={enrichCache} colorFor={colorFor}
               enrichIOC={enrichIOC} logEvent={logEvent} copyText={copyText}
@@ -3739,7 +3728,7 @@ export default function App() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 gap-4" style={{ display: graphView ? "none" : "grid" }}>
+        <div className="grid grid-cols-1 gap-4">
           {entries.map(([cat, arr]) => {
             const c = colorFor(cat);
             // Card-level effective collapse: explicit card state wins over global.
@@ -4794,14 +4783,61 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
     };
   }, [iocData, enrichCache]);
 
-  // Seed physics state when model changes
+  // Seed physics state when model changes. Preserve positions of nodes that
+  // already exist (incremental layout) so the graph doesn't re-explode on every
+  // enrichment; only brand-new nodes spawn fresh near their parent.
+  const prevPosRef = useRef(new Map()); // id -> {x,y,vx,vy}
   useEffect(() => {
+    const prev = prevPosRef.current;
+    const edgesByNode = {};
+    model.edges.forEach((e) => {
+      if (e.kind === "asn") return;
+      (edgesByNode[e.a] = edgesByNode[e.a] || []).push(e.b);
+      (edgesByNode[e.b] = edgesByNode[e.b] || []).push(e.a);
+    });
+    let newCount = 0;
+    model.nodes.forEach((n) => {
+      const p = prev.get(n.id);
+      if (p) {
+        // Existing node — keep its settled position and velocity.
+        n.x = p.x; n.y = p.y; n.vx = p.vx * 0.3; n.vy = p.vy * 0.3;
+        n.isNew = false;
+      } else {
+        // New node — spawn near a connected parent that already has a position,
+        // so it visibly "flies out" from where it belongs rather than the center.
+        const parents = (edgesByNode[n.id] || []).map((pid) => prev.get(pid)).filter(Boolean);
+        if (parents.length) {
+          const par = parents[0];
+          const ang = Math.random() * Math.PI * 2;
+          n.x = par.x + Math.cos(ang) * 30; n.y = par.y + Math.sin(ang) * 30;
+        } else {
+          // Unconnected new node — spawn out toward the periphery so it drifts
+          // away rather than crowding the center.
+          const ang = Math.random() * Math.PI * 2;
+          const R = 360 + Math.random() * 160;
+          n.x = Math.cos(ang) * R; n.y = Math.sin(ang) * R;
+        }
+        n.vx = 0; n.vy = 0; n.isNew = true; n.spawnT = 0;
+        newCount++;
+      }
+    });
     stateRef.current.nodes = model.nodes;
     stateRef.current.edges = model.edges;
-    stateRef.current.t = 0;
-    // reset camera to center
-    camRef.current.x = 0; camRef.current.y = 0; camRef.current.zoom = 1;
+    // Only fully re-heat the sim on the very first layout; subsequent enrichments
+    // keep it "warm" (low energy) so settled clusters stay calm while new nodes weave in.
+    const firstLayout = prev.size === 0;
+    stateRef.current.t = firstLayout ? 0 : 480; // 480 = past the hot phase, gentle settle
+    stateRef.current.warmKick = newCount > 0 ? 90 : 0; // brief local energy for new nodes
+
+    // Re-point selection/hover to the fresh node object, or clear if it's gone.
+    // (A stale `selected` referencing a removed node is what black-screened the app.)
+    setSelected((sel) => (sel ? (model.nodes.find((n) => n.id === sel.id) || null) : null));
+
+    if (firstLayout) { camRef.current.x = 0; camRef.current.y = 0; camRef.current.zoom = 1; }
   }, [model]);
+
+  // Keep the position cache updated each frame via a light effect that snapshots
+  // on unmount of each model; simpler: snapshot inside the render loop (below).
 
   // Node visibility per slicer filters. Stored in a ref the render loop reads,
   // plus a state bump to trigger redraws when toggles change.
@@ -4950,8 +4986,11 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
       const N = S.nodes, E = S.edges;
       const cx = dims.w / 2, cy = dims.h / 2;
 
-      // Force simulation (only run actively early, then settle to save CPU)
-      const active = S.t < 600 || cam.dragNode;
+      // Force simulation. Runs hot on first layout, then stays "warm" — a low
+      // baseline of motion so new nodes can weave in without re-exploding the
+      // settled graph. warmKick gives brief extra energy right after new nodes arrive.
+      if (S.warmKick > 0) S.warmKick -= 1;
+      const active = S.t < 600 || cam.dragNode || S.warmKick > 0;
       if (active) {
         // Repulsion
         for (let i = 0; i < N.length; i++) {
@@ -4977,15 +5016,24 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
           const fx = (dx / dist) * k, fy = (dy / dist) * k;
           a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
         }
-        // Centering + integrate
+        // Centering + integrate. Settled (non-new) nodes get heavier damping so
+        // they barely move while new arrivals animate in.
         for (const n of N) {
           n.vx += (0 - n.x) * 0.0016;
           n.vy += (0 - n.y) * 0.0016;
           if (cam.dragNode === n) { n.vx = 0; n.vy = 0; continue; }
-          n.vx *= 0.86; n.vy *= 0.86;
+          // New nodes ease in a bit faster/looser; settled nodes damp harder.
+          const damp = n.isNew ? 0.88 : 0.82;
+          n.vx *= damp; n.vy *= damp;
           n.x += n.vx; n.y += n.vy;
+          if (n.isNew) {
+            n.spawnT = (n.spawnT || 0) + 1;
+            if (n.spawnT > 90) n.isNew = false; // graduate to settled after ~1.5s
+          }
         }
       }
+      // Snapshot positions so the next model rebuild can preserve them.
+      { const snap = prevPosRef.current; snap.clear(); for (const n of N) snap.set(n.id, { x: n.x, y: n.y, vx: n.vx, vy: n.vy }); }
 
       // ---- Draw ----
       ctx.clearRect(0, 0, dims.w, dims.h);
@@ -5035,7 +5083,9 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
         const isHover = hoverId === n.id;
         const isNeighbor = neighbors.has(n.id);
         const dim = hoverId && !isHover && !isNeighbor;
-        const R = n.r * cam.zoom * (isHover ? 1.4 : 1);
+        // New nodes ease up from 0 → full size for a graceful "pop in".
+        const spawnScale = n.isNew ? Math.min(1, 0.3 + (n.spawnT || 0) / 90 * 0.7) : 1;
+        const R = n.r * cam.zoom * (isHover ? 1.4 : 1) * spawnScale;
 
         // Pulsing glow for malicious/suspicious; bridge nodes always pulse gold.
         const BRIDGE_GOLD = "#ffd166";
@@ -5045,16 +5095,20 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
         else if (n.verdict === "Suspicious") glowR *= 1.05 + 0.08 * Math.sin(S.t * 0.06);
 
         if (!dim) {
+          const preGlow = E.length === 0;
+          ctx.globalAlpha = preGlow ? 0.45 : 1;
           const g = ctx.createRadialGradient(p.x, p.y, R * 0.5, p.x, p.y, glowR);
           const glowColor = n.bridge ? BRIDGE_GOLD : (vc || base);
           g.addColorStop(0, glowColor + (isHover ? "cc" : n.bridge ? "88" : "66"));
           g.addColorStop(1, glowColor + "00");
           ctx.fillStyle = g;
           ctx.beginPath(); ctx.arc(p.x, p.y, glowR, 0, Math.PI * 2); ctx.fill();
+          ctx.globalAlpha = 1;
         }
 
         // Node body
-        ctx.globalAlpha = dim ? 0.25 : 1;
+        const preGraph = E.length === 0; // no relationships yet → dim to background texture
+        ctx.globalAlpha = dim ? 0.25 : (preGraph ? 0.4 : 1);
         const body = ctx.createRadialGradient(p.x - R * 0.3, p.y - R * 0.3, R * 0.2, p.x, p.y, R);
         body.addColorStop(0, "#ffffff");
         body.addColorStop(0.3, n.bridge ? BRIDGE_GOLD : base);
@@ -5076,7 +5130,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
         }
 
         // Label (only when zoomed enough or hovered)
-        if ((cam.zoom > 0.75 || isHover) && !dim) {
+        if (((cam.zoom > 0.75 && E.length > 0) || isHover) && !dim) {
           ctx.globalAlpha = isHover ? 1 : 0.85;
           ctx.font = `${isHover ? 12 : 10}px ui-monospace, monospace`;
           ctx.fillStyle = isHover ? "#eafcff" : "#9fb3bd";
@@ -5169,11 +5223,16 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
 
   // Node action handlers for the floating panel.
   const doEnrichNode = (n) => {
-    if (!enrichIOC) return;
+    if (!enrichIOC || !n) return;
     setNodeActionState((s) => ({ ...s, [n.id]: "enriching" }));
-    Promise.resolve(enrichIOC(n.cat, n.id)).finally(() => {
+    try {
+      const p = enrichIOC(n.cat, n.id);
+      Promise.resolve(p).catch(() => {}).finally(() => {
+        setNodeActionState((s) => ({ ...s, [n.id]: undefined }));
+      });
+    } catch {
       setNodeActionState((s) => ({ ...s, [n.id]: undefined }));
-    });
+    }
   };
   const doDashboardNode = (n) => {
     if (logEvent) logEvent({ event_type: "graph_flag", ioc_type: n.cat, ioc_value: n.id, verdict: n.verdict || "Unknown" });
@@ -5201,6 +5260,10 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
     ["IPV4", "IP address"], ["DOMAIN", "Domain"], ["URL", "URL"],
     ["SHA256", "File hash"], ["EMAIL", "Email"],
   ];
+
+  // Minimal default state: until relationships exist (edges), hide the stats /
+  // legend / slicer so the just-parsed view is calm with a single clear caption.
+  const hasGraph = model.stats.edges > 0;
 
   return (
     <div ref={wrapRef} className={fullscreen ? "overflow-hidden relative" : "rounded-xl overflow-hidden relative"}
@@ -5238,7 +5301,8 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
           <Search size={14} />
         </button>
       </div>
-      {/* Slicer chip-bar */}
+      {/* Slicer chip-bar — only once relationships exist */}
+      {hasGraph && (
       <div className="absolute z-10 flex flex-wrap items-center gap-1.5 rounded-lg px-2.5 py-2 max-w-[calc(100%-24px)]"
         style={{ bottom: 52, left: 12, background: "rgba(10,14,20,0.85)", border: "1px solid rgba(120,160,180,0.2)", backdropFilter: "blur(8px)" }}>
         <span className="text-[9px] uppercase tracking-widest font-bold mr-1" style={{ color: "#5d7382" }}>Filter</span>
@@ -5288,15 +5352,17 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
           </button>
         )}
       </div>
-      {/* Stats bar */}
+      )}
+      {/* Stats bar — minimal (just node count) before graph forms, full after */}
       <div className="absolute top-3 left-3 z-10 flex items-center gap-3 rounded-lg px-3 py-1.5 text-[11px]"
         style={{ background: "rgba(10,14,20,0.8)", border: "1px solid rgba(120,160,180,0.2)", backdropFilter: "blur(6px)", color: "#9fb3bd" }}>
         <span><span style={{ color: "#00ff9c", fontWeight: 700 }}>{model.stats.nodes}</span> nodes</span>
-        <span><span style={{ color: "#00e5ff", fontWeight: 700 }}>{model.stats.edges}</span> links</span>
-        <span><span style={{ color: "#c084fc", fontWeight: 700 }}>{model.stats.derived}</span> derived</span>
-        {model.stats.bridges > 0 && <span><span style={{ color: "#ffd166", fontWeight: 700 }}>{model.stats.bridges}</span> shared</span>}
+        {hasGraph && <span><span style={{ color: "#00e5ff", fontWeight: 700 }}>{model.stats.edges}</span> links</span>}
+        {hasGraph && <span><span style={{ color: "#c084fc", fontWeight: 700 }}>{model.stats.derived}</span> derived</span>}
+        {hasGraph && model.stats.bridges > 0 && <span><span style={{ color: "#ffd166", fontWeight: 700 }}>{model.stats.bridges}</span> shared</span>}
       </div>
-      {/* Legend */}
+      {/* Legend — only once relationships exist */}
+      {hasGraph && (
       <div className="absolute top-3 right-3 z-10 flex flex-wrap gap-2 rounded-lg px-3 py-1.5 max-w-[60%] justify-end"
         style={{ background: "rgba(10,14,20,0.8)", border: "1px solid rgba(120,160,180,0.2)", backdropFilter: "blur(6px)" }}>
         {legendItems.map(([cat, label]) => (
@@ -5312,10 +5378,13 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
           <span style={{ width: 8, height: 8, borderRadius: 99, background: "#ffd166", boxShadow: "0 0 6px #ffd166" }} /> shared pivot
         </span>
       </div>
-      {/* Hint */}
+      )}
+      {/* Hint — only show interaction hint once there's a graph to interact with */}
+      {hasGraph && (
       <div className="absolute bottom-3 left-3 z-10 text-[10px]" style={{ color: "#5d7382" }}>
         drag nodes · scroll/pinch to zoom · drag to pan · click a node for actions
       </div>
+      )}
       {!anyEnriched && (
         <div className="absolute z-10 text-[11px] font-semibold pointer-events-none"
           style={{ top: 10, left: "50%", transform: "translateX(-50%)", color: "#7f95a3" }}>
@@ -5326,6 +5395,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
       <canvas ref={canvasRef}
         style={{ width: dims.w, height: dims.h, display: "block", touchAction: "none", transition: "height 0.6s cubic-bezier(0.22,1,0.36,1)" }}
         onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp}
+        onDoubleClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
       />
 
       {/* Hover card */}
@@ -5351,9 +5421,10 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
 
       {/* Node action panel — click a node to open */}
       {selected && (() => {
-        const st = nodeActionState[selected.id];
-        const canEnrich = ["IPV4", "IPV6", "DOMAIN", "URL", "MD5", "SHA1", "SHA256"].includes(selected.cat);
-        const c = colorFor(selected.cat);
+        try {
+          const st = nodeActionState[selected.id];
+          const canEnrich = ["IPV4", "IPV6", "DOMAIN", "URL", "MD5", "SHA1", "SHA256"].includes(selected.cat);
+          const c = colorFor(selected.cat) || "#00e5ff";
         return (
           <div className="absolute z-30 rounded-xl p-3"
             style={{ top: 52, right: 12, width: 260, background: "rgba(10,14,20,0.97)", border: `1px solid ${c}66`, backdropFilter: "blur(10px)", boxShadow: `0 0 30px ${c}33` }}>
@@ -5396,6 +5467,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
             </div>
           </div>
         );
+        } catch { return null; }
       })()}
     </div>
   );
