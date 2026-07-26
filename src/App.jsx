@@ -37,7 +37,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v77";
+const APP_VERSION = "v78";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -2300,7 +2300,22 @@ export default function App() {
           if (uj && !uj.error && Array.isArray(uj.results) && uj.results.length > 0) {
             const totalScans = uj.total || uj.results.length;
             const malCount = uj.results.filter((r) => r.verdicts?.overall?.malicious || r.verdicts?.urlscan?.malicious).length;
-            const latest = uj.results[0]; // results sorted by date desc
+            // urlscan search matches the apex/registrable domain, so results[0]
+            // (newest) may be a DIFFERENT subdomain than the exact IOC. Prefer the
+            // newest scan whose host actually equals the queried host; only fall
+            // back to the apex-newest if none match exactly.
+            const iocHostExact = (() => {
+              if (cat === "IPV4" || cat === "IPV6") return String(value).toLowerCase();
+              try { return new URL(value.includes("://") ? value : "https://" + value).hostname.toLowerCase(); }
+              catch { return String(value).toLowerCase().replace(/^https?:\/\//, "").split("/")[0]; }
+            })();
+            const hostOfResult = (r) => {
+              const h = r.page?.domain || (() => { try { return new URL(r.page?.url || r.task?.url).hostname; } catch { return null; } })();
+              return h ? String(h).toLowerCase() : null;
+            };
+            const exactMatch = uj.results.find((r) => hostOfResult(r) === iocHostExact);
+            const latest = exactMatch || uj.results[0]; // prefer exact host, else apex-newest
+            const latestIsExactHost = !!exactMatch; // false = latest is a sibling subdomain
             const oldest = uj.results[uj.results.length - 1];
             const pageTitle = latest.page?.title || null;
             const pageServer = latest.page?.server || null;
@@ -2332,6 +2347,12 @@ export default function App() {
               flag: countryFlag(pageCountry),
               scanDate,
               link: resultUrl ? `https://urlscan.io/result/${latest._id}/` : null,
+              // True only when the linked scan is for the exact IOC host. When false,
+              // the View link / title / screenshot are for a sibling subdomain on the
+              // same apex — the UI labels them accordingly so they aren't mistaken
+              // for the IOC's own page.
+              linkIsExactHost: latestIsExactHost,
+              linkedHost: hostOfResult(latest),
               screenshot: latest.screenshot || null,
               firstSeen: usFirstSeen,
               lastSeen: usLastSeen,
@@ -4073,10 +4094,13 @@ export default function App() {
                                       backgroundColor: d.urlscan.malicious > 0 ? "rgba(255,77,109,0.12)" : "rgba(56,189,248,0.10)",
                                       border: `1px solid ${d.urlscan.malicious > 0 ? "rgba(255,77,109,0.3)" : "rgba(56,189,248,0.3)"}`,
                                     }}>
-                                      Urlscan.io · {d.urlscan.scans} Scan{d.urlscan.scans !== 1 ? "s" : ""}{d.urlscan.malicious > 0 ? ` · 🔴 ${d.urlscan.malicious} Malicious` : ""}{d.urlscan.title ? ` · "${d.urlscan.title}"` : ""}{d.urlscan.server ? ` · ${d.urlscan.server}` : ""}{d.urlscan.country && d.urlscan.flag ? ` · ${d.urlscan.flag}` : ""}
-                                      {d.urlscan.link && <>{" · "}<a href={d.urlscan.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a></>}
+                                      Urlscan.io · {d.urlscan.scans} Scan{d.urlscan.scans !== 1 ? "s" : ""}{d.urlscan.malicious > 0 ? ` · 🔴 ${d.urlscan.malicious} Malicious` : ""}{d.urlscan.linkIsExactHost && d.urlscan.title ? ` · "${d.urlscan.title}"` : ""}{d.urlscan.server ? ` · ${d.urlscan.server}` : ""}{d.urlscan.country && d.urlscan.flag ? ` · ${d.urlscan.flag}` : ""}
+                                      {d.urlscan.link && <>{" · "}<a href={d.urlscan.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>{d.urlscan.linkIsExactHost ? "View" : "View (sibling host)"}</a></>}
+                                      {!d.urlscan.linkIsExactHost && d.urlscan.linkedHost && (
+                                        <span className="text-[9px] ml-1" style={{ color: "#fbbf24" }} title={`No exact scan for this host; latest scan on the apex is for ${d.urlscan.linkedHost}`}>⚠ no exact-host scan</span>
+                                      )}
                                       {" · "}<a href={isIP ? `https://urlscan.io/ip/${encodeURIComponent(arr[i])}` : `https://urlscan.io/domain/${encodeURIComponent(arr[i].replace(/^https?:\/\//i, "").split("/")[0])}`} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "#fbbf24" }}>History</a>
-                                      {d.urlscan.screenshot && (
+                                      {d.urlscan.linkIsExactHost && d.urlscan.screenshot && (
                                         <span className="relative inline-block ml-1" style={{ cursor: "pointer" }}>
                                           <a href={d.urlscan.screenshot} target="_blank" rel="noreferrer noopener"
                                             className="peer text-[10px] px-1 py-0.5 rounded inline-block"
@@ -4166,7 +4190,12 @@ export default function App() {
                                     const isActualSubdomain = registrableDomain(iocHost) !== iocHost.toLowerCase();
                                     const isNewDomain = dr?.state === "active" && dr?.ageDays != null && dr.ageDays < 30;
                                     const isNewSubdomain = isActualSubdomain && sd?.subdomainAgeDays != null && sd.subdomainAgeDays < 30 && dr?.ageDays > 120;
-                                    const showSubdomainLine = sd?.subdomainAgeDays != null && isActualSubdomain;
+                                    // A subdomain cannot be older than its registrable domain's
+                                    // registration. urlscan's observational age is unreliable for
+                                    // cloud/wildcard hosts (AWS, Atlassian PaaS) and sometimes
+                                    // exceeds the domain age — suppress it when that happens.
+                                    const subExceedsDomain = sd?.subdomainAgeDays != null && dr?.ageDays != null && sd.subdomainAgeDays > dr.ageDays;
+                                    const showSubdomainLine = sd?.subdomainAgeDays != null && isActualSubdomain && !subExceedsDomain;
                                     const isAlert = isNewDomain || isNewSubdomain;
                                     return (
                                       <span className="rounded-full px-2 py-0.5" style={{
@@ -4183,7 +4212,7 @@ export default function App() {
                                     const sd = d.urlscan;
                                     const iocHost = arr[i].replace(/^https?:\/\//i, "").split("/")[0];
                                     const isActualSubdomain = registrableDomain(iocHost) !== iocHost.toLowerCase();
-                                    const showSub = sd?.subdomainAgeDays != null && isActualSubdomain;
+                                    const showSub = sd?.subdomainAgeDays != null && isActualSubdomain && (sd.apexAgeDays == null || sd.subdomainAgeDays <= sd.apexAgeDays);
                                     const isNewApex = sd.apexAgeDays < 30;
                                     return (
                                       <span className="rounded-full px-2 py-0.5" style={{
