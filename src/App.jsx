@@ -5224,9 +5224,13 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
   const onUp = (e) => {
     const cam = camRef.current;
     // A quick, low-movement press on a node = click → open action panel.
-    const wasClick = cam.downNode && !cam.movedFar && (Date.now() - (cam.downT || 0)) < 400;
+    const clickedNode = cam.downNode; // capture BEFORE we null it below
+    const wasClick = clickedNode && !cam.movedFar && (Date.now() - (cam.downT || 0)) < 400;
     if (wasClick) {
-      setSelected((prev) => (prev && prev.id === cam.downNode.id ? null : cam.downNode));
+      // Close over the captured node, not the mutable ref (which we null out
+      // immediately after — the setState updater runs async and would otherwise
+      // read cam.downNode as null → "Cannot read properties of null (reading 'id')").
+      setSelected((prev) => (prev && prev.id === clickedNode.id ? null : clickedNode));
     }
     cam.dragNode = null; cam.panning = false; cam.downNode = null; cam.downX = null;
   };
