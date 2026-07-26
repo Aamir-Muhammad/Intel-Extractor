@@ -37,7 +37,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v80";
+const APP_VERSION = "v81";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -2745,7 +2745,8 @@ export default function App() {
   const [customAddCat, setCustomAddCat] = useState(null);           // category currently showing add input
   const [customAddValue, setCustomAddValue] = useState("");
   const [condensed, setCondensed] = useState(false);
-  const [graphView, setGraphView] = useState(false);
+  const [graphView, setGraphView] = useState(true);
+  const [hoveredActionRow, setHoveredActionRow] = useState(null); // eKey whose action button is hovered
   const [pdnsExpanded, setPdnsExpanded] = useState({});   // { "cat::ioc": bool } show all raw obs
   const [pdnsRowOpen, setPdnsRowOpen] = useState({});     // { "cat::ioc::target": bool } per-IP expand
   const [expiringTokens, setExpiringTokens] = useState([]);
@@ -3366,13 +3367,13 @@ export default function App() {
         </div>
 
         {total > 0 && (
-        <div className="flex items-center gap-3 mb-4 py-3" style={{ borderBottom: "1px solid rgba(120,160,180,0.08)" }}>
+        <div className="flex items-center gap-3 mb-4 py-3 flex-wrap" style={{ borderBottom: "1px solid rgba(120,160,180,0.08)" }}>
           <span className="text-3xl font-medium tabular-nums" style={{ color: "#00ff9c", letterSpacing: "-1px" }}>{total}</span>
           <span className="text-[10px] uppercase" style={{ color: "#5d7382", letterSpacing: "1.5px" }}>indicators</span>
           <div className="shrink-0" style={{ width: "1px", height: "28px", background: "rgba(120,160,180,0.15)" }}></div>
           <span className="text-3xl font-medium tabular-nums" style={{ color: "#00e5ff", letterSpacing: "-1px" }}>{entries.length}</span>
           <span className="text-[10px] uppercase" style={{ color: "#5d7382", letterSpacing: "1.5px" }}>types</span>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap w-full sm:w-auto sm:ml-auto">
             <button onClick={() => setGraphView((v) => !v)}
               title={graphView ? "Switch to card view" : "Switch to infrastructure graph"}
               className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold"
@@ -3732,7 +3733,9 @@ export default function App() {
 
         {graphView && entries.length > 0 && (
           <div className="mb-4">
-            <ThreatGraph iocData={iocData} enrichCache={enrichCache} colorFor={colorFor} />
+            <ThreatGraph iocData={iocData} enrichCache={enrichCache} colorFor={colorFor}
+              enrichIOC={enrichIOC} logEvent={logEvent} copyText={copyText}
+              anyEnriched={Object.keys(enrichCache).length > 0} />
           </div>
         )}
 
@@ -3829,7 +3832,7 @@ export default function App() {
                     // Precedence: row override > card/global effective (inheritedCollapse from card scope).
                     const isRowCollapsed = rowOverride[eKey] !== undefined ? rowOverride[eKey] : inheritedCollapse;
                     return (
-                      <div key={i}>
+                      <div key={i} style={hoveredActionRow === eKey ? { background: `${c}14`, borderRadius: "6px", boxShadow: `inset 0 0 0 1px ${c}44`, transition: "background 0.15s, box-shadow 0.15s" } : { transition: "background 0.15s, box-shadow 0.15s" }}>
                         <div className="group flex items-start gap-1.5 py-0.5 leading-relaxed"
                           draggable
                           onDragStart={(e) => { e.dataTransfer.setData("text/plain", arr[i]); handleDragStart(cat, arr[i]); }}
@@ -3905,6 +3908,7 @@ export default function App() {
                           )}
                           {enrichable && (
                             <button onClick={() => enrichIOC(cat, arr[i])}
+                              onMouseEnter={() => setHoveredActionRow(eKey)} onMouseLeave={() => setHoveredActionRow(null)}
                               title="Enrich via ThreatFox / URLhaus / MalwareBazaar / OTX"
                               className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
                               style={{ color: enr?.data ? "#00ff9c" : enr?.error ? "#ff6b6b" : "#c084fc" }}>
@@ -3913,6 +3917,7 @@ export default function App() {
                           )}
                           {vtLink(cat, arr[i]) && (
                             <a href={vtLink(cat, arr[i])} target="_blank" rel="noreferrer noopener"
+                              onMouseEnter={() => setHoveredActionRow(eKey)} onMouseLeave={() => setHoveredActionRow(null)}
                               title="Open in VirusTotal"
                               className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity flex items-center justify-center"
                               style={{ width: 26, height: 26 }}>
@@ -4388,6 +4393,20 @@ export default function App() {
                                         <span className="rounded-full px-2 py-0.5 flex items-center gap-1.5" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.05)", border: "1px solid rgba(148,163,184,0.2)" }}>
                                           <span className="flex-1 min-w-0 flex flex-wrap items-center gap-1.5">
                                             <span style={{ color: "#7c9cff", fontWeight: 600 }}>{target}</span>
+                                            {(() => {
+                                              const shot = enrichCache[`${targetCat}::${target}`]?.data?.urlscan?.screenshot
+                                                || enrichCache[`DOMAIN::${target}`]?.data?.urlscan?.screenshot
+                                                || enrichCache[`URL::${target}`]?.data?.urlscan?.screenshot;
+                                              if (!shot) return null;
+                                              return (
+                                                <span className="relative group/shot inline-flex">
+                                                  <span className="text-[9px] rounded px-1 cursor-help" style={{ color: "#00e5ff", backgroundColor: "rgba(0,229,255,0.1)", border: "1px solid rgba(0,229,255,0.3)" }}>🖼️</span>
+                                                  <img src={shot} alt="preview" loading="lazy"
+                                                    className="hidden group-hover/shot:block absolute z-40 rounded-lg"
+                                                    style={{ bottom: "120%", left: 0, width: 240, border: "1px solid rgba(0,229,255,0.4)", boxShadow: "0 0 24px rgba(0,0,0,0.6)" }} />
+                                                </span>
+                                              );
+                                            })()}
                                             {r.recordType && <span className="text-[9px] px-1 rounded" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.12)" }}>{r.recordType}</span>}
                                             <span className="text-[9px] px-1 rounded font-bold" style={{
                                               color: r.current ? "#00ff9c" : "#8aa0ad",
@@ -4459,6 +4478,20 @@ export default function App() {
                                                 <span className="flex-1 min-w-0 flex flex-wrap items-center gap-1.5">
                                                   <span style={{ color: "#fb923c", fontWeight: 600 }}>{row.v}</span>
                                                   <span className="text-[9px] px-1 rounded" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.12)" }}>{row.cat}</span>
+                                                  {(() => {
+                                                    const shot = enrichCache[`${row.cat}::${row.v}`]?.data?.urlscan?.screenshot
+                                                      || enrichCache[`DOMAIN::${row.v}`]?.data?.urlscan?.screenshot
+                                                      || enrichCache[`URL::${row.v}`]?.data?.urlscan?.screenshot;
+                                                    if (!shot) return null;
+                                                    return (
+                                                      <span className="relative group/shot2 inline-flex">
+                                                        <span className="text-[9px] rounded px-1 cursor-help" style={{ color: "#00e5ff", backgroundColor: "rgba(0,229,255,0.1)", border: "1px solid rgba(0,229,255,0.3)" }}>🖼️</span>
+                                                        <img src={shot} alt="preview" loading="lazy"
+                                                          className="hidden group-hover/shot2:block absolute z-40 rounded-lg"
+                                                          style={{ bottom: "120%", left: 0, width: 240, border: "1px solid rgba(0,229,255,0.4)", boxShadow: "0 0 24px rgba(0,0,0,0.6)" }} />
+                                                      </span>
+                                                    );
+                                                  })()}
                                                 </span>
                                                 {added ? (
                                                   <>
@@ -4579,15 +4612,23 @@ export default function App() {
 //  Verdict-driven glow, particle-flow edges, hover spotlight,
 //  drag, zoom, entrance animation.
 // ============================================================
-function ThreatGraph({ iocData, enrichCache, colorFor }) {
+function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copyText, anyEnriched }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const stateRef = useRef({ nodes: [], edges: [], t: 0 });
   const camRef = useRef({ x: 0, y: 0, zoom: 1, dragNode: null, panning: false, lastX: 0, lastY: 0, hover: null });
   const [dims, setDims] = useState({ w: 900, h: 600 });
   const [hoverInfo, setHoverInfo] = useState(null);
-  const [selected, setSelected] = useState(null);
+  const [selected, setSelected] = useState(null);       // node for the floating action panel
   const [fullscreen, setFullscreen] = useState(false);
+  const [hiddenCats, setHiddenCats] = useState({});     // { CAT: true } to hide a type
+  const [hiddenVerdicts, setHiddenVerdicts] = useState({}); // { Malicious: true } to hide
+  const [hideDerived, setHideDerived] = useState(false);
+  const [hideOrphans, setHideOrphans] = useState(false);
+  const [isolateMalicious, setIsolateMalicious] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [nodeActionState, setNodeActionState] = useState({}); // { nodeId: "enriching"|"added" }
 
   // ---- Build the graph model from IOCs + enrichment ----
   const model = useMemo(() => {
@@ -4739,9 +4780,17 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
     });
 
     const bridgeCount = nodeArr.filter((n) => n.bridge).length;
+    // Orphans: nodes with no real (non-asn) connections — islands.
+    const connected = new Set();
+    edges.forEach((e) => { if (e.kind !== "asn") { connected.add(e.a); connected.add(e.b); } });
+    nodeArr.forEach((n) => { n.orphan = !connected.has(n.id); });
+    // Per-type counts for the slicer (only categories actually present).
+    const typeCountMap = {};
+    nodeArr.forEach((n) => { typeCountMap[n.cat] = (typeCountMap[n.cat] || 0) + 1; });
+    const typeCounts = Object.entries(typeCountMap).sort((a, b) => b[1] - a[1]);
     return {
-      nodes: nodeArr, edges,
-      stats: { nodes: nodeArr.length, edges: edges.length, derived: nodeArr.filter((n) => n.derived).length, bridges: bridgeCount },
+      nodes: nodeArr, edges, typeCounts,
+      stats: { nodes: nodeArr.length, edges: edges.length, derived: nodeArr.filter((n) => n.derived).length, bridges: bridgeCount, orphans: nodeArr.filter((n) => n.orphan).length },
     };
   }, [iocData, enrichCache]);
 
@@ -4754,6 +4803,33 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
     camRef.current.x = 0; camRef.current.y = 0; camRef.current.zoom = 1;
   }, [model]);
 
+  // Node visibility per slicer filters. Stored in a ref the render loop reads,
+  // plus a state bump to trigger redraws when toggles change.
+  const visibleRef = useRef(new Set());
+  const [visTick, setVisTick] = useState(0);
+  useEffect(() => {
+    const malSet = new Set();
+    if (isolateMalicious) {
+      // Keep malicious nodes and their direct neighbors.
+      model.nodes.forEach((n) => { if (n.verdict === "Malicious") malSet.add(n.id); });
+      model.edges.forEach((e) => {
+        if (malSet.has(e.a)) malSet.add(e.b);
+        if (malSet.has(e.b)) malSet.add(e.a);
+      });
+    }
+    const vis = new Set();
+    model.nodes.forEach((n) => {
+      if (hiddenCats[n.cat]) return;
+      if (n.verdict && hiddenVerdicts[n.verdict]) return;
+      if (hideDerived && n.derived) return;
+      if (hideOrphans && n.orphan) return;
+      if (isolateMalicious && !malSet.has(n.id)) return;
+      vis.add(n.id);
+    });
+    visibleRef.current = vis;
+    setVisTick((t) => t + 1);
+  }, [model, hiddenCats, hiddenVerdicts, hideDerived, hideOrphans, isolateMalicious]);
+
   // Resize observer
   useEffect(() => {
     const el = wrapRef.current;
@@ -4763,12 +4839,16 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
       if (fullscreen) {
         setDims({ w: window.innerWidth, h: window.innerHeight });
       } else {
-        setDims({ w: Math.max(320, r.width), h: Math.max(420, Math.min(720, r.width * 0.62)) });
+        // Teaser height before any enrichment (just a taste of the constellation);
+        // blooms to full height once enrichment data exists.
+        const fullH = Math.max(420, Math.min(720, r.width * 0.62));
+        const h = anyEnriched ? fullH : 190;
+        setDims({ w: Math.max(320, r.width), h });
       }
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [fullscreen]);
+  }, [fullscreen, anyEnriched]);
 
   // Non-passive wheel listener — React's onWheel is passive and can't preventDefault,
   // so the page scrolls while zooming. Attach natively to trap it inside the canvas.
@@ -4784,6 +4864,46 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
     };
     canvas.addEventListener("wheel", onWheelNative, { passive: false });
     return () => canvas.removeEventListener("wheel", onWheelNative);
+  }, []);
+
+  // Touch: pinch-to-zoom and one-finger pan (mobile). Native non-passive so the
+  // page doesn't scroll/zoom while interacting with the graph.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    let lastDist = null;
+    let lastTouchX = null, lastTouchY = null;
+    const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+    const onTouchStart = (e) => {
+      if (e.touches.length === 2) { lastDist = dist(e.touches); e.preventDefault(); }
+      else if (e.touches.length === 1) { lastTouchX = e.touches[0].clientX; lastTouchY = e.touches[0].clientY; }
+    };
+    const onTouchMove = (e) => {
+      const cam = camRef.current;
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        const d = dist(e.touches);
+        if (lastDist != null) {
+          const factor = d / lastDist;
+          cam.zoom = Math.max(0.3, Math.min(3.5, cam.zoom * factor));
+        }
+        lastDist = d;
+      } else if (e.touches.length === 1 && lastTouchX != null) {
+        e.preventDefault();
+        const dx = e.touches[0].clientX - lastTouchX, dy = e.touches[0].clientY - lastTouchY;
+        cam.x += dx / cam.zoom; cam.y += dy / cam.zoom;
+        lastTouchX = e.touches[0].clientX; lastTouchY = e.touches[0].clientY;
+      }
+    };
+    const onTouchEnd = (e) => { if (e.touches.length < 2) lastDist = null; if (e.touches.length === 0) { lastTouchX = null; lastTouchY = null; } };
+    canvas.addEventListener("touchstart", onTouchStart, { passive: false });
+    canvas.addEventListener("touchmove", onTouchMove, { passive: false });
+    canvas.addEventListener("touchend", onTouchEnd, { passive: false });
+    return () => {
+      canvas.removeEventListener("touchstart", onTouchStart);
+      canvas.removeEventListener("touchmove", onTouchMove);
+      canvas.removeEventListener("touchend", onTouchEnd);
+    };
   }, []);
 
   // Fullscreen: resize canvas to viewport, lock body scroll, ESC to exit.
@@ -4883,7 +5003,11 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
       }
 
       // Edges (with flow particles)
+      const vis = visibleRef.current;
+      const anyFilter = vis && vis.size !== N.length;
+      const isVis = (id) => !anyFilter || vis.has(id);
       for (const e of E) {
+        if (anyFilter && (!vis.has(e.a) || !vis.has(e.b))) continue;
         const a = N.find((n) => n.id === e.a), b = N.find((n) => n.id === e.b);
         if (!a || !b) continue;
         const pa = toScreen(a), pb = toScreen(b);
@@ -4904,6 +5028,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
 
       // Nodes
       for (const n of N) {
+        if (anyFilter && !vis.has(n.id)) continue;
         const p = toScreen(n);
         const base = catColor(n);
         const vc = verdictColor(n.verdict);
@@ -4972,8 +5097,11 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
   const pick = (mx, my) => {
     const S = stateRef.current, cam = camRef.current;
     const cx = dims.w / 2, cy = dims.h / 2;
+    const vis = visibleRef.current;
+    const anyFilter = vis && vis.size !== S.nodes.length;
     for (let i = S.nodes.length - 1; i >= 0; i--) {
       const n = S.nodes[i];
+      if (anyFilter && !vis.has(n.id)) continue;
       const px = cx + (n.x + cam.x) * cam.zoom, py = cy + (n.y + cam.y) * cam.zoom;
       const R = n.r * cam.zoom + 4;
       if ((mx - px) ** 2 + (my - py) ** 2 <= R * R) return n;
@@ -4988,12 +5116,14 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
     const { x, y } = relPos(e);
     const n = pick(x, y);
     const cam = camRef.current;
-    if (n) { cam.dragNode = n; setSelected(n); }
-    else { cam.panning = true; cam.lastX = x; cam.lastY = y; }
+    cam.downX = x; cam.downY = y; cam.downT = Date.now(); cam.movedFar = false;
+    if (n) { cam.dragNode = n; cam.downNode = n; }
+    else { cam.panning = true; cam.lastX = x; cam.lastY = y; cam.downNode = null; }
   };
   const onMove = (e) => {
     const { x, y } = relPos(e);
     const cam = camRef.current;
+    if (cam.downX != null && ((x - cam.downX) ** 2 + (y - cam.downY) ** 2) > 25) cam.movedFar = true;
     if (cam.dragNode) {
       const cx = dims.w / 2, cy = dims.h / 2;
       cam.dragNode.x = (x - cx) / cam.zoom - cam.x;
@@ -5008,10 +5138,57 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
         const d = enrichCache[`${n.cat}::${n.id}`]?.data;
         setHoverInfo({ x, y, node: n, verdict: n.verdict, asn: n.asn || d?.whoisASN?.asn || null, country: d?.whoisASN?.country || null });
       } else setHoverInfo(null);
-      canvasRef.current.style.cursor = n ? "pointer" : "grab";
+      // Grab cursor over draggable nodes; default elsewhere. Copy is via the
+      // action panel (canvas text can't be natively selected).
+      canvasRef.current.style.cursor = n ? "grab" : "default";
     }
   };
-  const onUp = () => { const cam = camRef.current; cam.dragNode = null; cam.panning = false; };
+  const onUp = (e) => {
+    const cam = camRef.current;
+    // A quick, low-movement press on a node = click → open action panel.
+    const wasClick = cam.downNode && !cam.movedFar && (Date.now() - (cam.downT || 0)) < 400;
+    if (wasClick) {
+      setSelected((prev) => (prev && prev.id === cam.downNode.id ? null : cam.downNode));
+    }
+    cam.dragNode = null; cam.panning = false; cam.downNode = null; cam.downX = null;
+  };
+  // Search: find the first node whose id/label contains the query and ease the
+  // camera to center on it, then select it.
+  const searchAndFocus = (q) => {
+    if (!q || q.trim().length < 2) return;
+    const query = q.trim().toLowerCase();
+    const S = stateRef.current, cam = camRef.current;
+    const match = S.nodes.find((n) => n.id.toLowerCase().includes(query) || String(n.label).toLowerCase().includes(query));
+    if (!match) return;
+    // Center camera on the match and zoom in a bit.
+    cam.zoom = Math.max(cam.zoom, 1.4);
+    cam.x = -match.x; cam.y = -match.y;
+    cam.hover = match.id;
+    setSelected(match);
+  };
+
+  // Node action handlers for the floating panel.
+  const doEnrichNode = (n) => {
+    if (!enrichIOC) return;
+    setNodeActionState((s) => ({ ...s, [n.id]: "enriching" }));
+    Promise.resolve(enrichIOC(n.cat, n.id)).finally(() => {
+      setNodeActionState((s) => ({ ...s, [n.id]: undefined }));
+    });
+  };
+  const doDashboardNode = (n) => {
+    if (logEvent) logEvent({ event_type: "graph_flag", ioc_type: n.cat, ioc_value: n.id, verdict: n.verdict || "Unknown" });
+    setNodeActionState((s) => ({ ...s, [n.id]: "added" }));
+    setTimeout(() => setNodeActionState((s) => ({ ...s, [n.id]: undefined })), 1500);
+  };
+  const doCopyNode = (n) => { if (copyText) copyText(n.id, `graph-${n.id}`); };
+  const vtLinkFor = (n) => {
+    const v = encodeURIComponent(n.id);
+    if (["MD5", "SHA1", "SHA256", "SHA512"].includes(n.cat)) return `https://www.virustotal.com/gui/file/${v}`;
+    if (n.cat === "IPV4" || n.cat === "IPV6") return `https://www.virustotal.com/gui/ip-address/${v}`;
+    if (n.cat === "URL") return `https://www.virustotal.com/gui/search/${v}`;
+    return `https://www.virustotal.com/gui/domain/${v}`;
+  };
+
   if (!iocData || model.nodes.length === 0) {
     return (
       <div className="rounded-xl p-10 text-center" style={{ background: "rgba(10,14,20,0.72)", border: "1px solid rgba(120,160,180,0.16)" }}>
@@ -5044,6 +5221,73 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
         }}>
         {fullscreen ? <><X size={13} /> Exit Fullscreen</> : <><Share2 size={13} /> Fullscreen</>}
       </button>
+      {/* Search icon + expandable box (bottom-right, left of fullscreen) */}
+      <div className="absolute z-20 flex items-center gap-1" style={{ bottom: 12, right: fullscreen ? 170 : 150 }}>
+        {showSearch && (
+          <input autoFocus value={searchQuery}
+            onChange={(e) => { setSearchQuery(e.target.value); searchAndFocus(e.target.value); }}
+            onKeyDown={(e) => { if (e.key === "Enter") searchAndFocus(searchQuery); if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); } }}
+            placeholder="Search node…"
+            className="rounded-lg px-2.5 py-1.5 text-[11px] outline-none"
+            style={{ width: 160, background: "rgba(10,14,20,0.95)", border: "1px solid rgba(0,229,255,0.4)", color: "#dff", backdropFilter: "blur(6px)" }} />
+        )}
+        <button onClick={() => { setShowSearch((v) => !v); if (showSearch) setSearchQuery(""); }}
+          className="rounded-lg p-2 flex items-center justify-center"
+          title="Search nodes"
+          style={{ background: showSearch ? "#00e5ff" : "rgba(0,229,255,0.14)", color: showSearch ? "#04111a" : "#00e5ff", border: "1px solid rgba(0,229,255,0.5)", backdropFilter: "blur(6px)", cursor: "pointer" }}>
+          <Search size={14} />
+        </button>
+      </div>
+      {/* Slicer chip-bar */}
+      <div className="absolute z-10 flex flex-wrap items-center gap-1.5 rounded-lg px-2.5 py-2 max-w-[calc(100%-24px)]"
+        style={{ bottom: 52, left: 12, background: "rgba(10,14,20,0.85)", border: "1px solid rgba(120,160,180,0.2)", backdropFilter: "blur(8px)" }}>
+        <span className="text-[9px] uppercase tracking-widest font-bold mr-1" style={{ color: "#5d7382" }}>Filter</span>
+        {/* Type toggles */}
+        {model.typeCounts && model.typeCounts.map(([cat, count]) => {
+          const c = colorFor(cat);
+          const on = !hiddenCats[cat];
+          return (
+            <button key={cat} onClick={() => setHiddenCats((h) => ({ ...h, [cat]: on }))}
+              className="rounded-full px-2 py-0.5 text-[9px] font-bold flex items-center gap-1"
+              style={{ background: on ? `${c}22` : "rgba(120,160,180,0.06)", color: on ? c : "#5d7382", border: `1px solid ${on ? c + "66" : "rgba(120,160,180,0.2)"}`, cursor: "pointer", opacity: on ? 1 : 0.5 }}>
+              <span style={{ width: 6, height: 6, borderRadius: 99, background: on ? c : "#5d7382" }} />
+              {cat} {count}
+            </button>
+          );
+        })}
+        <span style={{ width: 1, height: 14, background: "rgba(120,160,180,0.25)", margin: "0 2px" }} />
+        {/* Verdict filters */}
+        {["Malicious", "Suspicious", "Whitelisted"].map((v) => {
+          const vcol = v === "Malicious" ? "#ff4d6d" : v === "Suspicious" ? "#fbbf24" : "#00ff9c";
+          const on = !hiddenVerdicts[v];
+          return (
+            <button key={v} onClick={() => setHiddenVerdicts((h) => ({ ...h, [v]: on }))}
+              className="rounded-full px-2 py-0.5 text-[9px] font-bold"
+              style={{ background: on ? `${vcol}22` : "rgba(120,160,180,0.06)", color: on ? vcol : "#5d7382", border: `1px solid ${on ? vcol + "66" : "rgba(120,160,180,0.2)"}`, cursor: "pointer", opacity: on ? 1 : 0.5 }}>
+              {v === "Malicious" ? "🔴" : v === "Suspicious" ? "🟡" : "🟢"} {v}
+            </button>
+          );
+        })}
+        <span style={{ width: 1, height: 14, background: "rgba(120,160,180,0.25)", margin: "0 2px" }} />
+        {/* Structural toggles */}
+        <button onClick={() => setHideDerived((v) => !v)}
+          className="rounded-full px-2 py-0.5 text-[9px] font-bold"
+          style={{ background: hideDerived ? "rgba(192,132,252,0.25)" : "rgba(120,160,180,0.06)", color: hideDerived ? "#c084fc" : "#8aa0ad", border: `1px solid ${hideDerived ? "rgba(192,132,252,0.5)" : "rgba(120,160,180,0.2)"}`, cursor: "pointer" }}>
+          {hideDerived ? "◇ derived hidden" : "◆ hide derived"}
+        </button>
+        <button onClick={() => setIsolateMalicious((v) => !v)}
+          className="rounded-full px-2 py-0.5 text-[9px] font-bold"
+          style={{ background: isolateMalicious ? "rgba(255,77,109,0.25)" : "rgba(120,160,180,0.06)", color: isolateMalicious ? "#ff4d6d" : "#8aa0ad", border: `1px solid ${isolateMalicious ? "rgba(255,77,109,0.5)" : "rgba(120,160,180,0.2)"}`, cursor: "pointer" }}>
+          ⌖ isolate malicious
+        </button>
+        {model.stats.orphans > 0 && (
+          <button onClick={() => setHideOrphans((v) => !v)}
+            className="rounded-full px-2 py-0.5 text-[9px] font-bold"
+            style={{ background: hideOrphans ? "rgba(120,160,180,0.25)" : "rgba(120,160,180,0.06)", color: hideOrphans ? "#e6f0f3" : "#8aa0ad", border: "1px solid rgba(120,160,180,0.3)", cursor: "pointer" }}>
+            {hideOrphans ? `○ ${model.stats.orphans} orphans hidden` : `● hide ${model.stats.orphans} orphans`}
+          </button>
+        )}
+      </div>
       {/* Stats bar */}
       <div className="absolute top-3 left-3 z-10 flex items-center gap-3 rounded-lg px-3 py-1.5 text-[11px]"
         style={{ background: "rgba(10,14,20,0.8)", border: "1px solid rgba(120,160,180,0.2)", backdropFilter: "blur(6px)", color: "#9fb3bd" }}>
@@ -5070,11 +5314,17 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
       </div>
       {/* Hint */}
       <div className="absolute bottom-3 left-3 z-10 text-[10px]" style={{ color: "#5d7382" }}>
-        drag nodes · scroll to zoom · drag canvas to pan · hover to focus
+        drag nodes · scroll/pinch to zoom · drag to pan · click a node for actions
       </div>
+      {!anyEnriched && (
+        <div className="absolute z-10 text-[11px] font-semibold pointer-events-none"
+          style={{ top: 10, left: "50%", transform: "translateX(-50%)", color: "#7f95a3" }}>
+          ✨ Enrich indicators to reveal the infrastructure graph
+        </div>
+      )}
 
       <canvas ref={canvasRef}
-        style={{ width: dims.w, height: dims.h, display: "block", touchAction: "none" }}
+        style={{ width: dims.w, height: dims.h, display: "block", touchAction: "none", transition: "height 0.6s cubic-bezier(0.22,1,0.36,1)" }}
         onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp}
       />
 
@@ -5098,6 +5348,55 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
           {hoverInfo.country && <div style={{ color: "#8aa0ad" }}>{hoverInfo.country}</div>}
         </div>
       )}
+
+      {/* Node action panel — click a node to open */}
+      {selected && (() => {
+        const st = nodeActionState[selected.id];
+        const canEnrich = ["IPV4", "IPV6", "DOMAIN", "URL", "MD5", "SHA1", "SHA256"].includes(selected.cat);
+        const c = colorFor(selected.cat);
+        return (
+          <div className="absolute z-30 rounded-xl p-3"
+            style={{ top: 52, right: 12, width: 260, background: "rgba(10,14,20,0.97)", border: `1px solid ${c}66`, backdropFilter: "blur(10px)", boxShadow: `0 0 30px ${c}33` }}>
+            <div className="flex items-start justify-between gap-2 mb-2">
+              <div className="min-w-0">
+                <div className="font-bold break-all text-[12px]" style={{ color: c }}>{selected.label}</div>
+                <div className="text-[10px]" style={{ color: "#7f95a3" }}>{selected.cat}{selected.derived ? " · derived" : ""}{selected.bridge ? " · shared pivot" : ""}</div>
+              </div>
+              <button onClick={() => setSelected(null)} className="shrink-0 rounded p-0.5" style={{ color: "#5d7382", cursor: "pointer", background: "none", border: "none" }}><X size={13} /></button>
+            </div>
+            {selected.verdict && (
+              <div className="text-[11px] font-bold mb-2" style={{ color: selected.verdict === "Malicious" ? "#ff4d6d" : selected.verdict === "Suspicious" ? "#fbbf24" : selected.verdict === "Whitelisted" ? "#00ff9c" : "#8aa0ad" }}>
+                {selected.verdict === "Malicious" ? "🔴" : selected.verdict === "Suspicious" ? "🟡" : selected.verdict === "Whitelisted" ? "🟢" : "⚪"} {selected.verdict}
+              </div>
+            )}
+            <div className="flex flex-wrap gap-1.5">
+              {canEnrich && (
+                <button onClick={() => doEnrichNode(selected)} disabled={st === "enriching"}
+                  className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
+                  style={{ color: "#04111a", background: "#2dd4bf", border: "none", cursor: st === "enriching" ? "wait" : "pointer", opacity: st === "enriching" ? 0.6 : 1 }}>
+                  {st === "enriching" ? <Loader2 size={11} className="animate-spin" /> : <Search size={11} />}
+                  {st === "enriching" ? "Enriching…" : "Enrich"}
+                </button>
+              )}
+              <button onClick={() => doDashboardNode(selected)}
+                className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
+                style={{ color: st === "added" ? "#04111a" : "#00ff9c", background: st === "added" ? "#00ff9c" : "rgba(0,255,156,0.12)", border: "1px solid rgba(0,255,156,0.4)", cursor: "pointer" }}>
+                {st === "added" ? <Check size={11} /> : <Sparkles size={11} />} {st === "added" ? "Logged" : "Dashboard"}
+              </button>
+              <button onClick={() => doCopyNode(selected)}
+                className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
+                style={{ color: "#00e5ff", background: "rgba(0,229,255,0.12)", border: "1px solid rgba(0,229,255,0.4)", cursor: "pointer" }}>
+                <Copy size={11} /> Copy
+              </button>
+              <a href={vtLinkFor(selected)} target="_blank" rel="noreferrer noopener"
+                className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
+                style={{ color: "#c084fc", background: "rgba(192,132,252,0.12)", border: "1px solid rgba(192,132,252,0.4)", textDecoration: "none" }}>
+                🛡️ VT
+              </a>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
