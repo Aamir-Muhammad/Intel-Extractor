@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from "react";
+import { useState, useMemo, useRef, useEffect, Component } from "react";
 import * as XLSX from "xlsx";
 import {
   Shield, Search, Download, Copy, Check, Loader2, Globe,
@@ -3722,9 +3722,11 @@ export default function App() {
 
         {entries.length > 0 && (
           <div className="mb-4">
-            <ThreatGraph iocData={iocData} enrichCache={enrichCache} colorFor={colorFor}
-              enrichIOC={enrichIOC} logEvent={logEvent} copyText={copyText}
-              anyEnriched={Object.keys(enrichCache).length > 0} />
+            <GraphErrorBoundary>
+              <ThreatGraph iocData={iocData} enrichCache={enrichCache} colorFor={colorFor}
+                enrichIOC={enrichIOC} logEvent={logEvent} copyText={copyText}
+                anyEnriched={Object.keys(enrichCache).length > 0} />
+            </GraphErrorBoundary>
           </div>
         )}
 
@@ -4601,6 +4603,28 @@ export default function App() {
 //  Verdict-driven glow, particle-flow edges, hover spotlight,
 //  drag, zoom, entrance animation.
 // ============================================================
+// Error boundary so a graph render error can never black-screen the whole app.
+class GraphErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { failed: false }; }
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(err) { console.warn("ThreatGraph error (contained):", err?.message || err); }
+  render() {
+    if (this.state.failed) {
+      return (
+        <div className="rounded-xl p-6 text-center" style={{ background: "rgba(10,14,20,0.72)", border: "1px solid rgba(255,77,109,0.3)" }}>
+          <p className="text-sm" style={{ color: "#ff8a9b" }}>The graph hit a rendering issue and was paused to protect the page.</p>
+          <button onClick={() => this.setState({ failed: false })}
+            className="mt-3 rounded-lg px-3 py-1.5 text-xs font-semibold"
+            style={{ color: "#04111a", background: "#00e5ff", border: "none", cursor: "pointer" }}>
+            Reload graph
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copyText, anyEnriched }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
@@ -5442,19 +5466,19 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
             )}
             <div className="flex flex-wrap gap-1.5">
               {canEnrich && (
-                <button onClick={() => doEnrichNode(selected)} disabled={st === "enriching"}
+                <button onClick={(e) => { e.stopPropagation(); const node = selected; doEnrichNode(node); }} disabled={st === "enriching"}
                   className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
                   style={{ color: "#04111a", background: "#2dd4bf", border: "none", cursor: st === "enriching" ? "wait" : "pointer", opacity: st === "enriching" ? 0.6 : 1 }}>
                   {st === "enriching" ? <Loader2 size={11} className="animate-spin" /> : <Search size={11} />}
                   {st === "enriching" ? "Enriching…" : "Enrich"}
                 </button>
               )}
-              <button onClick={() => doDashboardNode(selected)}
+              <button onClick={(e) => { e.stopPropagation(); doDashboardNode(selected); }}
                 className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
                 style={{ color: st === "added" ? "#04111a" : "#00ff9c", background: st === "added" ? "#00ff9c" : "rgba(0,255,156,0.12)", border: "1px solid rgba(0,255,156,0.4)", cursor: "pointer" }}>
                 {st === "added" ? <Check size={11} /> : <Sparkles size={11} />} {st === "added" ? "Logged" : "Dashboard"}
               </button>
-              <button onClick={() => doCopyNode(selected)}
+              <button onClick={(e) => { e.stopPropagation(); doCopyNode(selected); }}
                 className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
                 style={{ color: "#00e5ff", background: "rgba(0,229,255,0.12)", border: "1px solid rgba(0,229,255,0.4)", cursor: "pointer" }}>
                 <Copy size={11} /> Copy
