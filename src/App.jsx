@@ -37,7 +37,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v82";
+const APP_VERSION = "v83";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -3725,6 +3725,7 @@ export default function App() {
             <GraphErrorBoundary>
               <ThreatGraph iocData={iocData} enrichCache={enrichCache} colorFor={colorFor}
                 enrichIOC={enrichIOC} logEvent={logEvent} copyText={copyText}
+                addPivotIOC={addPivotIOC} isPivotAdded={isPivotAdded}
                 anyEnriched={Object.keys(enrichCache).length > 0} />
             </GraphErrorBoundary>
           </div>
@@ -4625,7 +4626,7 @@ class GraphErrorBoundary extends Component {
   }
 }
 
-function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copyText, anyEnriched }) {
+function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copyText, addPivotIOC, isPivotAdded, anyEnriched }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const stateRef = useRef({ nodes: [], edges: [], t: 0 });
@@ -5262,8 +5263,13 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
       setNodeActionState((s) => ({ ...s, [n.id]: undefined }));
     }
   };
-  const doDashboardNode = (n) => {
-    if (logEvent) logEvent({ event_type: "graph_flag", ioc_type: n.cat, ioc_value: n.id, verdict: n.verdict || "Unknown" });
+  const doAddIOCNode = (n) => {
+    if (!addPivotIOC || !n) return;
+    // Map graph node categories to IOC list categories.
+    const catMap = { IPV4: "IPV4", IPV6: "IPV6", DOMAIN: "DOMAIN", URL: "URL", SHA256: "SHA256", SHA1: "SHA1", MD5: "MD5", EMAIL: "EMAIL" };
+    const cat = catMap[n.cat] || n.cat;
+    addPivotIOC(cat, n.id, "graph");
+    if (logEvent) logEvent({ event_type: "graph_add_ioc", ioc_type: cat, ioc_value: n.id, verdict: n.verdict || "Unknown" });
     setNodeActionState((s) => ({ ...s, [n.id]: "added" }));
     setTimeout(() => setNodeActionState((s) => ({ ...s, [n.id]: undefined })), 1500);
   };
@@ -5477,11 +5483,28 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
                   {st === "enriching" ? "Enriching…" : "Enrich"}
                 </button>
               )}
-              <button onClick={(e) => { e.stopPropagation(); doDashboardNode(selected); }}
-                className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
-                style={{ color: st === "added" ? "#04111a" : "#00ff9c", background: st === "added" ? "#00ff9c" : "rgba(0,255,156,0.12)", border: "1px solid rgba(0,255,156,0.4)", cursor: "pointer" }}>
-                {st === "added" ? <Check size={11} /> : <Sparkles size={11} />} {st === "added" ? "Logged" : "Dashboard"}
-              </button>
+              {selected.derived && (() => {
+                const catMap = { IPV4: "IPV4", IPV6: "IPV6", DOMAIN: "DOMAIN", URL: "URL", SHA256: "SHA256", SHA1: "SHA1", MD5: "MD5", EMAIL: "EMAIL" };
+                const mapped = catMap[selected.cat] || selected.cat;
+                const alreadyIn = (isPivotAdded && isPivotAdded(mapped, selected.id))
+                  || (iocData?.[mapped] || []).some((v) => String(v).toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "") === selected.id);
+                if (alreadyIn || st === "added") {
+                  return (
+                    <span className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
+                      style={{ color: "#04111a", background: "#00ff9c", border: "1px solid rgba(0,255,156,0.4)" }}>
+                      <Check size={11} /> In list
+                    </span>
+                  );
+                }
+                return (
+                  <button onClick={(e) => { e.stopPropagation(); doAddIOCNode(selected); }}
+                    className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
+                    title="Promote this discovered node into your IOC list"
+                    style={{ color: "#00ff9c", background: "rgba(0,255,156,0.12)", border: "1px solid rgba(0,255,156,0.4)", cursor: "pointer" }}>
+                    <Sparkles size={11} /> Add as IOC
+                  </button>
+                );
+              })()}
               <button onClick={(e) => { e.stopPropagation(); doCopyNode(selected); }}
                 className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
                 style={{ color: "#00e5ff", background: "rgba(0,229,255,0.12)", border: "1px solid rgba(0,229,255,0.4)", cursor: "pointer" }}>
