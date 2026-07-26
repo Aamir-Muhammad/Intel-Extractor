@@ -37,7 +37,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v76";
+const APP_VERSION = "v77";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -150,6 +150,45 @@ const REF_DOMAINS = new Set([
   "wikipedia.org","en.wikipedia.org",
   "web.archive.org","archive.org",
 ]);
+
+// CDN / analytics / benign infrastructure hosts. A page contacting these is
+// normal web behavior, not threat infrastructure — so they're filtered out of
+// urlscan's contacted-IPs/domains before those become graph nodes, to avoid
+// cluttering the graph with fonts.googleapis.com and similar noise.
+const BENIGN_INFRA_SUFFIXES = new Set([
+  "googleapis.com","gstatic.com","google.com","google-analytics.com",
+  "googletagmanager.com","googlesyndication.com","googleadservices.com",
+  "doubleclick.net","gomngr.com","recaptcha.net",
+  "cloudflare.com","cloudflareinsights.com","cloudflare.net","cdnjs.cloudflare.com",
+  "cloudfront.net","amazonaws.com","akamai.net","akamaiedge.net","akamaihd.net",
+  "fastly.net","fastlylb.net","jsdelivr.net","unpkg.com","bootstrapcdn.com",
+  "fontawesome.com","typekit.net","use.fontawesome.com",
+  "facebook.com","facebook.net","fbcdn.net","connect.facebook.net",
+  "twitter.com","x.com","t.co","twimg.com",
+  "linkedin.com","licdn.com","instagram.com","cdninstagram.com",
+  "youtube.com","ytimg.com","youtu.be","vimeo.com",
+  "gravatar.com","wp.com","wordpress.org","w.org","gmpg.org",
+  "jquery.com","code.jquery.com","polyfill.io",
+  "cookiebot.com","onetrust.com","cookielaw.org","hotjar.com","hotjar.io",
+  "segment.com","segment.io","mixpanel.com","amplitude.com","newrelic.com",
+  "bing.com","microsoft.com","msn.com","live.com","office.com","office365.com",
+  "windows.net","azureedge.net","azure.com","msftauth.net","msauth.net",
+  "apple.com","icloud.com","mzstatic.com","cdn-apple.com",
+  "adobe.com","typekit.com","demdex.net","omtrdc.net","2o7.net",
+  "sentry.io","sentry-cdn.com","bugsnag.com","datadoghq.com","cloudflare-dns.com",
+  "gtld-servers.net","root-servers.net","nstld.com",
+]);
+// True if a host is benign CDN/analytics infrastructure (exact or subdomain match)
+const isBenignInfra = (host) => {
+  if (!host) return false;
+  const h = String(host).toLowerCase().replace(/\.$/, "");
+  if (BENIGN_INFRA_SUFFIXES.has(h)) return true;
+  const parts = h.split(".");
+  for (let i = 1; i < parts.length - 1; i++) {
+    if (BENIGN_INFRA_SUFFIXES.has(parts.slice(i).join("."))) return true;
+  }
+  return false;
+};
 // Check if a URL host is a known reference domain
 const isRefUrl = (urlStr) => {
   try {
@@ -2336,6 +2375,60 @@ export default function App() {
                 return out.length ? out.slice(0, 8) : null;
               })(),
             };
+
+            // ---- Deep result fetch: contacted infra, brand impersonation, loaded resources ----
+            // The search API omits these; fetch the latest scan's full document.
+            try {
+              const detail = await callEnrich("urlscan_result", null, latest._id);
+              if (detail && !detail.error) {
+                const self = String(value).toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+                const selfHost = (() => { try { return new URL(value.includes("://") ? value : "https://" + value).hostname.toLowerCase(); } catch { return self; } })();
+
+                // Brand impersonation — urlscan flags which brands a page mimics.
+                const brands = Array.isArray(detail.verdicts?.overall?.brands)
+                  ? detail.verdicts.overall.brands.map((b) => (typeof b === "string" ? b : b?.name)).filter(Boolean)
+                  : (Array.isArray(detail.brands) ? detail.brands.map((b) => b?.name || b).filter(Boolean) : []);
+                const overallMalicious = !!detail.verdicts?.overall?.malicious;
+                const overallScore = typeof detail.verdicts?.overall?.score === "number" ? detail.verdicts.overall.score : null;
+
+                // TLS cert info (fresh cert on a brand domain = phishing signal)
+                const tlsIssuer = detail.page?.tlsIssuer || detail.lists?.certificates?.[0]?.issuer || null;
+                const tlsValidFrom = detail.page?.tlsValidFrom || detail.lists?.certificates?.[0]?.validFrom || null;
+                const tlsAgeDays = detail.page?.tlsAgeDays ?? null;
+
+                // Contacted IPs — only surface ones urlscan itself flags, or that
+                // are clearly not benign CDN/analytics. IPs have no "benign" list,
+                // so we keep all contacted IPs but drop the serving IP (already a node).
+                const contactedIPs = Array.isArray(detail.lists?.ips)
+                  ? Array.from(new Set(detail.lists.ips))
+                      .filter((ip) => ip && ip !== results.urlscan.servingIP)
+                      .slice(0, 15)
+                  : [];
+
+                // Contacted domains — filter out benign CDN/analytics infra and self.
+                const contactedDomains = Array.isArray(detail.lists?.domains)
+                  ? Array.from(new Set(detail.lists.domains.map((d) => String(d).toLowerCase())))
+                      .filter((dom) => dom && dom !== selfHost && !isBenignInfra(dom))
+                      .slice(0, 15)
+                  : [];
+
+                // Loaded-resource hashes — payloads/scripts pulled during the scan,
+                // each with the URL it came from. These reveal second-stage infra.
+                const resourceHashes = Array.isArray(detail.lists?.hashes)
+                  ? Array.from(new Set(detail.lists.hashes)).slice(0, 10)
+                  : [];
+
+                results.urlscan.brands = brands.length ? brands : null;
+                results.urlscan.overallMalicious = overallMalicious;
+                results.urlscan.overallScore = overallScore;
+                results.urlscan.tlsIssuer = tlsIssuer;
+                results.urlscan.tlsValidFrom = tlsValidFrom ? String(tlsValidFrom).split("T")[0] : null;
+                results.urlscan.tlsAgeDays = tlsAgeDays;
+                results.urlscan.contactedIPs = contactedIPs.length ? contactedIPs : null;
+                results.urlscan.contactedDomains = contactedDomains.length ? contactedDomains : null;
+                results.urlscan.resourceHashes = resourceHashes.length ? resourceHashes : null;
+              }
+            } catch (e) { console.warn("urlscan result detail failed:", e.message); }
           }
         } catch (e) { console.warn("Enrich urlscan.io failed:", e.message); }
       }
@@ -2505,7 +2598,12 @@ export default function App() {
       else if (results.threatfox) verdict = "Malicious";
       else if (results.urlhaus?.status === "online") verdict = "Malicious";
       else if (results.malwarebazaar) verdict = "Malicious";
+      // urlscan's own engine flagged the latest scan malicious.
+      else if (results.urlscan?.overallMalicious) verdict = "Malicious";
       else if (results.urlhaus?.status === "offline") verdict = "Suspicious";
+      // Brand impersonation detected by urlscan (page mimics Microsoft/PayPal/etc).
+      // Strong phishing signal — would have caught onedrive.cv-style impersonation.
+      else if (results.urlscan?.brands && results.urlscan.brands.length) verdict = "Suspicious";
       else if (results.otx?.whitelisted === true) verdict = "Whitelisted";
       // Kaspersky green: for a HASH it means the file is in Kaspersky's known-clean
       // DB (reliable — file hashes are immutable). For a DOMAIN/URL/IP, green only
@@ -3996,6 +4094,18 @@ export default function App() {
                                       )}
                                     </span>
                                   )}
+                                  {hasUrlscan && d.urlscan.brands && d.urlscan.brands.length > 0 && (
+                                    <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.12)", border: "1px solid rgba(255,77,109,0.4)" }}
+                                      title="urlscan detected this page impersonating a known brand — strong phishing signal">
+                                      🎭 Impersonates: {d.urlscan.brands.slice(0, 3).join(", ")}
+                                    </span>
+                                  )}
+                                  {hasUrlscan && d.urlscan.tlsIssuer && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.25)" }}
+                                      title="TLS certificate — a very fresh cert on a brand-like domain is a phishing indicator">
+                                      🔒 {d.urlscan.tlsIssuer}{d.urlscan.tlsAgeDays != null ? ` · cert ${smartAge(d.urlscan.tlsAgeDays)} old` : ""}
+                                    </span>
+                                  )}
                                   {hasWhois && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#a78bfa", backgroundColor: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)" }}>
                                       WHOIS{d.whois.org ? ` · ${d.whois.org}` : ""}{d.whois.country ? ` · ${d.whois.country}` : ""}{d.whois.ageDays !== null ? ` · ${d.whois.ageDays}d old` : ""}
@@ -4130,7 +4240,8 @@ export default function App() {
                                 }
                                 return true;
                               });
-                              if (!newUrls.length && !hasFiles && !pdnsRecords.length) return null;
+                              const hasContacted = (d.urlscan?.contactedIPs || []).length > 0 || (d.urlscan?.contactedDomains || []).length > 0;
+                              if (!newUrls.length && !hasFiles && !pdnsRecords.length && !hasContacted) return null;
                               return secRow("Pivots", (
                                   <div className="flex flex-col gap-0.5 w-full">
                                     {newUrls.map((su, ui) => {
@@ -4262,6 +4373,53 @@ export default function App() {
                                         </div>
                                       );
                                     })}
+                                    {/* Contacted infrastructure from urlscan result detail */}
+                                    {(() => {
+                                      const cIPs = (d.urlscan?.contactedIPs || []).filter((ip) => {
+                                        const n = ip.toLowerCase();
+                                        if (n === iocNorm) return false;
+                                        if (dismissedPivots.has(`contact::${n}::${arr[i]}`)) return false;
+                                        if (!isPivotAdded("IPV4", n) && existingIPs.has(n)) return false;
+                                        return true;
+                                      });
+                                      const cDoms = (d.urlscan?.contactedDomains || []).filter((dom) => {
+                                        const n = dom.toLowerCase();
+                                        if (n === iocNorm) return false;
+                                        if (dismissedPivots.has(`contact::${n}::${arr[i]}`)) return false;
+                                        if (!isPivotAdded("DOMAIN", n) && existingDomains.has(n)) return false;
+                                        return true;
+                                      });
+                                      if (!cIPs.length && !cDoms.length) return null;
+                                      const rows = [...cIPs.map((v) => ({ v, cat: "IPV4" })), ...cDoms.map((v) => ({ v, cat: "DOMAIN" }))];
+                                      return (
+                                        <>
+                                          <div className="flex items-center gap-1.5 mt-1 mb-0.5">
+                                            <span className="text-[9px] uppercase tracking-widest font-bold" style={{ color: "#5d7382" }}>Contacted Infrastructure</span>
+                                            <span className="text-[9px]" style={{ color: "#5d7382" }}>· hosts this page communicated with (CDN/analytics filtered)</span>
+                                          </div>
+                                          {rows.map((row, ci) => {
+                                            const added = isPivotAdded(row.cat, row.v);
+                                            return (
+                                              <span key={`c${ci}`} className="rounded-full px-2 py-0.5 flex items-center gap-1.5" style={{ color: "#fb923c", backgroundColor: "rgba(251,146,60,0.06)", border: "1px solid rgba(251,146,60,0.25)" }}>
+                                                <span className="flex-1 min-w-0 flex flex-wrap items-center gap-1.5">
+                                                  <span style={{ color: "#fb923c", fontWeight: 600 }}>{row.v}</span>
+                                                  <span className="text-[9px] px-1 rounded" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.12)" }}>{row.cat}</span>
+                                                </span>
+                                                {added ? (
+                                                  <>
+                                                    <span className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>Added</span>
+                                                    <button onClick={() => removePivotIOC(row.cat, row.v)} className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove</button>
+                                                  </>
+                                                ) : (
+                                                  <button onClick={() => addPivotIOC(row.cat, row.v, `Contacted by ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#04111a", backgroundColor: "#fb923c", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>+ Add as IOC</button>
+                                                )}
+                                                <button onClick={() => dismissPivot(`contact::${row.v.toLowerCase()}::${arr[i]}`)} className="rounded p-0.5 shrink-0" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
+                                              </span>
+                                            );
+                                          })}
+                                        </>
+                                      );
+                                    })()}
                                   </div>
                               ));
                             })()}
@@ -4454,6 +4612,27 @@ function ThreatGraph({ iocData, enrichCache, colorFor }) {
           const ucat = un.includes("/") ? "URL" : "DOMAIN";
           addNode(u, u, ucat, true, null);
           addEdge(val, u, "scanned", "rgba(124,156,255,0.3)");
+        });
+
+        // Contacted IPs (urlscan result detail — infra the page talked to)
+        (d.urlscan?.contactedIPs || []).forEach((ip) => {
+          if (norm(ip) === srcId) return;
+          addNode(ip, ip, "IPV4", true, null);
+          addEdge(val, ip, "contacted", "rgba(251,146,60,0.4)");
+        });
+
+        // Contacted domains (CDN/analytics already filtered upstream)
+        (d.urlscan?.contactedDomains || []).forEach((dom) => {
+          if (norm(dom) === srcId) return;
+          addNode(dom, dom, "DOMAIN", true, null);
+          addEdge(val, dom, "contacted", "rgba(251,146,60,0.4)");
+        });
+
+        // Loaded-resource hashes (scripts/payloads pulled during the scan)
+        (d.urlscan?.resourceHashes || []).forEach((h) => {
+          if (!h || typeof h !== "string" || h.length < 32) return;
+          addNode(h, h.slice(0, 12) + "…", "SHA256", true, null);
+          addEdge(val, h, "loads", "rgba(255,77,109,0.35)");
         });
       });
     });
