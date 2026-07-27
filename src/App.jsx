@@ -1,3 +1,10 @@
+// ============================================================
+// Intel Extractor — © 2024-2026 Aamir Muhammad
+// Licensed under the PolyForm Noncommercial License 1.0.0
+// Commercial use, rehosting, and redistribution without
+// explicit written permission from the author is prohibited.
+// https://polyformproject.org/licenses/noncommercial/1.0.0/
+// ============================================================
 import { useState, useMemo, useRef, useEffect, Component } from "react";
 import * as XLSX from "xlsx";
 import {
@@ -37,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v83";
+const APP_VERSION = "v84";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -50,7 +57,7 @@ const isPrivateIP = (ip) => {
     (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 255);
 };
 // DOMAIN whitelist — github.com IS filtered here (bare github.com domain is noise)
-const WL_DOMAINS = new Set(["github.com","www.github.com","github.io","localhost","example.com","www.example.com","kaspersky.com","www.kaspersky.com","fbi.gov","www.fbi.gov","mitre.org","attack.mitre.org","www.mitre.org","gmail.com","www.gmail.com","trendmicro.com","www.trendmicro.com"]);
+const WL_DOMAINS = new Set(["github.com","www.github.com","github.io","localhost","example.com","www.example.com","kaspersky.com","www.kaspersky.com","fbi.gov","www.fbi.gov","mitre.org","attack.mitre.org","www.mitre.org","gmail.com","www.gmail.com","trendmicro.com","www.trendmicro.com","zscloud.net","admin.zscloud.net"]);
 // URL whitelist — github.com is intentionally NOT here: full GitHub URLs are
 // often real IOCs (payload hosting, raw.githubusercontent staging) and must
 // survive into the URL card. Only the bare DOMAIN entry gets filtered.
@@ -1981,34 +1988,27 @@ export default function App() {
           }
         } catch (e) { console.warn("Enrich MalwareBazaar failed:", e.message); }
 
-        // CIRCL hashlookup — free, no key, permissive CORS.
+        // CIRCL hashlookup — proxied through Worker (CIRCL tightened CORS in 2026,
+        // direct browser fetch now blocked). No API key, Worker just relays.
         // Whitelist-oriented: NSRL + community databases of known-legit files.
-        // Answers "is this file benign?" — a strong signal when MalBazaar/OTX
-        // return nothing but the hash is clearly a Windows/macOS/Linux DLL.
         try {
           const algo = { MD5: "md5", SHA1: "sha1", SHA256: "sha256" }[cat];
           if (algo) {
-            const r = await fetch(`https://hashlookup.circl.lu/lookup/${algo}/${encodeURIComponent(value)}`, {
-              headers: { "Accept": "application/json" },
-            });
-            if (r.ok) {
-              const cj = await r.json();
-              // 404s come back with {message:"..."} — real hits have FileName/MD5.
-              if (cj && !cj.message && (cj.FileName || cj.SHA1 || cj["SHA-1"] || cj.MD5)) {
-                const trust = typeof cj["hashlookup:trust"] === "number" ? cj["hashlookup:trust"] : null;
-                const pc = cj.ProductCode || {};
-                results.circl = {
-                  fileName: cj.FileName || null,
-                  fileSize: cj.FileSize ? `${Math.round(Number(cj.FileSize) / 1024)}KB` : null,
-                  trust,
-                  productName: pc.ProductName || null,
-                  productType: pc.ApplicationType || null,
-                  productLanguage: pc.Language || null,
-                  os: cj.OpSystemCode?.OpSystemName || null,
-                  // If CIRCL knows about it AND says trusted (>50), it's a legit file
-                  legit: trust != null && trust > 50,
-                };
-              }
+            const cj = await callEnrich("circl", algo, null);
+            // 404s come back as null/error from callEnrich; real hits have FileName/MD5.
+            if (cj && !cj.message && !cj.error && (cj.FileName || cj.SHA1 || cj["SHA-1"] || cj.MD5)) {
+              const trust = typeof cj["hashlookup:trust"] === "number" ? cj["hashlookup:trust"] : null;
+              const pc = cj.ProductCode || {};
+              results.circl = {
+                fileName: cj.FileName || null,
+                fileSize: cj.FileSize ? `${Math.round(Number(cj.FileSize) / 1024)}KB` : null,
+                trust,
+                productName: pc.ProductName || null,
+                productType: pc.ApplicationType || null,
+                productLanguage: pc.Language || null,
+                os: cj.OpSystemCode?.OpSystemName || null,
+                legit: trust != null && trust > 50,
+              };
             }
           }
           // 404 = hash unknown to CIRCL (not an error, just quiet)
@@ -2445,23 +2445,39 @@ export default function App() {
                 // Contacted IPs — only surface ones urlscan itself flags, or that
                 // are clearly not benign CDN/analytics. IPs have no "benign" list,
                 // so we keep all contacted IPs but drop the serving IP (already a node).
+                // Static asset extensions that are never threat infrastructure —
+                // CSS, fonts, icons, images, common JS frameworks loaded from CDNs.
+                const STATIC_EXTS = /\.(css|woff2?|ttf|eot|otf|ico|png|jpg|jpeg|gif|svg|webp|map|txt|xml|json)(\?.*)?$/i;
+                const isStaticAsset = (url) => STATIC_EXTS.test(String(url || "").split("?")[0]);
+
                 const contactedIPs = Array.isArray(detail.lists?.ips)
                   ? Array.from(new Set(detail.lists.ips))
                       .filter((ip) => ip && ip !== results.urlscan.servingIP)
                       .slice(0, 15)
                   : [];
 
-                // Contacted domains — filter out benign CDN/analytics infra and self.
+                // Contacted domains — filter out benign CDN/analytics infra, self,
+                // and domains that only serve static assets.
                 const contactedDomains = Array.isArray(detail.lists?.domains)
                   ? Array.from(new Set(detail.lists.domains.map((d) => String(d).toLowerCase())))
                       .filter((dom) => dom && dom !== selfHost && !isBenignInfra(dom))
                       .slice(0, 15)
                   : [];
 
-                // Loaded-resource hashes — payloads/scripts pulled during the scan,
-                // each with the URL it came from. These reveal second-stage infra.
+                // Loaded-resource hashes — filter to only executable/document types.
+                // Skip hashes from .css/.png/.woff and other static files since
+                // those are styling/font resources, not threat payloads.
                 const resourceHashes = Array.isArray(detail.lists?.hashes)
-                  ? Array.from(new Set(detail.lists.hashes)).slice(0, 10)
+                  ? Array.from(new Set(detail.lists.hashes))
+                      .filter((h) => {
+                        // Find the URL this hash came from in the requests array
+                        const req = (detail.data?.requests || []).find((r) =>
+                          r?.response?.hash === h || r?.request?.url?.includes(h)
+                        );
+                        const url = req?.request?.url || "";
+                        return !isStaticAsset(url);
+                      })
+                      .slice(0, 10)
                   : [];
 
                 results.urlscan.brands = brands.length ? brands : null;
@@ -4643,6 +4659,9 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [nodeActionState, setNodeActionState] = useState({}); // { nodeId: "enriching"|"added" }
+  const [copiedNodeId, setCopiedNodeId] = useState(null);
+  const [searchMatches, setSearchMatches] = useState([]);
+  const [searchMatchIdx, setSearchMatchIdx] = useState(0);
 
   // ---- Build the graph model from IOCs + enrichment ----
   const model = useMemo(() => {
@@ -4733,14 +4752,16 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
         // Contacted IPs (urlscan result detail — infra the page talked to)
         (d.urlscan?.contactedIPs || []).forEach((ip) => {
           if (norm(ip) === srcId) return;
-          addNode(ip, ip, "IPV4", true, null);
+          const n = addNode(ip, ip, "IPV4", true, null);
+          if (n) n.contacted = true;
           addEdge(val, ip, "contacted", "rgba(251,146,60,0.4)");
         });
 
         // Contacted domains (CDN/analytics already filtered upstream)
         (d.urlscan?.contactedDomains || []).forEach((dom) => {
           if (norm(dom) === srcId) return;
-          addNode(dom, dom, "DOMAIN", true, null);
+          const n = addNode(dom, dom, "DOMAIN", true, null);
+          if (n) n.contacted = true;
           addEdge(val, dom, "contacted", "rgba(251,146,60,0.4)");
         });
 
@@ -5015,7 +5036,13 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
       // baseline of motion so new nodes can weave in without re-exploding the
       // settled graph. warmKick gives brief extra energy right after new nodes arrive.
       if (S.warmKick > 0) S.warmKick -= 1;
-      const active = S.t < 600 || cam.dragNode || S.warmKick > 0;
+      // Physics always runs at some level — never fully stops. This gives:
+      // - Pre-enrichment: gentle random drift so the constellation feels alive.
+      // - Post-enrichment: slow ambient motion even after nodes settle, for a
+      //   cool living-graph feel. Settled nodes use very heavy damping (0.97)
+      //   so they barely move, but they're always gently breathing.
+      const hot = S.t < 600 || cam.dragNode || S.warmKick > 0;
+      const active = true; // always run — use damping to control energy level
       if (active) {
         // Repulsion
         for (let i = 0; i < N.length; i++) {
@@ -5037,23 +5064,30 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
           const dx = b.x - a.x, dy = b.y - a.y;
           const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
           const target = e.kind === "asn" ? 160 : 95;
-          const k = (dist - target) * 0.012;
+          const k = (dist - target) * (hot ? 0.012 : 0.004);
           const fx = (dx / dist) * k, fy = (dy / dist) * k;
           a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
         }
-        // Centering + integrate. Settled (non-new) nodes get heavier damping so
-        // they barely move while new arrivals animate in.
+        // Centering + integrate.
         for (const n of N) {
-          n.vx += (0 - n.x) * 0.0016;
-          n.vy += (0 - n.y) * 0.0016;
+          n.vx += (0 - n.x) * (hot ? 0.0016 : 0.0004);
+          n.vy += (0 - n.y) * (hot ? 0.0016 : 0.0004);
           if (cam.dragNode === n) { n.vx = 0; n.vy = 0; continue; }
-          // New nodes ease in a bit faster/looser; settled nodes damp harder.
-          const damp = n.isNew ? 0.88 : 0.82;
+          // Ambient drift: a tiny random nudge keeps nodes gently breathing even
+          // when settled. Pre-enrichment (no edges) gets more drift so the floating
+          // constellation looks alive. Post-enrichment gets very subtle drift.
+          const noEdges = E.length === 0;
+          const driftAmp = noEdges ? 0.018 : 0.004;
+          n.vx += (Math.random() - 0.5) * driftAmp;
+          n.vy += (Math.random() - 0.5) * driftAmp;
+          // Damping: new nodes ease in; hot phase settles; idle is very heavy so
+          // nodes barely move but never fully freeze.
+          const damp = n.isNew ? 0.88 : (hot ? 0.82 : 0.97);
           n.vx *= damp; n.vy *= damp;
           n.x += n.vx; n.y += n.vy;
           if (n.isNew) {
             n.spawnT = (n.spawnT || 0) + 1;
-            if (n.spawnT > 90) n.isNew = false; // graduate to settled after ~1.5s
+            if (n.spawnT > 90) n.isNew = false;
           }
         }
       }
@@ -5141,11 +5175,20 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
         ctx.fillStyle = body;
         ctx.beginPath(); ctx.arc(p.x, p.y, R, 0, Math.PI * 2); ctx.fill();
 
-        // Ring: bridge = solid gold (thicker), else derived dashed / primary solid.
+        // Ring: bridge = solid gold; contacted = orange dashed (secondary infra);
+        // derived = white dashed; primary = solid category color.
         if (n.bridge) {
           ctx.lineWidth = 2.5;
           ctx.strokeStyle = BRIDGE_GOLD;
           ctx.beginPath(); ctx.arc(p.x, p.y, R + 2, 0, Math.PI * 2); ctx.stroke();
+        } else if (n.contacted) {
+          // Contacted infra (urlscan secondary) — orange dashed ring, visually
+          // distinct from serving infra to show "this was talked to, not served from".
+          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = "rgba(251,146,60,0.8)";
+          ctx.setLineDash([3, 2]);
+          ctx.beginPath(); ctx.arc(p.x, p.y, R + 1.5, 0, Math.PI * 2); ctx.stroke();
+          ctx.setLineDash([]);
         } else {
           ctx.lineWidth = 1.5;
           ctx.strokeStyle = n.derived ? "rgba(255,255,255,0.25)" : (vc || base);
@@ -5155,7 +5198,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
         }
 
         // Label (only when zoomed enough or hovered)
-        if (((cam.zoom > 0.75 && E.length > 0) || isHover) && !dim) {
+        if (((cam.zoom > 0.6 || isHover)) && !dim) {
           ctx.globalAlpha = isHover ? 1 : 0.85;
           ctx.font = `${isHover ? 12 : 10}px ui-monospace, monospace`;
           ctx.fillStyle = isHover ? "#eafcff" : "#9fb3bd";
@@ -5234,16 +5277,23 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
       setSelected((prev) => (prev && prev.id === clickedNode.id ? null : clickedNode));
     }
     cam.dragNode = null; cam.panning = false; cam.downNode = null; cam.downX = null;
+    // Click on empty canvas background closes the action panel.
+    if (!clickedNode && !cam.movedFar) setSelected(null);
   };
   // Search: find the first node whose id/label contains the query and ease the
   // camera to center on it, then select it.
-  const searchAndFocus = (q) => {
-    if (!q || q.trim().length < 2) return;
+  const searchAndFocus = (q, forceIdx) => {
+    if (!q || q.trim().length < 2) { setSearchMatches([]); setSearchMatchIdx(0); return; }
     const query = q.trim().toLowerCase();
     const S = stateRef.current, cam = camRef.current;
-    const match = S.nodes.find((n) => n.id.toLowerCase().includes(query) || String(n.label).toLowerCase().includes(query));
-    if (!match) return;
-    // Center camera on the match and zoom in a bit.
+    const matches = S.nodes.filter((n) =>
+      n.id.toLowerCase().includes(query) || String(n.label || "").toLowerCase().includes(query)
+    );
+    if (!matches.length) { setSearchMatches([]); setSearchMatchIdx(0); return; }
+    const idx = forceIdx !== undefined ? forceIdx % matches.length : 0;
+    setSearchMatches(matches);
+    setSearchMatchIdx(idx);
+    const match = matches[idx];
     cam.zoom = Math.max(cam.zoom, 1.4);
     cam.x = -match.x; cam.y = -match.y;
     cam.hover = match.id;
@@ -5273,7 +5323,11 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
     setNodeActionState((s) => ({ ...s, [n.id]: "added" }));
     setTimeout(() => setNodeActionState((s) => ({ ...s, [n.id]: undefined })), 1500);
   };
-  const doCopyNode = (n) => { if (copyText) copyText(n.id, `graph-${n.id}`); };
+  const doCopyNode = (n) => {
+    if (copyText) copyText(n.id, `graph-${n.id}`);
+    setCopiedNodeId(n.id);
+    setTimeout(() => setCopiedNodeId(null), 1400);
+  };
   const vtLinkFor = (n) => {
     const v = encodeURIComponent(n.id);
     if (["MD5", "SHA1", "SHA256", "SHA512"].includes(n.cat)) return `https://www.virustotal.com/gui/file/${v}`;
@@ -5322,11 +5376,14 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
       <div className="absolute z-20 flex items-center gap-1" style={{ bottom: 12, right: fullscreen ? 170 : 150 }}>
         {showSearch && (
           <input autoFocus value={searchQuery}
-            onChange={(e) => { setSearchQuery(e.target.value); searchAndFocus(e.target.value); }}
-            onKeyDown={(e) => { if (e.key === "Enter") searchAndFocus(searchQuery); if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); } }}
-            placeholder="Search node…"
+            onChange={(e) => { setSearchQuery(e.target.value); setSearchMatchIdx(0); searchAndFocus(e.target.value, 0); }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); searchAndFocus(searchQuery, searchMatchIdx + 1); setSearchMatchIdx((i) => (searchMatches.length ? (i + 1) % searchMatches.length : 0)); }
+              if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); setSearchMatches([]); }
+            }}
+            placeholder={searchMatches.length > 1 ? `${searchMatchIdx + 1}/${searchMatches.length} — Enter to cycle` : "Search node…"}
             className="rounded-lg px-2.5 py-1.5 text-[11px] outline-none"
-            style={{ width: 160, background: "rgba(10,14,20,0.95)", border: "1px solid rgba(0,229,255,0.4)", color: "#dff", backdropFilter: "blur(6px)" }} />
+            style={{ width: 180, background: "rgba(10,14,20,0.95)", border: "1px solid rgba(0,229,255,0.4)", color: "#dff", backdropFilter: "blur(6px)" }} />
         )}
         <button onClick={() => { setShowSearch((v) => !v); if (showSearch) setSearchQuery(""); }}
           className="rounded-lg p-2 flex items-center justify-center"
@@ -5408,15 +5465,12 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
         <span className="flex items-center gap-1 text-[10px]" style={{ color: "#9fb3bd" }}>
           <span style={{ width: 8, height: 8, borderRadius: 99, border: "1.5px dashed rgba(255,255,255,0.4)" }} /> derived
         </span>
+        <span className="flex items-center gap-1 text-[10px]" style={{ color: "rgba(251,146,60,0.9)" }}>
+          <span style={{ width: 8, height: 8, borderRadius: 99, border: "1.5px dashed rgba(251,146,60,0.8)" }} /> contacted
+        </span>
         <span className="flex items-center gap-1 text-[10px]" style={{ color: "#ffd166" }}>
           <span style={{ width: 8, height: 8, borderRadius: 99, background: "#ffd166", boxShadow: "0 0 6px #ffd166" }} /> shared pivot
         </span>
-      </div>
-      )}
-      {/* Hint — only show interaction hint once there's a graph to interact with */}
-      {hasGraph && (
-      <div className="absolute bottom-3 left-3 z-10 text-[10px]" style={{ color: "#5d7382" }}>
-        drag nodes · scroll/pinch to zoom · drag to pan · click a node for actions
       </div>
       )}
       {!anyEnriched && (
@@ -5453,71 +5507,111 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
         </div>
       )}
 
-      {/* Node action panel — click a node to open */}
+      {/* Node action panel — click a node to open, click canvas to close */}
       {selected && (() => {
         try {
           const st = nodeActionState[selected.id];
           const canEnrich = ["IPV4", "IPV6", "DOMAIN", "URL", "MD5", "SHA1", "SHA256"].includes(selected.cat);
+          const isEnriched = !!enrichCache[`${selected.cat}::${selected.id}`]?.data;
+          const enrData = enrichCache[`${selected.cat}::${selected.id}`]?.data;
           const c = colorFor(selected.cat) || "#00e5ff";
-        return (
-          <div className="absolute z-30 rounded-xl p-3"
-            style={{ top: 52, right: 12, width: 260, background: "rgba(10,14,20,0.97)", border: `1px solid ${c}66`, backdropFilter: "blur(10px)", boxShadow: `0 0 30px ${c}33` }}>
-            <div className="flex items-start justify-between gap-2 mb-2">
-              <div className="min-w-0">
-                <div className="font-bold break-all text-[12px]" style={{ color: c }}>{selected.label}</div>
-                <div className="text-[10px]" style={{ color: "#7f95a3" }}>{selected.cat}{selected.derived ? " · derived" : ""}{selected.bridge ? " · shared pivot" : ""}</div>
+          const isCopied = copiedNodeId === selected.id;
+
+          // High-level enrichment summary snippets
+          const summary = enrData ? [
+            enrData._verdict && enrData._verdict !== "Unknown" && { label: "Verdict", value: `${enrData._verdict === "Malicious" ? "🔴" : enrData._verdict === "Suspicious" ? "🟡" : "🟢"} ${enrData._verdict}`, color: enrData._verdict === "Malicious" ? "#ff4d6d" : enrData._verdict === "Suspicious" ? "#fbbf24" : "#00ff9c" },
+            enrData.whoisASN?.asn && { label: "ASN", value: enrData.whoisASN.asn },
+            enrData.whoisASN?.country && { label: "Country", value: enrData.whoisASN.country },
+            enrData.otx?.pulses && { label: "OTX Pulses", value: enrData.otx.pulses },
+            enrData.urlscan?.brands?.length && { label: "Impersonates", value: `🎭 ${enrData.urlscan.brands[0]}`, color: "#ff4d6d" },
+            enrData.urlscan?.tlsIssuer && { label: "TLS", value: enrData.urlscan.tlsIssuer.split(" ")[0] },
+            enrData.abuseipdb?.score != null && { label: "AbuseIPDB", value: `${enrData.abuseipdb.score}%` },
+            enrData.urlscan?.firstSeen && { label: "First Seen", value: fmtDate(enrData.urlscan.firstSeen) },
+            enrData.malwarebazaar?.fileName && { label: "File", value: enrData.malwarebazaar.fileName },
+            enrData.threatfox?.malwareFamily && { label: "Family", value: enrData.threatfox.malwareFamily },
+          ].filter(Boolean) : [];
+
+          return (
+            <div className="absolute z-30 rounded-xl p-3"
+              style={{ top: 52, right: 12, width: 270, background: "rgba(10,14,20,0.97)", border: `1px solid ${c}66`, backdropFilter: "blur(10px)", boxShadow: `0 0 30px ${c}33` }}>
+              <div className="flex items-start justify-between gap-2 mb-2">
+                <div className="min-w-0">
+                  <div className="font-bold break-all text-[12px]" style={{ color: c }}>{selected.label}</div>
+                  <div className="text-[10px]" style={{ color: "#7f95a3" }}>
+                    {selected.cat}
+                    {selected.derived ? " · derived" : " · primary"}
+                    {selected.bridge ? " · 🔗 shared pivot" : ""}
+                    {selected.contacted ? " · contacted" : ""}
+                  </div>
+                </div>
+                <button onClick={() => setSelected(null)} className="shrink-0 rounded p-0.5" style={{ color: "#5d7382", cursor: "pointer", background: "none", border: "none" }}><X size={13} /></button>
               </div>
-              <button onClick={() => setSelected(null)} className="shrink-0 rounded p-0.5" style={{ color: "#5d7382", cursor: "pointer", background: "none", border: "none" }}><X size={13} /></button>
-            </div>
-            {selected.verdict && (
-              <div className="text-[11px] font-bold mb-2" style={{ color: selected.verdict === "Malicious" ? "#ff4d6d" : selected.verdict === "Suspicious" ? "#fbbf24" : selected.verdict === "Whitelisted" ? "#00ff9c" : "#8aa0ad" }}>
-                {selected.verdict === "Malicious" ? "🔴" : selected.verdict === "Suspicious" ? "🟡" : selected.verdict === "Whitelisted" ? "🟢" : "⚪"} {selected.verdict}
-              </div>
-            )}
-            <div className="flex flex-wrap gap-1.5">
-              {canEnrich && (
-                <button onClick={(e) => { e.stopPropagation(); const node = selected; doEnrichNode(node); }} disabled={st === "enriching"}
-                  className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
-                  style={{ color: "#04111a", background: "#2dd4bf", border: "none", cursor: st === "enriching" ? "wait" : "pointer", opacity: st === "enriching" ? 0.6 : 1 }}>
-                  {st === "enriching" ? <Loader2 size={11} className="animate-spin" /> : <Search size={11} />}
-                  {st === "enriching" ? "Enriching…" : "Enrich"}
-                </button>
+
+              {/* Enrichment summary — shows after enrichment */}
+              {summary.length > 0 && (
+                <div className="mb-2.5 rounded-lg px-2.5 py-2 flex flex-col gap-1"
+                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(120,160,180,0.15)" }}>
+                  {summary.map((s, i) => (
+                    <div key={i} className="flex items-center justify-between text-[10px]">
+                      <span style={{ color: "#5d7382" }}>{s.label}</span>
+                      <span className="font-semibold" style={{ color: s.color || "#c8d6dd" }}>{s.value}</span>
+                    </div>
+                  ))}
+                </div>
               )}
-              {selected.derived && (() => {
-                const catMap = { IPV4: "IPV4", IPV6: "IPV6", DOMAIN: "DOMAIN", URL: "URL", SHA256: "SHA256", SHA1: "SHA1", MD5: "MD5", EMAIL: "EMAIL" };
-                const mapped = catMap[selected.cat] || selected.cat;
-                const alreadyIn = (isPivotAdded && isPivotAdded(mapped, selected.id))
-                  || (iocData?.[mapped] || []).some((v) => String(v).toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "") === selected.id);
-                if (alreadyIn || st === "added") {
-                  return (
+
+              {/* Action buttons */}
+              <div className="flex flex-wrap gap-1.5">
+                {canEnrich && (
+                  isEnriched ? (
                     <span className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
-                      style={{ color: "#04111a", background: "#00ff9c", border: "1px solid rgba(0,255,156,0.4)" }}>
-                      <Check size={11} /> In list
+                      style={{ color: "#5d7382", background: "rgba(120,160,180,0.08)", border: "1px solid rgba(120,160,180,0.2)" }}>
+                      <Check size={11} /> Enriched
                     </span>
+                  ) : (
+                    <button onClick={(e) => { e.stopPropagation(); const node = selected; doEnrichNode(node); }}
+                      disabled={st === "enriching"}
+                      className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
+                      style={{ color: "#04111a", background: "#2dd4bf", border: "none", cursor: st === "enriching" ? "wait" : "pointer", opacity: st === "enriching" ? 0.7 : 1 }}>
+                      {st === "enriching" ? <Loader2 size={11} className="animate-spin" /> : <Search size={11} />}
+                      {st === "enriching" ? "Enriching…" : "Enrich"}
+                    </button>
+                  )
+                )}
+                {selected.derived && (() => {
+                  const catMap = { IPV4: "IPV4", IPV6: "IPV6", DOMAIN: "DOMAIN", URL: "URL", SHA256: "SHA256", SHA1: "SHA1", MD5: "MD5", EMAIL: "EMAIL" };
+                  const mapped = catMap[selected.cat] || selected.cat;
+                  const alreadyIn = (isPivotAdded && isPivotAdded(mapped, selected.id))
+                    || (iocData?.[mapped] || []).some((v) => String(v).toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "") === selected.id);
+                  if (alreadyIn || st === "added") {
+                    return (
+                      <span className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
+                        style={{ color: "#04111a", background: "#00ff9c", border: "1px solid rgba(0,255,156,0.4)" }}>
+                        <Check size={11} /> In list
+                      </span>
+                    );
+                  }
+                  return (
+                    <button onClick={(e) => { e.stopPropagation(); doAddIOCNode(selected); }}
+                      className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
+                      style={{ color: "#00ff9c", background: "rgba(0,255,156,0.12)", border: "1px solid rgba(0,255,156,0.4)", cursor: "pointer" }}>
+                      <Sparkles size={11} /> Add as IOC
+                    </button>
                   );
-                }
-                return (
-                  <button onClick={(e) => { e.stopPropagation(); doAddIOCNode(selected); }}
-                    className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
-                    title="Promote this discovered node into your IOC list"
-                    style={{ color: "#00ff9c", background: "rgba(0,255,156,0.12)", border: "1px solid rgba(0,255,156,0.4)", cursor: "pointer" }}>
-                    <Sparkles size={11} /> Add as IOC
-                  </button>
-                );
-              })()}
-              <button onClick={(e) => { e.stopPropagation(); doCopyNode(selected); }}
-                className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
-                style={{ color: "#00e5ff", background: "rgba(0,229,255,0.12)", border: "1px solid rgba(0,229,255,0.4)", cursor: "pointer" }}>
-                <Copy size={11} /> Copy
-              </button>
-              <a href={vtLinkFor(selected)} target="_blank" rel="noreferrer noopener"
-                className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
-                style={{ color: "#c084fc", background: "rgba(192,132,252,0.12)", border: "1px solid rgba(192,132,252,0.4)", textDecoration: "none" }}>
-                🛡️ VT
-              </a>
+                })()}
+                <button onClick={(e) => { e.stopPropagation(); doCopyNode(selected); }}
+                  className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold transition-colors"
+                  style={{ color: isCopied ? "#04111a" : "#00e5ff", background: isCopied ? "#00e5ff" : "rgba(0,229,255,0.12)", border: "1px solid rgba(0,229,255,0.4)", cursor: "pointer" }}>
+                  {isCopied ? <Check size={11} /> : <Copy size={11} />} {isCopied ? "Copied!" : "Copy"}
+                </button>
+                <a href={vtLinkFor(selected)} target="_blank" rel="noreferrer noopener"
+                  className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold"
+                  style={{ color: "#c084fc", background: "rgba(192,132,252,0.12)", border: "1px solid rgba(192,132,252,0.4)", textDecoration: "none" }}>
+                  🛡️ VT
+                </a>
+              </div>
             </div>
-          </div>
-        );
+          );
         } catch { return null; }
       })()}
     </div>
