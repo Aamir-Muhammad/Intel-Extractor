@@ -5297,8 +5297,11 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
       setSelected((prev) => (prev && prev.id === clickedNode.id ? null : clickedNode));
     }
     cam.dragNode = null; cam.panning = false; cam.downNode = null; cam.downX = null;
-    // Click on empty canvas background closes the action panel.
-    if (!clickedNode && !cam.movedFar) setSelected(null);
+    // Close panel ONLY on a deliberate click on the empty canvas background
+    // (pointerup with no node hit and no drag). Do NOT close on pointerleave —
+    // that fires when the mouse moves toward the panel, which was causing the
+    // panel to vanish the moment the cursor left the canvas edge.
+    if (!clickedNode && !cam.movedFar && e?.type === "pointerup") setSelected(null);
   };
   // Search: find the first node whose id/label contains the query and ease the
   // camera to center on it, then select it.
@@ -5502,7 +5505,8 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
 
       <canvas ref={canvasRef}
         style={{ width: dims.w, height: dims.h, display: "block", touchAction: "none", transition: "height 0.6s cubic-bezier(0.22,1,0.36,1)" }}
-        onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp}
+        onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp}
+        onPointerLeave={() => { const cam = camRef.current; cam.dragNode = null; cam.panning = false; }}
         onDoubleClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
       />
 
