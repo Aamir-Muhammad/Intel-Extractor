@@ -5042,8 +5042,9 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
       //   cool living-graph feel. Settled nodes use very heavy damping (0.97)
       //   so they barely move, but they're always gently breathing.
       const hot = S.t < 600 || cam.dragNode || S.warmKick > 0;
-      const active = true; // always run — use damping to control energy level
-      if (active) {
+      // Repulsion runs only during hot phase — it's the main energy injector.
+      // In idle mode, settled nodes stay put via heavy damping + tiny drift only.
+      if (hot) {
         // Repulsion
         for (let i = 0; i < N.length; i++) {
           const a = N[i];
@@ -5057,32 +5058,51 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
             a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
           }
         }
-        // Spring along edges
-        for (const e of E) {
-          const a = N.find((n) => n.id === e.a), b = N.find((n) => n.id === e.b);
-          if (!a || !b) continue;
-          const dx = b.x - a.x, dy = b.y - a.y;
-          const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
-          const target = e.kind === "asn" ? 160 : 95;
-          const k = (dist - target) * (hot ? 0.012 : 0.004);
-          const fx = (dx / dist) * k, fy = (dy / dist) * k;
-          a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+        // Spring along edges — only during hot phase
+        if (hot) {
+          for (const e of E) {
+            const a = N.find((n) => n.id === e.a), b = N.find((n) => n.id === e.b);
+            if (!a || !b) continue;
+            const dx = b.x - a.x, dy = b.y - a.y;
+            const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+            const target = e.kind === "asn" ? 160 : 95;
+            const k = (dist - target) * 0.012;
+            const fx = (dx / dist) * k, fy = (dy / dist) * k;
+            a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+          }
         }
         // Centering + integrate.
         for (const n of N) {
-          n.vx += (0 - n.x) * (hot ? 0.0016 : 0.0004);
-          n.vy += (0 - n.y) * (hot ? 0.0016 : 0.0004);
+          if (hot) {
+            n.vx += (0 - n.x) * 0.0016;
+            n.vy += (0 - n.y) * 0.0016;
+          }
           if (cam.dragNode === n) { n.vx = 0; n.vy = 0; continue; }
-          // Ambient drift: a tiny random nudge keeps nodes gently breathing even
-          // when settled. Pre-enrichment (no edges) gets more drift so the floating
-          // constellation looks alive. Post-enrichment gets very subtle drift.
+          // Idle drift: only in settled state, very subtle. Pre-enrichment (no edges)
+          // gets more drift so the floating constellation looks alive.
+          // Post-enrichment: barely perceptible gentle breathing.
           const noEdges = E.length === 0;
-          const driftAmp = noEdges ? 0.018 : 0.004;
-          n.vx += (Math.random() - 0.5) * driftAmp;
-          n.vy += (Math.random() - 0.5) * driftAmp;
-          // Damping: new nodes ease in; hot phase settles; idle is very heavy so
-          // nodes barely move but never fully freeze.
-          const damp = n.isNew ? 0.88 : (hot ? 0.82 : 0.97);
+          const settled = S.t > 600 && S.warmKick === 0 && !cam.dragNode;
+          if (settled) {
+            // Pre-enrichment: larger wander so constellation looks alive.
+            // Post-enrichment: nearly imperceptible breathing (cap keeps it calm).
+            const driftAmp = noEdges ? 0.05 : 0.0006;
+            n.vx += (Math.random() - 0.5) * driftAmp;
+            n.vy += (Math.random() - 0.5) * driftAmp;
+          }
+          // Damping: new nodes ease in; hot phase settles firmly; idle is very
+          // heavy so settled nodes barely breathe. Also hard-clamp velocity when
+          // first entering idle so hot-phase residual doesn't keep nodes dancing.
+          const damp = n.isNew ? 0.88 : (hot ? 0.82 : 0.96);
+          n.vx *= damp; n.vy *= damp;
+          // In idle with edges (enriched graph), hard-cap velocity so residual
+          // hot-phase momentum can't cause "constant dancing". Pre-enrichment
+          // (no edges) gets no cap so nodes can wander visibly.
+          if (!hot && E.length > 0) {
+            const maxIdleV = 0.02;
+            const speed = Math.sqrt(n.vx * n.vx + n.vy * n.vy);
+            if (speed > maxIdleV) { const s = maxIdleV / speed; n.vx *= s; n.vy *= s; }
+          }
           n.vx *= damp; n.vy *= damp;
           n.x += n.vx; n.y += n.vy;
           if (n.isNew) {
