@@ -44,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v84";
+const APP_VERSION = "v85";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -58,12 +58,28 @@ const isPrivateIP = (ip) => {
 };
 // DOMAIN whitelist — github.com IS filtered here (bare github.com domain is noise)
 const WL_DOMAINS = new Set(["github.com","www.github.com","github.io","localhost","example.com","www.example.com","kaspersky.com","www.kaspersky.com","fbi.gov","www.fbi.gov","mitre.org","attack.mitre.org","www.mitre.org","gmail.com","www.gmail.com","trendmicro.com","www.trendmicro.com","zscloud.net","admin.zscloud.net"]);
+// Wildcard suffix whitelist — any subdomain of these roots is whitelisted.
+const WL_SUFFIXES = [
+  "microsoft.com","microsoftonline.com","office.com","office365.com",
+  "azure.com","azureedge.net","azurewebsites.net","windows.net",
+  "sharepoint.com","live.com","bing.com","msn.com","outlook.com",
+  "skype.com","xbox.com","visualstudio.com","nuget.org",
+];
 // URL whitelist — github.com is intentionally NOT here: full GitHub URLs are
 // often real IOCs (payload hosting, raw.githubusercontent staging) and must
 // survive into the URL card. Only the bare DOMAIN entry gets filtered.
 const WL_URL_HOSTS = new Set(["localhost","example.com","www.example.com","kaspersky.com","www.kaspersky.com","fbi.gov","www.fbi.gov","mitre.org","attack.mitre.org","www.mitre.org"]);
 // Domain suffixes to filter (any domain ending in these gets removed)
-const WL_DOMAIN_SUFFIXES = [".mitre.org"];
+const WL_DOMAIN_SUFFIXES = [
+  ".mitre.org",
+  // Microsoft owned-and-operated domains only — NOT tenant-hostable ones.
+  // Excluded: .azure.com, .azureedge.net, .azurewebsites.net, .windows.net,
+  // .sharepoint.com — attackers can create subdomains on those (C2, phishing,
+  // malware hosting) so they must never be auto-whitelisted.
+  ".microsoft.com",".microsoftonline.com",".office.com",".office365.com",
+  ".live.com",".bing.com",".msn.com",".outlook.com",
+  ".skype.com",".xbox.com",".visualstudio.com",".nuget.org",
+];
 const WL_EMAIL_SUFFIXES = ["@kaspersky.com"];
 
 // ============================================================
@@ -624,6 +640,48 @@ const isIPv4 = (t) => {
   return m && m.slice(1).every((o) => +o >= 0 && +o <= 255);
 };
 
+// Strip port suffix from an IP — "1.2.3.4:8080" → "1.2.3.4"
+const stripPort = (t) => t.replace(/:\d{1,5}$/, "");
+
+// Expand CIDR notation to individual IPs (max /24 = 256 hosts).
+// Larger ranges are kept as-is (return null → caller keeps original token).
+const expandCIDR = (cidr) => {
+  const m = cidr.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\/(\d{1,2})$/);
+  if (!m) return null;
+  const prefix = parseInt(m[2], 10);
+  if (prefix < 24) return null; // too large to expand sensibly
+  const parts = m[1].split(".").map(Number);
+  if (parts.some((p) => p < 0 || p > 255)) return null;
+  const base = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
+  const count = Math.pow(2, 32 - prefix);
+  const ips = [];
+  for (let i = 1; i < count - 1; i++) { // skip network + broadcast
+    const n = (base | i) >>> 0;
+    ips.push(`${(n >>> 24) & 255}.${(n >>> 16) & 255}.${(n >>> 8) & 255}.${n & 255}`);
+  }
+  return ips.length ? ips : null;
+};
+
+// Expand last-octet IP ranges — "1.2.3.5-10" → ["1.2.3.5", ..., "1.2.3.10"]
+// Also handles full-range "1.2.3.5-1.2.3.10"
+const expandIPRange = (t) => {
+  // Full range: 1.2.3.5-1.2.3.10
+  const full = t.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.)(\d{1,3})-\d{1,3}\.\d{1,3}\.\d{1,3}\.(\d{1,3})$/);
+  if (full) {
+    const prefix = full[1], a = parseInt(full[2], 10), b = parseInt(full[3], 10);
+    if (a > b || b > 255) return null;
+    return Array.from({ length: b - a + 1 }, (_, i) => `${prefix}${a + i}`);
+  }
+  // Last-octet range: 1.2.3.5-10
+  const last = t.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.)(\d{1,3})-(\d{1,3})$/);
+  if (last) {
+    const prefix = last[1], a = parseInt(last[2], 10), b = parseInt(last[3], 10);
+    if (a > b || b > 255) return null;
+    return Array.from({ length: b - a + 1 }, (_, i) => `${prefix}${a + i}`);
+  }
+  return null;
+};
+
 // ============================================================
 //  Registry / file-path structured extraction (pre-tokenization)
 // ============================================================
@@ -922,7 +980,13 @@ const classify = (t) => {
   if (/^[a-fA-F0-9]{40}$/.test(t)) return ["SHA1", t.toLowerCase()];
   if (/^[a-fA-F0-9]{64}$/.test(t)) return ["SHA256", t.toLowerCase()];
   if (/^[a-fA-F0-9]{128}$/.test(t)) return ["SHA512", t.toLowerCase()];
-  if (isIPv4(t)) return ["IPV4", t];
+  // Strip port suffix before IPV4 check — "1.2.3.4:8080" → classify as IPV4 "1.2.3.4"
+  // Port must be 1-65535; reject invalid ports like :99999
+  const portMatch = t.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{1,5})$/);
+  if (portMatch && parseInt(portMatch[2], 10) <= 65535) {
+    const bare = portMatch[1];
+    if (isIPv4(bare)) return ["IPV4", bare];
+  }
   if (/^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(t) || /^(?:[0-9a-f]{2}-){5}[0-9a-f]{2}$/i.test(t)) return ["MAC_ADDRESS", t.toLowerCase()];
   if (/^(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{0,4}$/i.test(t) && (t.match(/:/g) || []).length >= 2) return ["IPV6", t.toLowerCase()];
   if (/^4[0-9AB][1-9A-HJ-NP-Za-km-z]{93}(?:[1-9A-HJ-NP-Za-km-z]{11})?$/.test(t)) return ["XMR", t];
@@ -1029,6 +1093,17 @@ const extractIocs = (text) => {
     if (spacedFilename) { add("FILE_NAME", s); continue; }
 
     for (const t of tokens) {
+      // CIDR expansion — "1.2.3.0/24" → individual IPs
+      if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/\d{1,2}$/.test(t)) {
+        const expanded = expandCIDR(t);
+        if (expanded) { expanded.forEach((ip) => add("IPV4", ip)); continue; }
+        // Too large to expand — keep as-is (will fall through to classify)
+      }
+      // IP range expansion — "1.2.3.5-10" or "1.2.3.5-1.2.3.10"
+      if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}-/.test(t)) {
+        const expanded = expandIPRange(t);
+        if (expanded) { expanded.filter(isIPv4).forEach((ip) => add("IPV4", ip)); continue; }
+      }
       const r = classify(t);
       if (!r) continue;
       if (r[0] === "REGISTRY") pushReg({ key: expandHive(r[1].replace(/\//g, "\\")) });
@@ -1121,6 +1196,38 @@ const mergeIocs = (apiData, engData) => {
   };
   Object.entries(apiData).forEach(([c, arr]) => arr.forEach((v) => put(c, v, "api")));
   Object.entries(engData).forEach(([c, arr]) => arr.forEach((v) => put(c, v, "eng")));
+
+  // Cross-category dedup: a URL with no path component is a DOMAIN, not a URL.
+  // iocparser sometimes returns bare hostnames as URLs — move them to DOMAIN.
+  if (data.URL) {
+    const toPromote = [];
+    data.URL = data.URL.filter((v) => {
+      try {
+        const u = new URL(v.includes("://") ? v : "https://" + v);
+        const hasPath = u.pathname && u.pathname !== "/" && u.pathname !== "";
+        const hasQuery = !!u.search;
+        if (!hasPath && !hasQuery) { toPromote.push(u.hostname.toLowerCase()); return false; }
+      } catch { /* keep on parse failure */ }
+      return true;
+    });
+    if (!data.URL.length) delete data.URL;
+    toPromote.forEach((dom) => put("DOMAIN", dom, "dedup"));
+  }
+
+  // Master dedup: remove a value from lower-priority categories if it already
+  // exists in a higher-priority one. Priority: specific hash > DOMAIN > URL.
+  // Main case: kawosyetw.gu.cc parsed as both DOMAIN and URL → keep DOMAIN only.
+  if (data.DOMAIN && data.URL) {
+    const domainSet = new Set(data.DOMAIN.map((d) => d.toLowerCase()));
+    data.URL = data.URL.filter((u) => {
+      try {
+        const host = new URL(u.includes("://") ? u : "https://" + u).hostname.toLowerCase();
+        return !domainSet.has(host);
+      } catch { return true; }
+    });
+    if (!data.URL.length) delete data.URL;
+  }
+
   const ordered = {};
   ORDER.forEach((k) => { if (data[k]) ordered[k] = data[k]; });
   Object.keys(data).forEach((k) => { if (!ordered[k]) ordered[k] = data[k]; });
@@ -2477,17 +2584,21 @@ export default function App() {
                   : [];
 
                 // Loaded-resource hashes — filter to only executable/document types.
-                // Skip hashes from .css/.png/.woff and other static files since
-                // those are styling/font resources, not threat payloads.
+                // Skip CSS, images, fonts, and other static assets by extension AND MIME type.
+                const BENIGN_MIME = /^(text\/css|image\/|font\/|text\/plain|application\/font|application\/x-font)/i;
+                const STATIC_EXTS_HASH = /\.(css|woff2?|ttf|eot|otf|ico|png|jpg|jpeg|gif|svg|webp|map)(\?.*)?$/i;
                 const resourceHashes = Array.isArray(detail.lists?.hashes)
                   ? Array.from(new Set(detail.lists.hashes))
                       .filter((h) => {
-                        // Find the URL this hash came from in the requests array
                         const req = (detail.data?.requests || []).find((r) =>
-                          r?.response?.hash === h || r?.request?.url?.includes(h)
+                          r?.response?.hash === h
                         );
+                        if (!req) return true;
                         const url = req?.request?.url || "";
-                        return !isStaticAsset(url);
+                        const mime = req?.response?.mimeType || req?.response?.type || "";
+                        if (STATIC_EXTS_HASH.test(url.split("?")[0])) return false;
+                        if (BENIGN_MIME.test(mime)) return false;
+                        return true;
                       })
                       .slice(0, 10)
                   : [];
@@ -3754,6 +3865,7 @@ export default function App() {
               <ThreatGraph iocData={iocData} enrichCache={enrichCache} colorFor={colorFor}
                 enrichIOC={enrichIOC} logEvent={logEvent} copyText={copyText}
                 addPivotIOC={addPivotIOC} isPivotAdded={isPivotAdded}
+                removeIoc={removeIoc}
                 anyEnriched={Object.keys(enrichCache).length > 0} />
             </GraphErrorBoundary>
           </div>
@@ -3782,7 +3894,7 @@ export default function App() {
                     <span className="font-bold tracking-wide truncate" style={{ color: c, textShadow: `0 0 12px ${c}55` }}>{cat}</span>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat) && (
+                    {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE","FILE_NAME","FILE_PATH","REGISTRY","SCHEDULED_TASK","SERVICE","COMMAND_LINE","EMAIL","MAC_ADDRESS"].includes(cat) && (
                       <>
                       <button onClick={() => { setCustomAddCat(customAddCat === cat ? null : cat); setCustomAddValue(""); }}
                         title="Add custom IOC"
@@ -3945,18 +4057,21 @@ export default function App() {
                             </a>
                           )}
                           <button onClick={() => copyText(ioc, rowKey)}
+                            onMouseEnter={() => setHoveredActionRow(eKey)} onMouseLeave={() => setHoveredActionRow(null)}
                             title="Copy this indicator"
                             className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
                             style={{ color: isCopied ? c : "#8aa0ad" }}>
                             {isCopied ? <Check size={16} /> : <Copy size={16} />}
                           </button>
                           <button onClick={() => { setEditingKey(rowKey); setEditValue(arr[i]); }}
+                            onMouseEnter={() => setHoveredActionRow(eKey)} onMouseLeave={() => setHoveredActionRow(null)}
                             title="Edit this indicator"
                             className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
                             style={{ color: "#8aa0ad" }}>
                             <Pencil size={14} />
                           </button>
                           <button onClick={() => removeIoc(cat, arr[i])}
+                            onMouseEnter={() => setHoveredActionRow(eKey)} onMouseLeave={() => setHoveredActionRow(null)}
                             title="Discard this indicator"
                             className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
                             style={{ color: "#ff6b6b" }}>
@@ -4654,7 +4769,7 @@ class GraphErrorBoundary extends Component {
   }
 }
 
-function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copyText, addPivotIOC, isPivotAdded, anyEnriched }) {
+function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copyText, addPivotIOC, isPivotAdded, removeIoc, anyEnriched }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const stateRef = useRef({ nodes: [], edges: [], t: 0 });
@@ -4672,6 +4787,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
   const [searchQuery, setSearchQuery] = useState("");
   const [nodeActionState, setNodeActionState] = useState({}); // { nodeId: "enriching"|"added" }
   const [copiedNodeId, setCopiedNodeId] = useState(null);
+  const [hiddenNodes, setHiddenNodes] = useState(new Set()); // manually hidden from graph
   const [searchMatches, setSearchMatches] = useState([]);
   const [searchMatchIdx, setSearchMatchIdx] = useState(0);
 
@@ -4913,6 +5029,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
     }
     const vis = new Set();
     model.nodes.forEach((n) => {
+      if (hiddenNodes.has(n.id)) return;
       if (hiddenCats[n.cat]) return;
       if (n.verdict && hiddenVerdicts[n.verdict]) return;
       if (hideDerived && n.derived) return;
@@ -5410,15 +5527,30 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
       {/* Search icon + expandable box (bottom-right, left of fullscreen) */}
       <div className="absolute z-20 flex items-center gap-1" style={{ bottom: 12, right: fullscreen ? 170 : 150 }}>
         {showSearch && (
-          <input autoFocus value={searchQuery}
-            onChange={(e) => { setSearchQuery(e.target.value); setSearchMatchIdx(0); searchAndFocus(e.target.value, 0); }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") { e.preventDefault(); searchAndFocus(searchQuery, searchMatchIdx + 1); setSearchMatchIdx((i) => (searchMatches.length ? (i + 1) % searchMatches.length : 0)); }
-              if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); setSearchMatches([]); }
-            }}
-            placeholder={searchMatches.length > 1 ? `${searchMatchIdx + 1}/${searchMatches.length} — Enter to cycle` : "Search node…"}
-            className="rounded-lg px-2.5 py-1.5 text-[11px] outline-none"
-            style={{ width: 180, background: "rgba(10,14,20,0.95)", border: "1px solid rgba(0,229,255,0.4)", color: "#dff", backdropFilter: "blur(6px)" }} />
+          <div className="flex items-center gap-1">
+            {searchMatches.length > 0 && (
+              <span className="text-[10px] font-bold rounded px-1.5 py-1 shrink-0"
+                style={{ color: "#00e5ff", background: "rgba(0,229,255,0.12)", border: "1px solid rgba(0,229,255,0.3)", minWidth: 36, textAlign: "center" }}>
+                {searchMatchIdx + 1}/{searchMatches.length}
+              </span>
+            )}
+            <input autoFocus value={searchQuery}
+              onChange={(e) => { setSearchQuery(e.target.value); setSearchMatchIdx(0); searchAndFocus(e.target.value, 0); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  if (!searchMatches.length) { searchAndFocus(searchQuery, 0); return; }
+                  // Cycle: after last match wraps back to first (1/N → 2/N → ... → N/N → 1/N)
+                  const nextIdx = (searchMatchIdx + 1) % searchMatches.length;
+                  setSearchMatchIdx(nextIdx);
+                  searchAndFocus(searchQuery, nextIdx);
+                }
+                if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); setSearchMatches([]); setSearchMatchIdx(0); }
+              }}
+              placeholder="Search node…"
+              className="rounded-lg px-2.5 py-1.5 text-[11px] outline-none"
+              style={{ width: 160, background: "rgba(10,14,20,0.95)", border: "1px solid rgba(0,229,255,0.4)", color: "#dff", backdropFilter: "blur(6px)" }} />
+          </div>
         )}
         <button onClick={() => { setShowSearch((v) => !v); if (showSearch) setSearchQuery(""); }}
           className="rounded-lg p-2 flex items-center justify-center"
@@ -5645,6 +5777,34 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
                   style={{ color: "#c084fc", background: "rgba(192,132,252,0.12)", border: "1px solid rgba(192,132,252,0.4)", textDecoration: "none" }}>
                   🛡️ VT
                 </a>
+                {/* Removal buttons */}
+                <button onClick={(e) => { e.stopPropagation(); setHiddenNodes((h) => { const n = new Set(h); n.add(selected.id); return n; }); setSelected(null); }}
+                  className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold w-full mt-1"
+                  title="Hide this node from the graph (IOC remains in your list)"
+                  style={{ color: "#ff6b6b", background: "rgba(255,107,107,0.08)", border: "1px solid rgba(255,107,107,0.3)", cursor: "pointer" }}>
+                  <X size={11} /> Hide from graph
+                </button>
+                {(() => {
+                  // "Remove from graph & list" only when this node is in the IOC list
+                  const catMap = { IPV4:"IPV4", IPV6:"IPV6", DOMAIN:"DOMAIN", URL:"URL", SHA256:"SHA256", SHA1:"SHA1", MD5:"MD5", EMAIL:"EMAIL" };
+                  const mapped = catMap[selected.cat] || selected.cat;
+                  const inList = (iocData?.[mapped] || []).some((v) => String(v).toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "") === selected.id)
+                    || (isPivotAdded && isPivotAdded(mapped, selected.id));
+                  if (!inList) return null;
+                  return (
+                    <button onClick={(e) => {
+                      e.stopPropagation();
+                      setHiddenNodes((h) => { const n = new Set(h); n.add(selected.id); return n; });
+                      if (removeIoc) removeIoc(mapped, selected.id);
+                      setSelected(null);
+                    }}
+                      className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold w-full"
+                      title="Remove from graph and from your IOC list"
+                      style={{ color: "#ff4d6d", background: "rgba(255,77,109,0.1)", border: "1px solid rgba(255,77,109,0.4)", cursor: "pointer" }}>
+                      <X size={11} /> Remove from graph & list
+                    </button>
+                  );
+                })()}
               </div>
             </div>
           );
