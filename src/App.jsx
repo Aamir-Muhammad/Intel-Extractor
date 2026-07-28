@@ -2108,13 +2108,25 @@ export default function App() {
                   hostname: cat === "DOMAIN" ? null : target,
                   address: cat === "DOMAIN" ? target : null,
                   recordType: (r.record_type || (cat === "DOMAIN" ? "A" : null)),
-                  first, last, obs: 0, asn: r.asn || null, country: r.flag_title || null,
+                  first, last, obs: 0, asn: null, country: null,
+                  _latestLast: null, // track which record contributed ASN/country
                   windows: [],
                 };
                 if (first && (!g.first || first < g.first)) g.first = first;
                 if (last && (!g.last || last > g.last)) g.last = last;
-                if (!g.asn && r.asn) g.asn = r.asn;
-                if (!g.country && r.flag_title) g.country = r.flag_title;
+                // Use ASN/country from the MOST RECENT observation (latest 'last' date).
+                // An IP can change ASN over time (reassigned ranges); the current
+                // observation's ASN is what matters — not whatever record happened
+                // to be iterated first.
+                const isMoreRecent = last && (!g._latestLast || last > g._latestLast);
+                if (isMoreRecent && (r.asn || r.flag_title)) {
+                  g.asn = r.asn || g.asn;
+                  g.country = r.flag_title || g.country;
+                  g._latestLast = last;
+                } else {
+                  if (!g.asn && r.asn) g.asn = r.asn;
+                  if (!g.country && r.flag_title) g.country = r.flag_title;
+                }
                 g.obs += 1;
                 if ((first || last) && !g.windows.some((w) => w.first === first && w.last === last)) {
                   g.windows.push({ first, last });
