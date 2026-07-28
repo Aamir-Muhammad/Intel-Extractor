@@ -4442,8 +4442,8 @@ export default function App() {
                                                 {r.obs} obs {rowOpen ? "▾" : "▸"}
                                               </button>
                                             )}
-                                            {r.asn && <span className="text-[10px]" style={{ color: "#8aa0ad" }}>· {r.asn}</span>}
-                                            {r.country && <span className="text-[10px]" style={{ color: "#8aa0ad" }}>· {r.country}</span>}
+                                            {r.asn && cat === "DOMAIN" && <span className="text-[10px]" style={{ color: "#8aa0ad" }}>· {r.asn}</span>}
+                                            {r.country && cat === "DOMAIN" && <span className="text-[10px]" style={{ color: "#8aa0ad" }}>· {r.country}</span>}
                                           </span>
                                           {added ? (
                                             <>
