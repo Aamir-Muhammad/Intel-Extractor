@@ -44,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v85";
+const APP_VERSION = "v86";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -1948,7 +1948,7 @@ export default function App() {
     const _t0 = Date.now();
     const _apiLog = []; // { api, ms } per upstream call, for analytics
     const callEnrich = async (api, otxType, otxSection, overrideValue, extra) => {
-      const body = { api, value: overrideValue || value };
+      const body = { api, value: overrideValue || value, cat }; // cat for server-side D1 logging
       if (otxType) body.otx_type = otxType;
       if (otxSection) body.otx_section = otxSection;
       if (extra && typeof extra === "object") Object.assign(body, extra);
@@ -2120,6 +2120,29 @@ export default function App() {
           }
           // 404 = hash unknown to CIRCL (not an error, just quiet)
         } catch (e) { console.warn("Enrich CIRCL failed:", e.message); }
+
+        // Tri.age (Recorded Future Sandbox) — hash lookup + C2 extraction.
+        // Two-step: search → overview+summary. Only proceeds if the hash exists
+        // in Triage's public corpus. Extracts: family, behavioral score, tags, C2 URLs.
+        try {
+          const triageAlgo = { MD5: "md5", SHA1: "sha1", SHA256: "sha256" }[cat];
+          if (triageAlgo) {
+            const tj = await callEnrich("triage", triageAlgo, null);
+            if (tj && !tj.error && tj.found) {
+              results.triage = {
+                sampleId: tj.sampleId,
+                score: tj.score, // 0-10 (10 = max malicious)
+                families: tj.families || [],
+                tags: tj.tags || [],
+                filename: tj.filename || null,
+                submitted: tj.submitted ? tj.submitted.split("T")[0] : null,
+                completed: tj.completed ? tj.completed.split("T")[0] : null,
+                c2Urls: tj.c2Urls || [],
+                triageUrl: tj.triageUrl,
+              };
+            }
+          }
+        } catch (e) { console.warn("Enrich Tri.age failed:", e.message); }
       }
       // AlienVault OTX — general (pulses, reputation, ASN, country, high-fidelity tags)
       if (["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat)) {
@@ -2784,6 +2807,9 @@ export default function App() {
       else if (results.threatfox) verdict = "Malicious";
       else if (results.urlhaus?.status === "online") verdict = "Malicious";
       else if (results.malwarebazaar) verdict = "Malicious";
+      // Tri.age score 10 = confirmed malicious; 5-9 = suspicious
+      else if (results.triage?.score === 10) verdict = "Malicious";
+      else if ((results.triage?.score || 0) >= 5) verdict = "Suspicious";
       // urlscan's own engine flagged the latest scan malicious.
       else if (results.urlscan?.overallMalicious) verdict = "Malicious";
       else if (results.urlhaus?.status === "offline") verdict = "Suspicious";
@@ -2821,7 +2847,7 @@ export default function App() {
       }
 
       // OTX-only with 0 pulses and no other signals → Unknown
-      const hasNonOtx = results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin || results.abuseipdb || results.urlscan || results.circl || results.kaspersky;
+      const hasNonOtx = results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin || results.abuseipdb || results.urlscan || results.circl || results.kaspersky || results.triage;
       if (!hasNonOtx && results.otx && results.otx.pulses === 0 && !results.otx.validation) verdict = "Unknown";
 
       // Final verdict normalization — catch any non-standard strings
@@ -2832,30 +2858,11 @@ export default function App() {
       const hasData = Object.keys(results).length > 0;
       if (hasData) results._verdict = verdict;
       setEnrichCache((c) => ({ ...c, [key]: { loading: false, data: hasData ? results : null, error: !hasData } }));
-      logEvent({
-        event_type: "enrich",
-        ioc_type: cat,
-        ioc_value: value,
-        verdict: hasData ? verdict : "Unknown",
-        duration_ms: Date.now() - _t0,
-        upstream_apis: _apiLog,
-        extra: {
-          malware: results.threatfox?.malware || results.malwarebazaar?.family || null,
-          kaspersky_zone: results.kaspersky?.zone || null,
-        },
-      });
+      // Logging is now handled server-side in the Worker's /enrich route —
+      // no client-side log call needed, nothing suspicious in DevTools.
     } catch (e) {
       console.warn("Enrich overall failed:", e.message);
       setEnrichCache((c) => ({ ...c, [key]: { loading: false, data: null, error: true } }));
-      logEvent({
-        event_type: "enrich",
-        ioc_type: cat,
-        ioc_value: value,
-        verdict: "Error",
-        duration_ms: Date.now() - _t0,
-        upstream_apis: _apiLog,
-        error: String(e.message || e).slice(0, 200),
-      });
     }
   };
 
@@ -2876,8 +2883,9 @@ export default function App() {
   const [defangMap, setDefangMap] = useState({});
   const [defangAll, setDefangAll] = useState(false);
   const [copied, setCopied] = useState("");
-  const [editingKey, setEditingKey] = useState(null);   // "cat-i-3" → currently editing
+  const [editingKey, setEditingKey] = useState(null);
   const [editValue, setEditValue] = useState("");
+  const [movingKey, setMovingKey] = useState(null); // "cat::value" being moved
   const [addedPivots, setAddedPivots] = useState(new Set());       // "targetCat::targetValue" → added
   const [dismissedPivots, setDismissedPivots] = useState(new Set()); // dismissed pivot suggestions
   const [enrichAllDone, setEnrichAllDone] = useState({});           // { cat: true } → greyed out
@@ -2885,7 +2893,8 @@ export default function App() {
   const [customAddValue, setCustomAddValue] = useState("");
   const [condensed, setCondensed] = useState(false);
   const [graphView, setGraphView] = useState(true);
-  const [hoveredActionRow, setHoveredActionRow] = useState(null); // eKey whose action button is hovered
+  const [hoveredActionRow, setHoveredActionRow] = useState(null);
+  const [parseFlash, setParseFlash] = useState(null); // "paste"|"raw" — brief glow on click // eKey whose action button is hovered
   const [pdnsExpanded, setPdnsExpanded] = useState({});   // { "cat::ioc": bool } show all raw obs
   const [pdnsRowOpen, setPdnsRowOpen] = useState({});     // { "cat::ioc::target": bool } per-IP expand
   const [expiringTokens, setExpiringTokens] = useState([]);
@@ -2979,6 +2988,26 @@ export default function App() {
       setRegistryDetails((prev) => prev.filter((d) => canonicalReg(d) !== value));
     }
   };
+
+  // Move an IOC from one category to another (e.g. misclassified domain → FILE_NAME)
+  const moveIoc = (fromCat, value, toCat) => {
+    if (fromCat === toCat) return;
+    setIocData((prev) => {
+      const next = { ...prev };
+      // Remove from source
+      if (next[fromCat]) {
+        const arr = next[fromCat].filter((v) => v !== value);
+        if (arr.length) next[fromCat] = arr; else delete next[fromCat];
+      }
+      // Add to target (create category if needed)
+      next[toCat] = [...new Set([...(next[toCat] || []), value])];
+      return next;
+    });
+    setMovingKey(null);
+  };
+
+  // All valid IOC categories for the move-to dropdown
+  const ALL_IOC_CATS = ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","EMAIL","CVE","MITRE_ATTACK","FILE_NAME","FILE_PATH","REGISTRY","SCHEDULED_TASK","SERVICE","COMMAND_LINE","MAC_ADDRESS","BTC","ETH","XMR","YARA"];
 
   // Add a pivot IOC from enrichment (urlscan serving IP, file hashes, etc.)
   // The IOC gets a [pivot] tag in originData for display differentiation.
@@ -3610,7 +3639,8 @@ export default function App() {
                 style={{ backgroundColor: "rgba(0,0,0,0.45)", border: "1px solid rgba(120,160,180,0.22)", color: "#dff" }}
               />
               <div className="flex gap-2">
-                <GButton onClick={runPaste} disabled={!jsonText.trim()} color="#00ff9c" solid icon={<ClipboardPaste size={16} />}>Parse JSON</GButton>
+                <GButton onClick={() => { setParseFlash("paste"); setTimeout(() => setParseFlash(null), 600); runPaste(); }} disabled={!jsonText.trim()} color="#00ff9c" solid icon={<ClipboardPaste size={16} />}
+                  flash={parseFlash === "paste"}>Parse JSON</GButton>
                 {jsonText && <GButton onClick={() => setJsonText("")} color="#94a3b8" icon={<Trash2 size={15} />}>Clear</GButton>}
               </div>
             </div>
@@ -3627,7 +3657,8 @@ export default function App() {
                 style={{ backgroundColor: "rgba(0,0,0,0.45)", border: "1px solid rgba(120,160,180,0.22)", color: "#dff" }}
               />
               <div className="flex items-center gap-2">
-                <GButton onClick={runRaw} disabled={!rawText.trim()} color="#c084fc" solid icon={<Wand2 size={16} />}>Refang &amp; Parse</GButton>
+                <GButton onClick={() => { setParseFlash("raw"); setTimeout(() => setParseFlash(null), 600); runRaw(); }} disabled={!rawText.trim()} color="#c084fc" solid icon={<Wand2 size={16} />}
+                  flash={parseFlash === "raw"}>Refang &amp; Parse</GButton>
                 {rawText && <GButton onClick={() => setRawText("")} color="#94a3b8" icon={<Trash2 size={15} />}>Clear</GButton>}
                 <span className="text-xs ml-auto" style={{ color: "#5d7382" }}>
                   Handles <span style={{ color: "#8aa0ad" }}>[md](links)</span>, defang, reg add &amp; paths with spaces
@@ -3860,7 +3891,11 @@ export default function App() {
         )}
 
         {entries.length > 0 && (
-          <div className="mb-4">
+          <div className="mb-6" style={{ margin: "0 calc(-50vw + 50%) 1.5rem", width: "100vw" }}>
+            <div className="px-4 py-2 flex items-center gap-3" style={{ borderBottom: "1px solid rgba(120,160,180,0.12)" }}>
+              <span className="text-xs uppercase tracking-widest font-bold" style={{ color: "#5d7382" }}>Threat Graph</span>
+              <span className="text-[10px]" style={{ color: "#3a4a54" }}>· {entries.length} indicator types · click nodes to investigate</span>
+            </div>
             <GraphErrorBoundary>
               <ThreatGraph iocData={iocData} enrichCache={enrichCache} colorFor={colorFor}
                 enrichIOC={enrichIOC} logEvent={logEvent} copyText={copyText}
@@ -4070,6 +4105,31 @@ export default function App() {
                             style={{ color: "#8aa0ad" }}>
                             <Pencil size={14} />
                           </button>
+                          {/* Move to category — inline dropdown when active */}
+                          {movingKey === eKey ? (
+                            <div className="relative shrink-0">
+                              <select
+                                autoFocus
+                                defaultValue=""
+                                onChange={(e) => { if (e.target.value) moveIoc(cat, arr[i], e.target.value); }}
+                                onBlur={() => setMovingKey(null)}
+                                className="rounded-md text-[10px] px-1.5 py-0.5 outline-none"
+                                style={{ background: "rgba(10,14,20,0.97)", border: "1px solid rgba(0,229,255,0.5)", color: "#00e5ff", cursor: "pointer" }}>
+                                <option value="" disabled>Move to…</option>
+                                {ALL_IOC_CATS.filter((c) => c !== cat).map((c) => (
+                                  <option key={c} value={c}>{c}</option>
+                                ))}
+                              </select>
+                            </div>
+                          ) : (
+                            <button onClick={() => setMovingKey(eKey)}
+                              onMouseEnter={() => setHoveredActionRow(eKey)} onMouseLeave={() => setHoveredActionRow(null)}
+                              title="Move to another category"
+                              className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
+                              style={{ color: "#8aa0ad" }}>
+                              <Share2 size={13} />
+                            </button>
+                          )}
                           <button onClick={() => removeIoc(cat, arr[i])}
                             onMouseEnter={() => setHoveredActionRow(eKey)} onMouseLeave={() => setHoveredActionRow(null)}
                             title="Discard this indicator"
@@ -4172,6 +4232,35 @@ export default function App() {
                                       {d.circl.trust != null ? ` · Trust ${d.circl.trust}/100` : ""}
                                     </span>
                                   )}
+                                  {d.triage && (() => {
+                                    const score = d.triage.score || 0;
+                                    const col = score >= 8 ? "#ff4d6d" : score >= 5 ? "#fbbf24" : "#00ff9c";
+                                    const bg = score >= 8 ? "rgba(255,77,109,0.12)" : score >= 5 ? "rgba(251,191,36,0.10)" : "rgba(0,255,156,0.08)";
+                                    const bd = score >= 8 ? "rgba(255,77,109,0.35)" : score >= 5 ? "rgba(251,191,36,0.35)" : "rgba(0,255,156,0.3)";
+                                    const icon = score >= 8 ? "🔴" : score >= 5 ? "🟡" : "🟢";
+                                    return (
+                                      <span className="flex flex-col gap-0.5">
+                                        <span className="rounded-full px-2 py-0.5" style={{ color: col, backgroundColor: bg, border: `1px solid ${bd}` }}
+                                          title="Tri.age (Recorded Future Sandbox) behavioral analysis">
+                                          {icon} Tri.age · Score {score}/10
+                                          {d.triage.families?.length ? ` · ${d.triage.families.join(", ")}` : ""}
+                                          {d.triage.filename ? ` · ${d.triage.filename}` : ""}
+                                          {d.triage.submitted ? ` · Submitted ${fmtDate(d.triage.submitted)}` : ""}
+                                          {" · "}<a href={d.triage.triageUrl} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a>
+                                        </span>
+                                        {d.triage.tags?.length > 0 && (
+                                          <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
+                                            🏷️ {d.triage.tags.join(", ")}
+                                          </span>
+                                        )}
+                                        {d.triage.c2Urls?.length > 0 && (
+                                          <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#ff8a9b", backgroundColor: "rgba(255,77,109,0.08)", border: "1px solid rgba(255,77,109,0.3)" }}>
+                                            📡 C2: {d.triage.c2Urls.slice(0, 3).join(", ")}{d.triage.c2Urls.length > 3 ? ` +${d.triage.c2Urls.length - 3} more` : ""}
+                                          </span>
+                                        )}
+                                      </span>
+                                    );
+                                  })()}
                                   {isHash && d.kaspersky && (() => {
                                     const z = d.kaspersky.zone;
                                     const c = z === "red" ? "#ff4d6d" : z === "yellow" ? "#fbbf24" : z === "green" ? "#4ade80" : "#94a3b8";
@@ -4783,6 +4872,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
   const [hideDerived, setHideDerived] = useState(false);
   const [hideOrphans, setHideOrphans] = useState(false);
   const [isolateMalicious, setIsolateMalicious] = useState(false);
+  const [isolateSharedPivots, setIsolateSharedPivots] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [nodeActionState, setNodeActionState] = useState({}); // { nodeId: "enriching"|"added" }
@@ -4899,6 +4989,35 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
           addNode(h, h.slice(0, 12) + "…", "SHA256", true, null);
           addEdge(val, h, "loads", "rgba(255,77,109,0.35)");
         });
+
+        // Tri.age C2 URLs — extracted from behavioral analysis of this hash.
+        // These are the command-and-control endpoints the malware phoned home to.
+        // High-value derived nodes: domain:evil.com, ip:1.2.3.4, or bare URLs.
+        (d.triage?.c2Urls || []).forEach((c2) => {
+          if (!c2) return;
+          const raw = String(c2);
+          if (raw.startsWith("domain:")) {
+            const dom = raw.slice(7).toLowerCase();
+            if (!dom) return;
+            const n = addNode(dom, dom, "DOMAIN", true, "Malicious");
+            if (n) n.c2 = true;
+            addEdge(val, dom, "c2", "rgba(255,77,109,0.6)");
+          } else if (raw.startsWith("ip:")) {
+            const ip = raw.slice(3);
+            if (!ip) return;
+            const n = addNode(ip, ip, "IPV4", true, "Malicious");
+            if (n) n.c2 = true;
+            addEdge(val, ip, "c2", "rgba(255,77,109,0.6)");
+          } else {
+            // Bare URL
+            try {
+              const u = new URL(raw.includes("://") ? raw : "https://" + raw);
+              const n = addNode(raw, u.hostname, "URL", true, "Malicious");
+              if (n) n.c2 = true;
+              addEdge(val, raw, "c2", "rgba(255,77,109,0.6)");
+            } catch { /* skip malformed */ }
+          }
+        });
       });
     });
 
@@ -5001,7 +5120,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
     // keep it "warm" (low energy) so settled clusters stay calm while new nodes weave in.
     const firstLayout = prev.size === 0;
     stateRef.current.t = firstLayout ? 0 : 480; // 480 = past the hot phase, gentle settle
-    stateRef.current.warmKick = newCount > 0 ? 90 : 0; // brief local energy for new nodes
+    stateRef.current.warmKick = newCount > 0 ? 240 : 0; // 4s of extra energy for new nodes
 
     // Re-point selection/hover to the fresh node object, or clear if it's gone.
     // (A stale `selected` referencing a removed node is what black-screened the app.)
@@ -5020,26 +5139,50 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
   useEffect(() => {
     const malSet = new Set();
     if (isolateMalicious) {
-      // Keep malicious nodes and their direct neighbors.
       model.nodes.forEach((n) => { if (n.verdict === "Malicious") malSet.add(n.id); });
       model.edges.forEach((e) => {
         if (malSet.has(e.a)) malSet.add(e.b);
         if (malSet.has(e.b)) malSet.add(e.a);
       });
     }
+    // Shared-pivot isolation: keep only bridge nodes + their direct neighbors.
+    const pivotSet = new Set();
+    if (isolateSharedPivots) {
+      model.nodes.forEach((n) => { if (n.bridge) pivotSet.add(n.id); });
+      model.edges.forEach((e) => {
+        if (e.kind === "asn") return;
+        if (pivotSet.has(e.a)) pivotSet.add(e.b);
+        if (pivotSet.has(e.b)) pivotSet.add(e.a);
+      });
+    }
+
+    // Cascade-hide: when a node is manually hidden, also hide derived nodes
+    // that only connect to it (orphaned by the hide). Shared nodes stay visible.
+    const cascadeHidden = new Set(hiddenNodes);
+    if (hiddenNodes.size > 0) {
+      model.nodes.forEach((n) => {
+        if (!n.derived || cascadeHidden.has(n.id)) return;
+        const neighbors = model.edges.filter(e => e.kind !== "asn" && (e.a === n.id || e.b === n.id))
+          .map(e => e.a === n.id ? e.b : e.a);
+        const allHidden = neighbors.length > 0 && neighbors.every(nb => cascadeHidden.has(nb));
+        if (allHidden) cascadeHidden.add(n.id);
+      });
+    }
+
     const vis = new Set();
     model.nodes.forEach((n) => {
-      if (hiddenNodes.has(n.id)) return;
+      if (cascadeHidden.has(n.id)) return;
       if (hiddenCats[n.cat]) return;
       if (n.verdict && hiddenVerdicts[n.verdict]) return;
       if (hideDerived && n.derived) return;
       if (hideOrphans && n.orphan) return;
       if (isolateMalicious && !malSet.has(n.id)) return;
+      if (isolateSharedPivots && !pivotSet.has(n.id)) return;
       vis.add(n.id);
     });
     visibleRef.current = vis;
     setVisTick((t) => t + 1);
-  }, [model, hiddenCats, hiddenVerdicts, hideDerived, hideOrphans, isolateMalicious]);
+  }, [model, hiddenCats, hiddenVerdicts, hideDerived, hideOrphans, isolateMalicious, isolateSharedPivots, hiddenNodes]);
 
   // Resize observer
   useEffect(() => {
@@ -5052,8 +5195,8 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
       } else {
         // Teaser height before any enrichment (just a taste of the constellation);
         // blooms to full height once enrichment data exists.
-        const fullH = Math.max(420, Math.min(720, r.width * 0.62));
-        const h = anyEnriched ? fullH : 190;
+        const fullH = Math.max(370, Math.min(634, r.width * 0.545)); // 12% less than original
+        const h = anyEnriched ? fullH : 168; // teaser also 12% less (190 * 0.88)
         setDims({ w: Math.max(320, r.width), h });
       }
     });
@@ -5187,7 +5330,9 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
             a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
           }
         }
-        // Spring along edges — only during hot phase
+        // Spring along edges — during hot phase for all nodes; in idle, still
+        // run for new nodes so they travel all the way to their parent position
+        // rather than freezing partway (the "stops before reaching parent" bug).
         if (hot) {
           for (const e of E) {
             const a = N.find((n) => n.id === e.a), b = N.find((n) => n.id === e.b);
@@ -5196,6 +5341,18 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
             const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
             const target = e.kind === "asn" ? 160 : 95;
             const k = (dist - target) * 0.012;
+            const fx = (dx / dist) * k, fy = (dy / dist) * k;
+            a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+          }
+        } else {
+          // Idle: only run springs involving at least one new node
+          for (const e of E) {
+            const a = N.find((n) => n.id === e.a), b = N.find((n) => n.id === e.b);
+            if (!a || !b || (!a.isNew && !b.isNew)) continue;
+            const dx = b.x - a.x, dy = b.y - a.y;
+            const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+            const target = e.kind === "asn" ? 160 : 95;
+            const k = (dist - target) * 0.010; // slightly gentler in idle
             const fx = (dx / dist) * k, fy = (dy / dist) * k;
             a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
           }
@@ -5236,7 +5393,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
           n.x += n.vx; n.y += n.vy;
           if (n.isNew) {
             n.spawnT = (n.spawnT || 0) + 1;
-            if (n.spawnT > 90) n.isNew = false;
+            if (n.spawnT > 240) n.isNew = false; // graduate after ~4s, matching warmKick
           }
         }
       }
@@ -5510,60 +5667,70 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
       style={fullscreen
         ? { position: "fixed", inset: 0, zIndex: 9999, background: "radial-gradient(1200px 600px at 50% 0%, rgba(0,229,255,0.06), transparent 60%), #05070a" }
         : { background: "radial-gradient(1200px 600px at 50% 0%, rgba(0,229,255,0.06), transparent 60%), #05070a", border: "1px solid rgba(120,160,180,0.2)" }}>
-      {/* Fullscreen toggle */}
-      <button onClick={() => setFullscreen((v) => !v)}
-        className="absolute z-20 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-semibold"
-        title={fullscreen ? "Exit fullscreen (Esc)" : "Enter fullscreen"}
-        style={{
-          bottom: 12, right: 12,
-          background: fullscreen ? "#ff4d6d" : "rgba(0,229,255,0.14)",
-          color: fullscreen ? "#fff" : "#00e5ff",
-          border: `1px solid ${fullscreen ? "rgba(255,77,109,0.8)" : "rgba(0,229,255,0.5)"}`,
-          backdropFilter: "blur(6px)", cursor: "pointer",
-          boxShadow: fullscreen ? "0 0 18px rgba(255,77,109,0.5)" : "none",
-        }}>
-        {fullscreen ? <><X size={13} /> Exit Fullscreen</> : <><Share2 size={13} /> Fullscreen</>}
-      </button>
-      {/* Search icon + expandable box (bottom-right, left of fullscreen) */}
-      <div className="absolute z-20 flex items-center gap-1" style={{ bottom: 12, right: fullscreen ? 170 : 150 }}>
-        {showSearch && (
-          <div className="flex items-center gap-1">
-            {searchMatches.length > 0 && (
-              <span className="text-[10px] font-bold rounded px-1.5 py-1 shrink-0"
-                style={{ color: "#00e5ff", background: "rgba(0,229,255,0.12)", border: "1px solid rgba(0,229,255,0.3)", minWidth: 36, textAlign: "center" }}>
-                {searchMatchIdx + 1}/{searchMatches.length}
-              </span>
-            )}
-            <input autoFocus value={searchQuery}
-              onChange={(e) => { setSearchQuery(e.target.value); setSearchMatchIdx(0); searchAndFocus(e.target.value, 0); }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  if (!searchMatches.length) { searchAndFocus(searchQuery, 0); return; }
-                  // Cycle: after last match wraps back to first (1/N → 2/N → ... → N/N → 1/N)
-                  const nextIdx = (searchMatchIdx + 1) % searchMatches.length;
-                  setSearchMatchIdx(nextIdx);
-                  searchAndFocus(searchQuery, nextIdx);
-                }
-                if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); setSearchMatches([]); setSearchMatchIdx(0); }
-              }}
-              placeholder="Search node…"
-              className="rounded-lg px-2.5 py-1.5 text-[11px] outline-none"
-              style={{ width: 160, background: "rgba(10,14,20,0.95)", border: "1px solid rgba(0,229,255,0.4)", color: "#dff", backdropFilter: "blur(6px)" }} />
-          </div>
-        )}
-        <button onClick={() => { setShowSearch((v) => !v); if (showSearch) setSearchQuery(""); }}
-          className="rounded-lg p-2 flex items-center justify-center"
-          title="Search nodes"
-          style={{ background: showSearch ? "#00e5ff" : "rgba(0,229,255,0.14)", color: showSearch ? "#04111a" : "#00e5ff", border: "1px solid rgba(0,229,255,0.5)", backdropFilter: "blur(6px)", cursor: "pointer" }}>
-          <Search size={14} />
+      {!hasGraph && (
+        <button onClick={() => setFullscreen((v) => !v)}
+          className="absolute z-20 flex items-center gap-1 rounded-md px-2.5 py-1 text-[10px] font-semibold"
+          style={{ bottom: 10, right: 10, background: fullscreen ? "#ff4d6d" : "rgba(0,229,255,0.12)", color: fullscreen ? "#fff" : "#00e5ff", border: `1px solid ${fullscreen ? "rgba(255,77,109,0.8)" : "rgba(0,229,255,0.4)"}`, cursor: "pointer" }}>
+          {fullscreen ? <><X size={11} /> Exit</> : <><Share2 size={11} /> Fullscreen</>}
         </button>
-      </div>
-      {/* Slicer chip-bar — only once relationships exist */}
+      )}
+      {/* Slicer chip-bar */}
       {hasGraph && (
-      <div className="absolute z-10 flex flex-wrap items-center gap-1.5 rounded-lg px-2.5 py-2 max-w-[calc(100%-24px)]"
-        style={{ bottom: 52, left: 12, background: "rgba(10,14,20,0.85)", border: "1px solid rgba(120,160,180,0.2)", backdropFilter: "blur(8px)" }}>
-        <span className="text-[9px] uppercase tracking-widest font-bold mr-1" style={{ color: "#5d7382" }}>Filter</span>
+      <div className="absolute z-10 rounded-lg overflow-hidden"
+        style={{ bottom: 8, left: 8, right: 8, background: "rgba(10,14,20,0.90)", border: "1px solid rgba(120,160,180,0.2)", backdropFilter: "blur(8px)" }}>
+        {/* Top row: search + fullscreen */}
+        <div className="flex items-center justify-between px-2.5 py-1.5 gap-2" style={{ borderBottom: "1px solid rgba(120,160,180,0.12)" }}>
+          {/* Search */}
+          <div className="flex items-center gap-1.5 flex-1 min-w-0">
+            <button onClick={() => { setShowSearch((v) => !v); if (showSearch) { setSearchQuery(""); setSearchMatches([]); } }}
+              className="rounded-md p-1.5 flex items-center justify-center shrink-0"
+              title="Search nodes (Enter cycles through matches)"
+              style={{ background: showSearch ? "#00e5ff" : "rgba(0,229,255,0.12)", color: showSearch ? "#04111a" : "#00e5ff", border: "1px solid rgba(0,229,255,0.4)", cursor: "pointer" }}>
+              <Search size={12} />
+            </button>
+            {showSearch && (
+              <>
+                {searchMatches.length > 0 && (
+                  <span className="text-[10px] font-bold rounded px-1.5 py-0.5 shrink-0"
+                    style={{ color: "#00e5ff", background: "rgba(0,229,255,0.12)", border: "1px solid rgba(0,229,255,0.3)", minWidth: 32, textAlign: "center" }}>
+                    {searchMatchIdx + 1}/{searchMatches.length}
+                  </span>
+                )}
+                <input autoFocus value={searchQuery}
+                  onChange={(e) => { setSearchQuery(e.target.value); setSearchMatchIdx(0); searchAndFocus(e.target.value, 0); }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      if (!searchMatches.length) { searchAndFocus(searchQuery, 0); return; }
+                      const nextIdx = (searchMatchIdx + 1) % searchMatches.length;
+                      setSearchMatchIdx(nextIdx);
+                      searchAndFocus(searchQuery, nextIdx);
+                    }
+                    if (e.key === "Escape") { setShowSearch(false); setSearchQuery(""); setSearchMatches([]); setSearchMatchIdx(0); }
+                  }}
+                  placeholder="Search node…"
+                  className="rounded-md px-2 py-0.5 text-[11px] outline-none flex-1 min-w-0"
+                  style={{ background: "rgba(0,0,0,0.4)", border: "1px solid rgba(0,229,255,0.3)", color: "#dff" }} />
+              </>
+            )}
+          </div>
+          {/* Fullscreen */}
+          <button onClick={() => setFullscreen((v) => !v)}
+            className="flex items-center gap-1 rounded-md px-2.5 py-1 text-[10px] font-semibold shrink-0"
+            title={fullscreen ? "Exit fullscreen (Esc)" : "Enter fullscreen"}
+            style={{
+              background: fullscreen ? "#ff4d6d" : "rgba(0,229,255,0.12)",
+              color: fullscreen ? "#fff" : "#00e5ff",
+              border: `1px solid ${fullscreen ? "rgba(255,77,109,0.8)" : "rgba(0,229,255,0.4)"}`,
+              cursor: "pointer",
+              boxShadow: fullscreen ? "0 0 14px rgba(255,77,109,0.4)" : "none",
+            }}>
+            {fullscreen ? <><X size={11} /> Exit</> : <><Share2 size={11} /> Fullscreen</>}
+          </button>
+        </div>
+        {/* Bottom row: filter chips */}
+        <div className="flex flex-wrap items-center gap-1 px-2.5 py-1.5">
+        <span className="text-[9px] uppercase tracking-widest font-bold mr-0.5" style={{ color: "#5d7382" }}>Filter</span>
         {/* Type toggles */}
         {model.typeCounts && model.typeCounts.map(([cat, count]) => {
           const c = colorFor(cat);
@@ -5609,6 +5776,15 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
             {hideOrphans ? `○ ${model.stats.orphans} orphans hidden` : `● hide ${model.stats.orphans} orphans`}
           </button>
         )}
+        {/* Shared pivots toggle — only when bridges exist */}
+        {model.stats.bridges > 0 && (
+          <button onClick={() => setIsolateSharedPivots((v) => !v)}
+            className="rounded-full px-2 py-0.5 text-[9px] font-bold"
+            style={{ background: isolateSharedPivots ? "rgba(255,209,102,0.3)" : "rgba(120,160,180,0.06)", color: isolateSharedPivots ? "#ffd166" : "#8aa0ad", border: `1px solid ${isolateSharedPivots ? "rgba(255,209,102,0.6)" : "rgba(120,160,180,0.2)"}`, cursor: "pointer" }}>
+            ◈ shared pivots {isolateSharedPivots ? "only" : `(${model.stats.bridges})`}
+          </button>
+        )}
+        </div>
       </div>
       )}
       {/* Stats bar — minimal (just node count) before graph forms, full after */}
@@ -5641,9 +5817,13 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
       </div>
       )}
       {!anyEnriched && (
-        <div className="absolute z-10 text-[11px] font-semibold pointer-events-none"
-          style={{ top: 10, left: "50%", transform: "translateX(-50%)", color: "#7f95a3" }}>
-          ✨ Enrich indicators to reveal the infrastructure graph
+        <div className="absolute z-10 pointer-events-none"
+          style={{ top: "50%", left: "50%", transform: "translate(-50%, -50%)" }}>
+          <div className="rounded-xl px-5 py-3 text-center"
+            style={{ background: "rgba(10,14,20,0.92)", border: "1px solid rgba(0,229,255,0.3)", boxShadow: "0 0 32px rgba(0,229,255,0.15)", backdropFilter: "blur(8px)" }}>
+            <div className="text-sm font-semibold" style={{ color: "#00e5ff" }}>✨ Enrich indicators to reveal the infrastructure graph</div>
+            <div className="text-[10px] mt-1" style={{ color: "#5d7382" }}>Click Enrich All on any card, or enrich individual IOCs</div>
+          </div>
         </div>
       )}
 
@@ -5814,11 +5994,20 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
   );
 }
 
-function GButton({ children, onClick, disabled, color, icon, solid }) {
+function GButton({ children, onClick, disabled, color, icon, solid, flash }) {
   return (
     <button onClick={onClick} disabled={disabled}
-      className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold transition-opacity"
-      style={{ color: solid ? "#04111a" : color, backgroundColor: solid ? color : `${color}14`, border: `1px solid ${color}${solid ? "" : "55"}`, boxShadow: solid ? `0 0 18px ${color}55` : "none", opacity: disabled ? 0.4 : 1, cursor: disabled ? "not-allowed" : "pointer" }}>
+      className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold transition-all"
+      style={{
+        color: solid ? "#04111a" : color,
+        backgroundColor: solid ? color : `${color}14`,
+        border: `1px solid ${color}${solid ? "" : "55"}`,
+        boxShadow: flash ? `0 0 28px ${color}cc, 0 0 8px ${color}` : solid ? `0 0 18px ${color}55` : "none",
+        transform: flash ? "scale(1.06)" : "scale(1)",
+        opacity: disabled ? 0.4 : 1,
+        cursor: disabled ? "not-allowed" : "pointer",
+        transition: "transform 0.15s, box-shadow 0.15s",
+      }}>
       {icon}{children}
     </button>
   );
