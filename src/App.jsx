@@ -1093,11 +1093,18 @@ const extractIocs = (text) => {
     if (spacedFilename) { add("FILE_NAME", s); continue; }
 
     for (const t of tokens) {
-      // CIDR expansion — "1.2.3.0/24" → individual IPs
+      // CIDR notation — expand ranges, handle /32 single-host as bare IP
       if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/\d{1,2}$/.test(t)) {
-        const expanded = expandCIDR(t);
-        if (expanded) { expanded.forEach((ip) => add("IPV4", ip)); continue; }
-        // Too large to expand — keep as-is (will fall through to classify)
+        const prefix = parseInt(t.split("/")[1], 10);
+        const bareIP = t.split("/")[0];
+        if (prefix === 32) {
+          // /32 = single host — strip the mask and add the bare IP
+          if (isIPv4(bareIP)) { add("IPV4", bareIP); continue; }
+        } else {
+          const expanded = expandCIDR(t);
+          if (expanded) { expanded.forEach((ip) => add("IPV4", ip)); continue; }
+          // prefix < 24 — too large to expand, fall through to classify as-is
+        }
       }
       // IP range expansion — "1.2.3.5-10" or "1.2.3.5-1.2.3.10"
       if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}-/.test(t)) {
