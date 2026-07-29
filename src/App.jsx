@@ -3261,7 +3261,6 @@ export default function App() {
     if (articleBody) setArticleClean(articleBody);
     setLoading(false);
     const _iocCount = Object.values(data || {}).reduce((s, arr) => s + (Array.isArray(arr) ? arr.length : 0), 0);
-    logEvent({ event_type: "parse_url", extra: { url, ioc_count: _iocCount, via: apiMeta?.via || null } });
   };
 
   // ---- On-demand AI summary: fires only when the user opens the dropdown,
@@ -3351,7 +3350,6 @@ export default function App() {
       Object.entries(parsed).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "api"; }); });
       { const { data: wd, refs: wr } = applyWhitelistAndRefs(parsed); setIocData(wd); setReferences(wr); } setOriginData(origin); setRegistryDetails(details);
       setSourceUrl("(pasted JSON)");
-      logEvent({ event_type: "parse_paste", extra: { ioc_count: Object.values(parsed).reduce((s, a) => s + (Array.isArray(a) ? a.length : 0), 0) } });
     } catch (e) { setError(`Could not parse JSON: ${e.message}`); }
   };
 
@@ -3366,42 +3364,144 @@ export default function App() {
     Object.entries(ex.data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "eng"; }); });
     { const { data: wd, refs: wr } = applyWhitelistAndRefs(ex.data); setIocData(wd); setReferences(wr); } setOriginData(origin); setRegistryDetails(ex.registryDetails);
     setSourceUrl("(raw paste)");
-    logEvent({ event_type: "parse_raw", extra: { ioc_count: Object.values(ex.data).reduce((s, a) => s + (Array.isArray(a) ? a.length : 0), 0) } });
   };
 
 
   // Enrichment row builder — extracts structured data from enrichCache for export
   const enrichRow = (cat, value) => {
     const e = enrichCache[`${cat}::${value}`]?.data;
-    if (!e) return { verdict: "", malware: "", detections: "", fileName: "", pulses: "", country: "", asn: "", firstSeen: "", lastSeen: "", urlscan: "", shodanPorts: "", shodanCVEs: "", shodanTags: "", signer: "", circl: "", kaspersky: "" };
+    if (!e) return {};
     const cs = e.malwarebazaar?.codeSign;
+    const isHash = ["MD5","SHA1","SHA256","SHA512"].includes(cat);
     return {
-      verdict: e._verdict || "",
-      malware: e.threatfox?.malware || e.malwarebazaar?.family || "",
-      detections: e.malwarebazaar?.detections || "",
-      fileName: e.malwarebazaar?.fileName || "",
-      pulses: e.otx?.pulses ?? "",
-      country: e.whoisASN?.country || e.otx?.country || "",
-      asn: e.whoisASN?.asn ? `${e.whoisASN.asn}${e.whoisASN.asnOrg ? ` ${e.whoisASN.asnOrg}` : ""}` : "",
-      firstSeen: e._timeline?.firstSeen || "",
-      lastSeen: e._timeline?.lastSeen || "",
-      urlscan: e.urlscan ? `${e.urlscan.scans} scans${e.urlscan.malicious ? ` (${e.urlscan.malicious} malicious)` : ""}` : "",
-      shodanPorts: e.shodan?.ports?.join(" ") || "",
-      shodanCVEs: e.shodan?.vulns?.join(" ") || "",
-      shodanTags: e.shodan?.tags?.join(" ") || "",
-      signer: cs ? [cs.subject && `Subject: ${cs.subject}`, cs.issuer && `Issuer: ${cs.issuer}`, cs.algorithm].filter(Boolean).join(" | ") : "",
-      circl: e.circl ? [e.circl.legit ? "Known Legitimate" : "CIRCL Known", e.circl.fileName, e.circl.productName, e.circl.trust != null ? `Trust ${e.circl.trust}` : null].filter(Boolean).join(" · ") : "",
-      kaspersky: e.kaspersky ? [
-        `${e.kaspersky.zone.charAt(0).toUpperCase() + e.kaspersky.zone.slice(1)} Zone`,
-        e.kaspersky.fileStatus,
-        e.kaspersky.detections,
-        e.kaspersky.categories,
+      verdict:           e._verdict || "",
+      // ThreatFox
+      tf_malware:        e.threatfox?.malware || "",
+      tf_threat:         e.threatfox?.threat || "",
+      tf_confidence:     e.threatfox?.confidence != null ? `${e.threatfox.confidence}%` : "",
+      tf_tags:           e.threatfox?.tags || "",
+      // URLhaus
+      urlhaus:           e.urlhaus ? `${e.urlhaus.status || ""}${e.urlhaus.threat ? ` · ${e.urlhaus.threat}` : ""}` : "",
+      // MalwareBazaar
+      mb_family:         e.malwarebazaar?.family || "",
+      mb_detections:     e.malwarebazaar?.detections || "",
+      mb_fileName:       e.malwarebazaar?.fileName || "",
+      mb_fileType:       e.malwarebazaar?.fileType || "",
+      mb_signer:         cs ? [cs.subject && `Subject: ${cs.subject}`, cs.issuer && `Issuer: ${cs.issuer}`, cs.algorithm].filter(Boolean).join(" | ") : "",
+      // OTX
+      otx_pulses:        e.otx?.pulses ?? "",
+      otx_tags:          e.otx?.tags || "",
+      otx_validation:    e.otx?.validation || "",
+      // AbuseIPDB
+      abuse_score:       e.abuseipdb?.score != null ? `${e.abuseipdb.score}%` : "",
+      abuse_reports:     e.abuseipdb?.reports ?? "",
+      abuse_categories:  e.abuseipdb?.categories || "",
+      abuse_last:        e.abuseipdb?.lastReported || "",
+      // GEO / ASN
+      country:           e.whoisASN?.country || e.otx?.country || "",
+      city:              e.whoisASN?.city || "",
+      asn:               e.whoisASN?.asn ? `${e.whoisASN.asn}${e.whoisASN.asnOrg ? ` ${e.whoisASN.asnOrg}` : ""}` : "",
+      // URLScan
+      urlscan_scans:     e.urlscan?.scans ?? "",
+      urlscan_malicious: e.urlscan?.malicious ?? "",
+      urlscan_title:     e.urlscan?.title || "",
+      urlscan_server:    e.urlscan?.server || "",
+      urlscan_tls:       e.urlscan?.tlsIssuer ? `${e.urlscan.tlsIssuer}${e.urlscan.tlsAgeDays != null ? ` (${smartAge(e.urlscan.tlsAgeDays)} old)` : ""}` : "",
+      urlscan_brands:    e.urlscan?.brands?.join(", ") || "",
+      // Shodan
+      shodan_ports:      e.shodan?.ports?.join(", ") || "",
+      shodan_cves:       e.shodan?.vulns?.join(", ") || "",
+      shodan_tags:       e.shodan?.tags?.join(", ") || "",
+      shodan_cpes:       e.shodan?.cpes?.join(", ") || "",
+      // Kaspersky
+      kaspersky:         e.kaspersky ? [
+        `${e.kaspersky.zone?.charAt(0).toUpperCase() + e.kaspersky.zone?.slice(1)} Zone`,
+        e.kaspersky.country || null,
+        e.kaspersky.fileStatus || null,
+        e.kaspersky.detections || null,
+        e.kaspersky.categories || null,
         e.kaspersky.hits != null ? `${e.kaspersky.hits} hits` : null,
       ].filter(Boolean).join(" · ") : "",
+      // CIRCL
+      circl:             e.circl ? [
+        e.circl.legit ? "Known Legitimate" : "CIRCL Known",
+        e.circl.fileName || null,
+        e.circl.productName || null,
+        e.circl.trust != null ? `Trust ${e.circl.trust}/100` : null,
+        e.circl.os || null,
+      ].filter(Boolean).join(" · ") : "",
+      // Tri.age
+      triage_score:      e.triage?.score ?? "",
+      triage_family:     e.triage?.families?.join(", ") || "",
+      triage_tags:       e.triage?.tags?.join(", ") || "",
+      triage_c2:         e.triage?.c2Urls?.join(", ") || "",
+      triage_url:        e.triage?.triageUrl || "",
+      // Domain registration
+      domain_age:        e.domainReg?.ageDays != null ? smartAge(e.domainReg.ageDays) : "",
+      domain_registered: e.domainReg?.registered || "",
+      domain_status:     e.domainReg?.status || "",
+      // Timeline
+      first_seen:        e._timeline?.firstSeen || "",
+      last_seen:         e._timeline?.lastSeen || "",
     };
   };
-  const ENRICH_HEADERS = ["Verdict", "Malware", "Detections", "FileName", "OTX Pulses", "Country", "ASN", "First Seen", "Last Seen", "URLScan", "Shodan Ports", "Shodan CVEs", "Shodan Tags", "Signer", "CIRCL", "Kaspersky"];
-  const enrichVals = (r) => [r.verdict, r.malware, r.detections, r.fileName, r.pulses, r.country, r.asn, r.firstSeen, r.lastSeen, r.urlscan, r.shodanPorts, r.shodanCVEs, r.shodanTags, r.signer, r.circl, r.kaspersky];
+
+  const ENRICH_HEADERS = [
+    "Verdict",
+    // ThreatFox
+    "ThreatFox Malware","ThreatFox Threat","ThreatFox Confidence","ThreatFox Tags",
+    // URLhaus
+    "URLhaus",
+    // MalwareBazaar
+    "MB Family","MB Detections","MB FileName","MB FileType","MB Signer",
+    // OTX
+    "OTX Pulses","OTX Tags","OTX Validation",
+    // AbuseIPDB
+    "AbuseIPDB Score","AbuseIPDB Reports","AbuseIPDB Categories","AbuseIPDB Last Reported",
+    // GEO / ASN
+    "Country","City","ASN",
+    // URLScan
+    "URLScan Scans","URLScan Malicious","URLScan Title","URLScan Server","URLScan TLS","URLScan Brands",
+    // Shodan
+    "Shodan Ports","Shodan CVEs","Shodan Tags","Shodan CPEs",
+    // Kaspersky
+    "Kaspersky",
+    // CIRCL
+    "CIRCL",
+    // Tri.age
+    "Triage Score","Triage Family","Triage Tags","Triage C2","Triage URL",
+    // Domain
+    "Domain Age","Domain Registered","Domain Status",
+    // Timeline
+    "First Seen","Last Seen",
+  ];
+
+  const enrichVals = (r) => ENRICH_HEADERS.map((h) => {
+    const keyMap = {
+      "Verdict": r.verdict,
+      "ThreatFox Malware": r.tf_malware, "ThreatFox Threat": r.tf_threat,
+      "ThreatFox Confidence": r.tf_confidence, "ThreatFox Tags": r.tf_tags,
+      "URLhaus": r.urlhaus,
+      "MB Family": r.mb_family, "MB Detections": r.mb_detections,
+      "MB FileName": r.mb_fileName, "MB FileType": r.mb_fileType, "MB Signer": r.mb_signer,
+      "OTX Pulses": r.otx_pulses, "OTX Tags": r.otx_tags, "OTX Validation": r.otx_validation,
+      "AbuseIPDB Score": r.abuse_score, "AbuseIPDB Reports": r.abuse_reports,
+      "AbuseIPDB Categories": r.abuse_categories, "AbuseIPDB Last Reported": r.abuse_last,
+      "Country": r.country, "City": r.city, "ASN": r.asn,
+      "URLScan Scans": r.urlscan_scans, "URLScan Malicious": r.urlscan_malicious,
+      "URLScan Title": r.urlscan_title, "URLScan Server": r.urlscan_server,
+      "URLScan TLS": r.urlscan_tls, "URLScan Brands": r.urlscan_brands,
+      "Shodan Ports": r.shodan_ports, "Shodan CVEs": r.shodan_cves,
+      "Shodan Tags": r.shodan_tags, "Shodan CPEs": r.shodan_cpes,
+      "Kaspersky": r.kaspersky, "CIRCL": r.circl,
+      "Triage Score": r.triage_score, "Triage Family": r.triage_family,
+      "Triage Tags": r.triage_tags, "Triage C2": r.triage_c2, "Triage URL": r.triage_url,
+      "Domain Age": r.domain_age, "Domain Registered": r.domain_registered,
+      "Domain Status": r.domain_status,
+      "First Seen": r.first_seen, "Last Seen": r.last_seen,
+    };
+    return keyMap[h] ?? "";
+  });
 
   const exportAllCSV = () => {
     const rows = [["Type", "IOC", ...ENRICH_HEADERS]];
@@ -3410,7 +3510,6 @@ export default function App() {
       arr.forEach((orig, i) => rows.push([cat, shown[i], ...enrichVals(enrichRow(cat, orig))]));
     });
     downloadBlob(new Blob([toCSV(rows)], { type: "text/csv;charset=utf-8" }), "all_iocs.csv");
-    logEvent({ event_type: "export", extra: { format: "csv", scope: "all", ioc_count: total } });
   };
   const exportAllXLSX = () => {
     const all = [["Type", "IOC", ...ENRICH_HEADERS]];
@@ -3424,7 +3523,6 @@ export default function App() {
       sheets.push({ name: cat, rows: [["IOC", ...ENRICH_HEADERS], ...arr.map((orig, i) => [shown[i], ...enrichVals(enrichRow(cat, orig))])] });
     });
     downloadBlob(buildWorkbook(sheets), "all_iocs.xlsx");
-    logEvent({ event_type: "export", extra: { format: "xlsx", scope: "all", ioc_count: total } });
   };
   const exportTypeCSV = (cat, arr) => {
     const shown = proc(arr, cat);
