@@ -44,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v87";
+const APP_VERSION = "v88";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -1966,7 +1966,13 @@ export default function App() {
     setEnrichCache((c) => ({ ...c, [key]: { loading: true } }));
     const results = {};
     const _t0 = Date.now();
-    const _apiLog = []; // { api, ms } per upstream call, for analytics
+    const _apiLog = [];
+    // Push partial results to the cache immediately as each engine completes,
+    // so the card renders progressively rather than waiting for all engines.
+    // The card reads `loading: true` to show a spinner while still in flight.
+    const setPartial = () => {
+      setEnrichCache((c) => ({ ...c, [key]: { loading: true, data: Object.keys(results).length > 0 ? { ...results } : null } }));
+    };
     const callEnrich = async (api, otxType, otxSection, overrideValue, extra) => {
       const body = { api, value: overrideValue || value, cat }; // cat for server-side D1 logging
       if (otxType) body.otx_type = otxType;
@@ -2009,6 +2015,7 @@ export default function App() {
             };
           }
         } catch (e) { console.warn("Enrich ThreatFox failed:", e.message); }
+        setPartial();
       }
       // URLhaus — host lookup (IPs, domains)
       if (["IPV4","DOMAIN"].includes(cat)) {
@@ -2028,6 +2035,7 @@ export default function App() {
             };
           }
         } catch (e) { console.warn("Enrich URLhaus failed:", e.message); }
+        setPartial();
       }
       // URLhaus — URL lookup
       if (cat === "URL") {
@@ -2044,6 +2052,7 @@ export default function App() {
             };
           }
         } catch (e) { console.warn("Enrich URLhaus URL failed:", e.message); }
+        setPartial();
       }
       // MalwareBazaar — hashes (includes vendor_intel for detection names)
       if (["MD5","SHA1","SHA256","SHA512"].includes(cat)) {
@@ -2114,6 +2123,7 @@ export default function App() {
             };
           }
         } catch (e) { console.warn("Enrich MalwareBazaar failed:", e.message); }
+        setPartial();
 
         // CIRCL hashlookup — proxied through Worker (CIRCL tightened CORS in 2026,
         // direct browser fetch now blocked). No API key, Worker just relays.
@@ -2126,20 +2136,39 @@ export default function App() {
             if (cj && !cj.message && !cj.error && (cj.FileName || cj.SHA1 || cj["SHA-1"] || cj.MD5)) {
               const trust = typeof cj["hashlookup:trust"] === "number" ? cj["hashlookup:trust"] : null;
               const pc = cj.ProductCode || {};
+              // Find the most informative parent — prefer one with PackageMaintainer/PackageName
+              const parents = Array.isArray(cj.parents) ? cj.parents : [];
+              const bestParent = parents.find(p => p.PackageMaintainer || p.PackageName)
+                || parents.find(p => p["snap-name"])
+                || parents[0] || null;
               results.circl = {
                 fileName: cj.FileName || null,
                 fileSize: cj.FileSize ? `${Math.round(Number(cj.FileSize) / 1024)}KB` : null,
                 trust,
-                productName: pc.ProductName || null,
-                productType: pc.ApplicationType || null,
-                productLanguage: pc.Language || null,
-                os: cj.OpSystemCode?.OpSystemName || null,
                 legit: trust != null && trust > 50,
+                // Package info from CIRCL response
+                productName: pc.ProductName || bestParent?.PackageName || null,
+                packageVersion: bestParent?.PackageVersion || null,
+                // PackageMaintainer / maintainer org — strong legitimacy signal
+                maintainer: bestParent?.PackageMaintainer
+                  ? bestParent.PackageMaintainer.replace(/<[^>]+>/g, "").trim() // strip email angle brackets
+                  : (bestParent?.["snap-name"] ? `Canonical Snap: ${bestParent["snap-name"]}` : null),
+                productType: pc.ApplicationType || null,
+                os: cj.OpSystemCode?.OpSystemName || null,
+                mimetype: cj.mimetype || null,
+                // How many parent packages contain this file — high count = widely distributed = legit
+                parentTotal: typeof cj["hashlookup:parent-total"] === "number" ? cj["hashlookup:parent-total"] : null,
+                // Package description (first line only)
+                description: bestParent?.PackageDescription
+                  ? bestParent.PackageDescription.split("\n")[0].trim()
+                  : null,
+                source: cj.source ? String(cj.source).split(":")[0] : null, // "snap", "debian" etc.
               };
             }
           }
           // 404 = hash unknown to CIRCL (not an error, just quiet)
         } catch (e) { console.warn("Enrich CIRCL failed:", e.message); }
+        setPartial();
 
         // Tri.age (Recorded Future Sandbox) — hash lookup + C2 extraction.
         // Two-step: search → overview+summary. Only proceeds if the hash exists
@@ -2163,6 +2192,7 @@ export default function App() {
             }
           }
         } catch (e) { console.warn("Enrich Tri.age failed:", e.message); }
+        setPartial();
       }
       // AlienVault OTX — general (pulses, reputation, ASN, country, high-fidelity tags)
       if (["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat)) {
@@ -2221,6 +2251,7 @@ export default function App() {
             };
           }
         } catch (e) { console.warn("Enrich OTX failed:", e.message); }
+        setPartial();
 
         // OTX Passive DNS — historical resolution records for infrastructure pivoting.
         // Domain query returns every IP the domain resolved to (with dates).
@@ -2359,6 +2390,7 @@ export default function App() {
           }
           // 404 = no data on this IP (not an error, just quiet)
         } catch (e) { console.warn("Enrich Shodan InternetDB failed:", e.message); }
+        setPartial();
       }
 
       // Kaspersky OpenTIP — hash / IP / domain / URL enrichment.
@@ -2396,6 +2428,7 @@ export default function App() {
           }
           // 401/403 = expired/invalid key; 404 = not in DB; 429 = rate limited — all silent
         } catch (e) { console.warn("Enrich Kaspersky failed:", e.message); }
+        setPartial();
       }
       // OTX WHOIS for domains — registrant org, country, registration age
       if (cat === "DOMAIN") {
@@ -2453,6 +2486,7 @@ export default function App() {
             }
           }
         } catch (e) { console.warn("Enrich AbuseIPDB failed:", e.message); }
+        setPartial();
       }
 
       // ---- urlscan.io — community scan results for domains, URLs, IPs ----
@@ -2905,7 +2939,7 @@ export default function App() {
   const [articleClean, setArticleClean] = useState("");           // nav-stripped body for AI summary
   const [defangMap, setDefangMap] = useState({});
   const [defangAll, setDefangAll] = useState(false);
-  const [stripHttps, setStripHttps] = useState(false); // URL display/copy only, not queries
+  const [prependHttps, setPrependHttps] = useState(false); // URL card only: prepend https:// for View/Copy
   const [copied, setCopied] = useState("");
   const [editingKey, setEditingKey] = useState(null);
   const [editValue, setEditValue] = useState("");
@@ -2979,7 +3013,9 @@ export default function App() {
 
   const proc = (arr, cat) => {
     let out = (defangAll || defangMap[cat]) ? arr.map(defang) : arr;
-    if (stripHttps && cat === "URL") out = out.map((v) => v.replace(/^https?:\/\//i, ""));
+    // prependHttps: for URL display/copy only — adds https:// to bare URLs when toggled ON.
+    // Default (OFF) = URLs display as-is. Does NOT affect hunt queries.
+    if (prependHttps && cat === "URL") out = out.map((v) => /^https?:\/\//i.test(v) ? v : `https://${v}`);
     return out;
   };
   const toggleDefang = (cat) => setDefangMap((m) => ({ ...m, [cat]: !m[cat] }));
@@ -3446,10 +3482,15 @@ export default function App() {
       // CIRCL
       circl:             e.circl ? [
         e.circl.legit ? "Known Legitimate" : "CIRCL Known",
+        e.circl.trust != null ? `Trust ${e.circl.trust}/100` : null,
+        e.circl.parentTotal != null ? `Found in ${e.circl.parentTotal} packages` : null,
         e.circl.fileName || null,
         e.circl.productName || null,
-        e.circl.trust != null ? `Trust ${e.circl.trust}/100` : null,
+        e.circl.packageVersion || null,
+        e.circl.maintainer || null,
         e.circl.os || null,
+        e.circl.mimetype || null,
+        e.circl.source || null,
       ].filter(Boolean).join(" · ") : "",
       // Tri.age
       triage_score:      e.triage?.score ?? "",
@@ -3687,17 +3728,6 @@ export default function App() {
                 border: `1px solid rgba(255,184,77,${defangAll ? "1" : "0.55"})`,
               }}>
               <ShieldOff size={15} /> {defangAll ? "Defanged" : "Defang"}
-            </button>
-            {/* HTTPS strip toggle — URL display/copy only, never affects hunt queries */}
-            <button onClick={() => setStripHttps((v) => !v)}
-              title="Strip https:// prefix from URL display and copy (queries unaffected)"
-              className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold"
-              style={{
-                color: stripHttps ? "#04111a" : "#2dd4bf",
-                backgroundColor: stripHttps ? "#2dd4bf" : "rgba(45,212,191,0.12)",
-                border: `1px solid rgba(45,212,191,${stripHttps ? "1" : "0.55"})`,
-              }}>
-              🔗 {stripHttps ? "https:// hidden" : "Strip https://"}
             </button>
             <GButton onClick={exportAllCSV} disabled={!total} color="#00ff9c" icon={<Download size={15} />}>CSV</GButton>
             <GButton onClick={exportAllXLSX} disabled={!total} color="#00e5ff" icon={<Download size={15} />}>XLSX</GButton>
@@ -3980,7 +4010,7 @@ export default function App() {
         )}
 
         {entries.length > 0 && (
-          <div className="flex flex-wrap gap-2 mb-5">
+          <div className="flex flex-wrap gap-2 mb-5 items-center">
             {entries.map(([cat, arr]) => {
               const c = colorFor(cat);
               return (
@@ -3990,6 +4020,44 @@ export default function App() {
                 </a>
               );
             })}
+            {/* Add new IOC category — for when an article lacks a type you want to add manually */}
+            {customAddCat === "__NEW__" ? (
+              <div className="flex items-center gap-1.5 rounded-full px-2 py-1" style={{ border: "1px solid rgba(0,229,255,0.4)", backgroundColor: "rgba(0,229,255,0.06)" }}>
+                <select autoFocus defaultValue=""
+                  onChange={(e) => { if (e.target.value) { setCustomAddCat(e.target.value); setCustomAddValue(""); } }}
+                  className="text-[11px] outline-none bg-transparent"
+                  style={{ color: "#00e5ff" }}>
+                  <option value="" disabled>Pick category…</option>
+                  {ALL_IOC_CATS.filter((c) => !iocData?.[c]).map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <button onClick={() => setCustomAddCat(null)} style={{ color: "#5d7382", background: "none", border: "none", cursor: "pointer" }}><X size={12} /></button>
+              </div>
+            ) : (
+              <button onClick={() => setCustomAddCat("__NEW__")}
+                title="Add an IOC type not present in this article"
+                className="flex items-center gap-1 rounded-full px-3 py-1 text-xs font-bold"
+                style={{ border: "1px solid rgba(0,229,255,0.35)", backgroundColor: "rgba(0,229,255,0.06)", color: "#00e5ff", cursor: "pointer" }}>
+                + Add type
+              </button>
+            )}
+          </div>
+        )}
+        {/* Floating input for adding to a new category that has no card yet */}
+        {customAddCat && customAddCat !== "__NEW__" && !iocData?.[customAddCat] && (
+          <div className="flex items-center gap-2 mb-3 rounded-lg px-3 py-2" style={{ border: `1px solid ${colorFor(customAddCat)}55`, backgroundColor: `${colorFor(customAddCat)}0a` }}>
+            <span className="text-xs font-bold shrink-0" style={{ color: colorFor(customAddCat) }}>{customAddCat}</span>
+            <input autoFocus value={customAddValue} onChange={(e) => setCustomAddValue(e.target.value)}
+              placeholder={`Enter ${customAddCat} value…`}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && customAddValue.trim()) { addPivotIOC(customAddCat, customAddValue.trim(), "Manual"); setCustomAddValue(""); setCustomAddCat(null); }
+                if (e.key === "Escape") { setCustomAddCat(null); setCustomAddValue(""); }
+              }}
+              className="flex-1 rounded-md px-2 py-1 text-xs outline-none"
+              style={{ background: "rgba(0,0,0,0.3)", border: "1px solid rgba(120,160,180,0.3)", color: "#dff" }} />
+            <button onClick={() => { if (customAddValue.trim()) { addPivotIOC(customAddCat, customAddValue.trim(), "Manual"); setCustomAddValue(""); setCustomAddCat(null); } }}
+              className="text-xs rounded-md px-2 py-1 shrink-0"
+              style={{ color: "#04111a", background: colorFor(customAddCat), cursor: "pointer", border: "none" }}>Add</button>
+            <button onClick={() => { setCustomAddCat(null); setCustomAddValue(""); }} style={{ color: "#5d7382", background: "none", border: "none", cursor: "pointer" }}><X size={13} /></button>
           </div>
         )}
 
@@ -4094,6 +4162,20 @@ export default function App() {
                       style={{ color: isDefanged ? "#04111a" : "#ffb84d", backgroundColor: isDefanged ? "#ffb84d" : "rgba(255,184,77,0.10)", border: "1px solid rgba(255,184,77,0.5)" }}>
                       <ShieldOff size={12} /> {isDefanged ? "Defanged" : "Defang"}
                     </button>
+                    {/* https:// prepend toggle — URL card only, View/Copy only, queries unaffected */}
+                    {cat === "URL" && (
+                      <button onClick={() => setPrependHttps((v) => !v)}
+                        title="Toggle https:// prefix for View and Copy only — does not affect hunt queries"
+                        className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-bold"
+                        style={{
+                          color: prependHttps ? "#04111a" : "#2dd4bf",
+                          backgroundColor: prependHttps ? "#2dd4bf" : "rgba(45,212,191,0.10)",
+                          border: "1px solid rgba(45,212,191,0.5)",
+                          cursor: "pointer",
+                        }}>
+                        https://
+                      </button>
+                    )}
                     <span className="flex items-center justify-center text-base font-extrabold tabular-nums rounded-lg px-2.5 py-0.5 min-w-[2.2rem]"
                       style={{ backgroundColor: `${c}22`, color: c, border: `1px solid ${c}66`, textShadow: `0 0 10px ${c}66` }}>
                       {arr.length}
@@ -4177,6 +4259,12 @@ export default function App() {
                               <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle font-bold"
                                 style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.15)", border: "1px solid rgba(255,77,109,0.3)" }}>
                                 🔴 Newly Created Domain
+                              </span>
+                            )}
+                            {/* In-flight indicator: partial data exists but more engines still running */}
+                            {enr?.loading && enr?.data && (
+                              <span className="ml-1 inline-flex items-center" title="Enrichment still in progress — more data arriving">
+                                <Loader2 size={10} className="animate-spin" style={{ color: "#5d7382" }} />
                               </span>
                             )}
                             {isRowCollapsed && enr?.data?._verdict && (
@@ -4356,17 +4444,35 @@ export default function App() {
                                     </span>
                                   )}
                                   {d.circl && (
-                                    <span className="rounded-full px-2 py-0.5" style={{
-                                      color: d.circl.legit ? "#4ade80" : "#94a3b8",
-                                      backgroundColor: d.circl.legit ? "rgba(74,222,128,0.10)" : "rgba(148,163,184,0.08)",
-                                      border: `1px solid ${d.circl.legit ? "rgba(74,222,128,0.35)" : "rgba(148,163,184,0.25)"}`,
-                                    }} title="CIRCL hashlookup — NSRL and community-attested known files">
-                                      {d.circl.legit ? "🟢 Known Legitimate" : "🔵 CIRCL Known"}
-                                      {d.circl.fileName ? ` · ${d.circl.fileName}` : ""}
-                                      {d.circl.productName ? ` · ${d.circl.productName}` : ""}
-                                      {d.circl.productType ? ` · ${d.circl.productType}` : ""}
-                                      {d.circl.os ? ` · ${d.circl.os}` : ""}
-                                      {d.circl.trust != null ? ` · Trust ${d.circl.trust}/100` : ""}
+                                    <span className="flex flex-col gap-0.5">
+                                      <span className="rounded-full px-2 py-0.5" style={{
+                                        color: d.circl.legit ? "#4ade80" : "#94a3b8",
+                                        backgroundColor: d.circl.legit ? "rgba(74,222,128,0.10)" : "rgba(148,163,184,0.08)",
+                                        border: `1px solid ${d.circl.legit ? "rgba(74,222,128,0.35)" : "rgba(148,163,184,0.25)"}`,
+                                      }} title="CIRCL hashlookup — NSRL and community-attested known files">
+                                        {d.circl.legit ? "🟢 Known Legitimate" : "🔵 CIRCL Known"}
+                                        {d.circl.trust != null ? ` · Trust ${d.circl.trust}/100` : ""}
+                                        {d.circl.parentTotal != null ? ` · Found in ${d.circl.parentTotal} packages` : ""}
+                                        {d.circl.fileName ? ` · ${d.circl.fileName}` : ""}
+                                        {d.circl.fileSize ? ` (${d.circl.fileSize})` : ""}
+                                        {d.circl.mimetype ? ` · ${d.circl.mimetype}` : ""}
+                                        {d.circl.source ? ` · Source: ${d.circl.source}` : ""}
+                                      </span>
+                                      {(d.circl.productName || d.circl.packageVersion || d.circl.maintainer) && (
+                                        <span className="rounded-full px-2 py-0.5 text-[10px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
+                                          📦 {[
+                                            d.circl.productName,
+                                            d.circl.packageVersion,
+                                            d.circl.os,
+                                          ].filter(Boolean).join(" ")}
+                                          {d.circl.maintainer ? ` · 👤 ${d.circl.maintainer}` : ""}
+                                        </span>
+                                      )}
+                                      {d.circl.description && (
+                                        <span className="rounded-full px-2 py-0.5 text-[10px]" style={{ color: "#7f95a3", backgroundColor: "rgba(148,163,184,0.04)", border: "1px solid rgba(148,163,184,0.15)" }}>
+                                          {d.circl.description}
+                                        </span>
+                                      )}
                                     </span>
                                   )}
                                   {d.triage && (() => {
