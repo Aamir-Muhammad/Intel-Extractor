@@ -44,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v86";
+const APP_VERSION = "v87";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -1005,7 +1005,10 @@ const classify = (t) => {
     }
     return ["FILE_NAME", t];
   }
-  if (/^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(t)) return ["DOMAIN", t.toLowerCase()];
+  if (/^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(t)) {
+    const dom = t.toLowerCase().replace(/^www\./, "");
+    return ["DOMAIN", dom];
+  }
   return null;
 };
 
@@ -1184,7 +1187,12 @@ const parseCanonicalReg = (s) => {
 //  Dual-source merge (API call + local engine)
 // ============================================================
 const CASE_SENSITIVE_CATS = new Set(["FILE", "FILE_PATH", "REGISTRY", "URL", "BTC", "XMR", "ETH", "SSDEEP"]);
-const normVal = (cat, v) => (CASE_SENSITIVE_CATS.has(cat) ? v : String(v).toLowerCase());
+const normVal = (cat, v) => {
+  let n = CASE_SENSITIVE_CATS.has(cat) ? v : String(v).toLowerCase();
+  // Strip www. prefix from domains — it adds no intel value and creates duplicates
+  if (cat === "DOMAIN") n = n.replace(/^www\./, "");
+  return n;
+};
 
 const mergeIocs = (apiData, engData) => {
   const data = {};
@@ -1258,6 +1266,10 @@ const uniqDetails = (details) => {
 const stripHive = (k) => String(k).replace(/^HKEY_[A-Z_]+\\/i, "");
 const kqlStr = (s) => `@"${String(s).replace(/"/g, '""')}"`;
 const reEsc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// CrowdStrike epoch time formatter — appended to any query that produces
+// FirstSeen/LastSeen timestamp fields so analysts see human-readable dates.
+const CQL_TIME_FMT = (first = "FirstSeen", last = "LastSeen") =>
+  `\n| ${first} := formatTime("%e %b %Y %r", field=${first}, locale=en_UAE, timezone="Asia/Dubai")\n| ${last}  := formatTime("%e %b %Y %r", field=${last}, locale=en_UAE, timezone="Asia/Dubai")`;
 
 const buildKQL = (details) => {
   const clauses = uniqDetails(details).map((d) => {
@@ -1373,11 +1385,11 @@ const huntCQL = (cat, arr) => {
   const cqlInWild = (field) => `in(field="${field}", values=[${arr.map((v) => `"*${v}*"`).join(",")}], ignoreCase=true)`;
   switch (cat) {
     case "IPV4":
-      return `#event_simpleName=NetworkConnectIP4\n| ${cqlIn("RemoteAddressIP4")}\n| groupBy([ComputerName, RemoteAddressIP4, RemotePort, ImageFileName], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
+      return `#event_simpleName=NetworkConnectIP4\n| ${cqlIn("RemoteAddressIP4")}\n| groupBy([ComputerName, RemoteAddressIP4, RemotePort, ImageFileName], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)${CQL_TIME_FMT()}`;
     case "IPV6":
-      return `#event_simpleName=NetworkConnectIP6\n| ${cqlIn("RemoteAddressIP6")}\n| groupBy([ComputerName, RemoteAddressIP6, RemotePort, ImageFileName], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
+      return `#event_simpleName=NetworkConnectIP6\n| ${cqlIn("RemoteAddressIP6")}\n| groupBy([ComputerName, RemoteAddressIP6, RemotePort, ImageFileName], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)${CQL_TIME_FMT()}`;
     case "DOMAIN":
-      return `#event_simpleName=DnsRequest\n| ${cqlInWild("DomainName")}\n| groupBy([ComputerName, DomainName, RespondingDnsServer, ImageFileName], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
+      return `#event_simpleName=DnsRequest\n| ${cqlInWild("DomainName")}\n| groupBy([ComputerName, DomainName, RespondingDnsServer, ImageFileName], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)${CQL_TIME_FMT()}`;
     case "URL": {
       // defineTable-based URL hunt: builds an in-memory URLHunt lookup from the
       // IOC URLs, then correlates DnsRequest (domain match) and HttpRequest
@@ -1397,10 +1409,10 @@ const huntCQL = (cat, arr) => {
     case "FILE_PATH": {
       // CrowdStrike doesn't log drive letters — strip C:\ D:\ etc. from paths
       const cqlPaths = arr.map((p) => p.replace(/^[A-Za-z]:\\/, "\\\\"));
-      return `#event_simpleName=ProcessRollup2 OR #event_simpleName=NewExecutableWritten\n| ImageFileName=/(${cqlPaths.map(reEsc).join("|")})/i\n| groupBy([ComputerName, ImageFileName, CommandLine, SHA256HashData], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
+      return `#event_simpleName=ProcessRollup2 OR #event_simpleName=NewExecutableWritten\n| ImageFileName=/(${cqlPaths.map(reEsc).join("|")})/i\n| groupBy([ComputerName, ImageFileName, CommandLine, SHA256HashData], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)${CQL_TIME_FMT()}`;
     }
     case "EMAIL":
-      return `#event_simpleName=UserLogon OR #event_simpleName=SSOLogin\n| ${cqlIn("UserPrincipal")}\n| groupBy([ComputerName, UserPrincipal, LogonType], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)`;
+      return `#event_simpleName=UserLogon OR #event_simpleName=SSOLogin\n| ${cqlIn("UserPrincipal")}\n| groupBy([ComputerName, UserPrincipal, LogonType], function=stats([count(as=Total), min(@timestamp, as=FirstSeen), max(@timestamp, as=LastSeen)]), limit=max)${CQL_TIME_FMT()}`;
     case "SCHEDULED_TASK": {
       const names = arr.map((v) => v.split(" → ")[0].trim());
       const namePat = names.map(reEsc).join("|");
@@ -2792,6 +2804,9 @@ export default function App() {
       const allLasts = [
         results.threatfox?.last, results.urlhaus?.last,
         results.malwarebazaar?.last, results.urlscan?.lastSeen,
+        // AbuseIPDB lastReported = last time this IP was reported malicious —
+        // include as Last Seen if it's more recent than other sources.
+        results.abuseipdb?.lastReported,
       ].filter(Boolean).sort();
       if (allFirsts.length || allLasts.length) {
         const firstDate = allFirsts.length ? allFirsts[0] : null;
@@ -2890,6 +2905,7 @@ export default function App() {
   const [articleClean, setArticleClean] = useState("");           // nav-stripped body for AI summary
   const [defangMap, setDefangMap] = useState({});
   const [defangAll, setDefangAll] = useState(false);
+  const [stripHttps, setStripHttps] = useState(false); // URL display/copy only, not queries
   const [copied, setCopied] = useState("");
   const [editingKey, setEditingKey] = useState(null);
   const [editValue, setEditValue] = useState("");
@@ -2961,7 +2977,11 @@ export default function App() {
     [registryDetails]
   );
 
-  const proc = (arr, cat) => ((defangAll || defangMap[cat]) ? arr.map(defang) : arr);
+  const proc = (arr, cat) => {
+    let out = (defangAll || defangMap[cat]) ? arr.map(defang) : arr;
+    if (stripHttps && cat === "URL") out = out.map((v) => v.replace(/^https?:\/\//i, ""));
+    return out;
+  };
   const toggleDefang = (cat) => setDefangMap((m) => ({ ...m, [cat]: !m[cat] }));
 
   // Drag-and-drop IOC between categories
@@ -3668,6 +3688,17 @@ export default function App() {
               }}>
               <ShieldOff size={15} /> {defangAll ? "Defanged" : "Defang"}
             </button>
+            {/* HTTPS strip toggle — URL display/copy only, never affects hunt queries */}
+            <button onClick={() => setStripHttps((v) => !v)}
+              title="Strip https:// prefix from URL display and copy (queries unaffected)"
+              className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold"
+              style={{
+                color: stripHttps ? "#04111a" : "#2dd4bf",
+                backgroundColor: stripHttps ? "#2dd4bf" : "rgba(45,212,191,0.12)",
+                border: `1px solid rgba(45,212,191,${stripHttps ? "1" : "0.55"})`,
+              }}>
+              🔗 {stripHttps ? "https:// hidden" : "Strip https://"}
+            </button>
             <GButton onClick={exportAllCSV} disabled={!total} color="#00ff9c" icon={<Download size={15} />}>CSV</GButton>
             <GButton onClick={exportAllXLSX} disabled={!total} color="#00e5ff" icon={<Download size={15} />}>XLSX</GButton>
           </div>
@@ -3997,7 +4028,7 @@ export default function App() {
         )}
 
         {entries.length > 0 && (
-          <div className="mb-6" style={{ margin: "0 calc(-50vw + 50%) 1.5rem", width: "100vw" }}>
+          <div className="mb-4">
             <div className="px-4 py-2 flex items-center gap-3" style={{ borderBottom: "1px solid rgba(120,160,180,0.12)" }}>
               <span className="text-xs uppercase tracking-widest font-bold" style={{ color: "#5d7382" }}>Threat Graph</span>
               <span className="text-[10px]" style={{ color: "#3a4a54" }}>· {entries.length} indicator types · click nodes to investigate</span>
@@ -4036,20 +4067,20 @@ export default function App() {
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE","FILE_NAME","FILE_PATH","REGISTRY","SCHEDULED_TASK","SERVICE","COMMAND_LINE","EMAIL","MAC_ADDRESS"].includes(cat) && (
-                      <>
                       <button onClick={() => { setCustomAddCat(customAddCat === cat ? null : cat); setCustomAddValue(""); }}
                         title="Add custom IOC"
                         className="rounded-md px-1.5 py-1 text-xs font-bold"
                         style={{ color: customAddCat === cat ? "#04111a" : c, backgroundColor: customAddCat === cat ? c : `${c}14`, border: `1px solid ${c}55`, cursor: "pointer" }}>
                         +
                       </button>
+                    )}
+                    {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","EMAIL","CVE"].includes(cat) && (
                       <button onClick={() => { arr.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 1500)); setEnrichAllDone((p) => ({ ...p, [cat]: true })); setTimeout(() => setEnrichAllDone((p) => { const n = { ...p }; delete n[cat]; return n; }), 5000); }}
                         disabled={!!enrichAllDone[cat]}
                         className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
                         style={{ color: enrichAllDone[cat] ? "#5d7382" : "#2dd4bf", backgroundColor: enrichAllDone[cat] ? "rgba(120,160,180,0.06)" : "rgba(45,212,191,0.10)", border: `1px solid ${enrichAllDone[cat] ? "rgba(120,160,180,0.2)" : "rgba(45,212,191,0.4)"}`, cursor: enrichAllDone[cat] ? "not-allowed" : "pointer" }}>
                         <Search size={12} /> {enrichAllDone[cat] ? "Enriched" : "Enrich All"}
                       </button>
-                      </>
                     )}
                     <button onClick={() => { setCardCondensed((p) => ({ ...p, [cat]: !inheritedCollapse })); setRowOverride((p) => { const n = { ...p }; arr.forEach((v) => delete n[`${cat}::${v}`]); return n; }); }}
                       title={inheritedCollapse ? "Expand enrichment details" : "Collapse to verdicts only"}
