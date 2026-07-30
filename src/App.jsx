@@ -44,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v88";
+const APP_VERSION = "v89";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -2121,6 +2121,11 @@ export default function App() {
               fileName: d.file_name || null,
               codeSign,
             };
+            // Canonical SHA256 from MalwareBazaar — case-insensitive
+            const mbSHA256 = d.sha256_hash || d.SHA256 || null;
+            if (mbSHA256 && ["MD5","SHA1"].includes(cat)) {
+              results._canonicalSHA256 = mbSHA256.toLowerCase();
+            }
           }
         } catch (e) { console.warn("Enrich MalwareBazaar failed:", e.message); }
         setPartial();
@@ -2164,8 +2169,13 @@ export default function App() {
                   : null,
                 source: cj.source ? String(cj.source).split(":")[0] : null, // "snap", "debian" etc.
               };
-            }
-          }
+              // Canonical SHA256 from CIRCL — enables MD5/SHA1 → SHA256 dedup
+              const cSHA256 = cj["SHA-256"] || cj["SHA256"] || null;
+              if (cSHA256 && ["MD5","SHA1"].includes(cat)) {
+                results._canonicalSHA256 = cSHA256.toLowerCase();
+              }
+            } // end if (cj && ...)
+          } // end if (algo)
           // 404 = hash unknown to CIRCL (not an error, just quiet)
         } catch (e) { console.warn("Enrich CIRCL failed:", e.message); }
         setPartial();
@@ -2189,6 +2199,11 @@ export default function App() {
                 c2Urls: tj.c2Urls || [],
                 triageUrl: tj.triageUrl,
               };
+              // Canonical SHA256 from Tri.age — case-insensitive
+              const tSHA256 = tj.sha256 || tj.SHA256 || null;
+              if (tSHA256 && ["MD5","SHA1"].includes(cat)) {
+                results._canonicalSHA256 = tSHA256.toLowerCase();
+              }
             }
           }
         } catch (e) { console.warn("Enrich Tri.age failed:", e.message); }
@@ -2425,6 +2440,9 @@ export default function App() {
               categories: categories.length ? categories.join(", ") : null,
               size: generalInfo.Size ? `${Math.round(Number(generalInfo.Size) / 1024)}KB` : null,
             };
+            // Canonical SHA256 from Kaspersky (case-insensitive — API may return any case)
+            const kSHA256 = generalInfo.SHA256 || generalInfo.Sha256 || kj.SHA256 || kj.Sha256 || null;
+            if (kSHA256 && ["MD5","SHA1"].includes(cat)) results._canonicalSHA256 = kSHA256.toLowerCase();
           }
           // 401/403 = expired/invalid key; 404 = not in DB; 429 = rate limited — all silent
         } catch (e) { console.warn("Enrich Kaspersky failed:", e.message); }
@@ -2915,6 +2933,45 @@ export default function App() {
       const hasData = Object.keys(results).length > 0;
       if (hasData) results._verdict = verdict;
       setEnrichCache((c) => ({ ...c, [key]: { loading: false, data: hasData ? results : null, error: !hasData } }));
+
+      // ---- Hash dedup: if this MD5/SHA1 resolved to a canonical SHA256,
+      // check if that SHA256 exists in (or can be derived from) the IOC list
+      // and merge, removing the lower-specificity hash. Case-insensitive.
+      if (results._canonicalSHA256 && ["MD5","SHA1"].includes(cat)) {
+        const canonical = results._canonicalSHA256; // already lowercased
+        setIocData((prev) => {
+          if (!prev) return prev;
+          const next = { ...prev };
+          // Check if canonical SHA256 already in list (case-insensitive)
+          const sha256List = (prev.SHA256 || []).map(v => v.toLowerCase());
+          const alreadyHasSHA256 = sha256List.includes(canonical);
+          if (!alreadyHasSHA256) {
+            // Add the SHA256 if not present
+            next.SHA256 = [...(prev.SHA256 || []), canonical];
+          }
+          // Remove the MD5/SHA1 that resolved to this SHA256
+          if (next[cat]) {
+            const removed = next[cat].filter(v => v.toLowerCase() === value.toLowerCase());
+            next[cat] = next[cat].filter(v => v.toLowerCase() !== value.toLowerCase());
+            if (!next[cat].length) delete next[cat];
+            if (removed.length) {
+              setMergedHashes(m => {
+                const entry = m[canonical] || { removed: [], sources: [] };
+                const alreadyRemoved = entry.removed.some(r => r.cat === cat && r.value.toLowerCase() === value.toLowerCase());
+                if (alreadyRemoved) return m;
+                return {
+                  ...m,
+                  [canonical]: {
+                    removed: [...entry.removed, { cat, value }],
+                    sources: [...new Set([...entry.sources, cat])],
+                  }
+                };
+              });
+            }
+          }
+          return next;
+        });
+      }
       // Logging is now handled server-side in the Worker's /enrich route —
       // no client-side log call needed, nothing suspicious in DevTools.
     } catch (e) {
@@ -2946,7 +3003,10 @@ export default function App() {
   const [movingKey, setMovingKey] = useState(null); // "cat::value" being moved
   const [addedPivots, setAddedPivots] = useState(new Set());       // "targetCat::targetValue" → added
   const [dismissedPivots, setDismissedPivots] = useState(new Set()); // dismissed pivot suggestions
-  const [enrichAllDone, setEnrichAllDone] = useState({});           // { cat: true } → greyed out
+  const [enrichAllDone, setEnrichAllDone] = useState({});
+  // Hash dedup: { sha256: { removed: [{cat, value}], sources: Set } }
+  const [mergedHashes, setMergedHashes] = useState({});
+  const [showMerged, setShowMerged] = useState(false);
   const [customAddCat, setCustomAddCat] = useState(null);           // category currently showing add input
   const [customAddValue, setCustomAddValue] = useState("");
   const [condensed, setCondensed] = useState(false);
@@ -3012,10 +3072,10 @@ export default function App() {
   );
 
   const proc = (arr, cat) => {
-    let out = (defangAll || defangMap[cat]) ? arr.map(defang) : arr;
-    // prependHttps: for URL display/copy only — adds https:// to bare URLs when toggled ON.
-    // Default (OFF) = URLs display as-is. Does NOT affect hunt queries.
+    let out = arr;
+    // prependHttps applied first (before defang) so defang correctly converts hxxps://
     if (prependHttps && cat === "URL") out = out.map((v) => /^https?:\/\//i.test(v) ? v : `https://${v}`);
+    if (defangAll || defangMap[cat]) out = out.map(defang);
     return out;
   };
   const toggleDefang = (cat) => setDefangMap((m) => ({ ...m, [cat]: !m[cat] }));
@@ -3146,7 +3206,7 @@ export default function App() {
     setMeta(null); setAiSummary(null); setAiState("idle"); setAiOpen(false);
     setAiScanState("idle"); setAiScanCounts(null); setAiScanError("");
     setRetryCount(0); setCooldown(0); setRawArticle(""); setArticleClean(""); setDefangAll(false);
-    setReferences([]);
+    setReferences([]); setMergedHashes({}); setShowMerged(false);
   };
 
   // ---- URL mode: API call AND page fetch in parallel ----
@@ -4021,25 +4081,20 @@ export default function App() {
               );
             })}
             {/* Add new IOC category — for when an article lacks a type you want to add manually */}
-            {customAddCat === "__NEW__" ? (
-              <div className="flex items-center gap-1.5 rounded-full px-2 py-1" style={{ border: "1px solid rgba(0,229,255,0.4)", backgroundColor: "rgba(0,229,255,0.06)" }}>
-                <select autoFocus defaultValue=""
-                  onChange={(e) => { if (e.target.value) { setCustomAddCat(e.target.value); setCustomAddValue(""); } }}
-                  className="text-[11px] outline-none bg-transparent"
-                  style={{ color: "#00e5ff" }}>
-                  <option value="" disabled>Pick category…</option>
-                  {ALL_IOC_CATS.filter((c) => !iocData?.[c]).map((c) => <option key={c} value={c}>{c}</option>)}
-                </select>
-                <button onClick={() => setCustomAddCat(null)} style={{ color: "#5d7382", background: "none", border: "none", cursor: "pointer" }}><X size={12} /></button>
-              </div>
-            ) : (
-              <button onClick={() => setCustomAddCat("__NEW__")}
-                title="Add an IOC type not present in this article"
-                className="flex items-center gap-1 rounded-full px-3 py-1 text-xs font-bold"
-                style={{ border: "1px solid rgba(0,229,255,0.35)", backgroundColor: "rgba(0,229,255,0.06)", color: "#00e5ff", cursor: "pointer" }}>
-                + Add type
-              </button>
-            )}
+            {/* Always-visible "Add Category / IOC" dropdown — single interaction */}
+            <div className="relative">
+              <select
+                value={customAddCat && customAddCat !== "__NEW__" ? customAddCat : ""}
+                onChange={(e) => { if (e.target.value) { setCustomAddCat(e.target.value); setCustomAddValue(""); } }}
+                className="rounded-full px-3 py-1 text-xs font-semibold outline-none cursor-pointer appearance-none pr-7"
+                style={{ background: "rgba(0,229,255,0.06)", border: "1px solid rgba(0,229,255,0.35)", color: "#00e5ff" }}>
+                <option value="" style={{ background: "#0a0e14", color: "#5d7382" }}>+ Add Category / IOC</option>
+                {ALL_IOC_CATS.map((c) => (
+                  <option key={c} value={c} style={{ background: "#0a0e14", color: colorFor(c) }}>{c}</option>
+                ))}
+              </select>
+              <span className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none text-[10px]" style={{ color: "#00e5ff" }}>▾</span>
+            </div>
           </div>
         )}
         {/* Floating input for adding to a new category that has no card yet */}
@@ -4106,8 +4161,37 @@ export default function App() {
                 enrichIOC={enrichIOC} logEvent={logEvent} copyText={copyText}
                 addPivotIOC={addPivotIOC} isPivotAdded={isPivotAdded}
                 removeIoc={removeIoc}
-                anyEnriched={Object.keys(enrichCache).length > 0} />
+                anyEnriched={iocData ? Object.entries(iocData).some(([cat, arr]) =>
+                  Array.isArray(arr) && arr.some(v => enrichCache[`${cat}::${v}`]?.data)
+                ) : false} />
             </GraphErrorBoundary>
+          </div>
+        )}
+
+        {/* Hash dedup banner */}
+        {Object.keys(mergedHashes).length > 0 && (
+          <div className="rounded-xl px-4 py-3 mb-4 flex items-center gap-3 flex-wrap"
+            style={{ background: "rgba(124,156,255,0.08)", border: "1px solid rgba(124,156,255,0.3)" }}>
+            <span className="text-xs font-semibold" style={{ color: "#7c9cff" }}>
+              🔗 {Object.values(mergedHashes).reduce((s, m) => s + m.removed.length, 0)} hash{Object.values(mergedHashes).reduce((s, m) => s + m.removed.length, 0) !== 1 ? "es" : ""} merged into SHA256
+              {" "}—{" "}
+              {Object.entries(mergedHashes).map(([sha256, m]) => m.sources.join(", ")).filter((v, i, a) => a.indexOf(v) === i).join("; ")} resolved to same file
+            </span>
+            <button onClick={() => setShowMerged(v => !v)}
+              className="text-[11px] rounded-md px-2 py-0.5"
+              style={{ color: "#7c9cff", background: "rgba(124,156,255,0.12)", border: "1px solid rgba(124,156,255,0.35)", cursor: "pointer" }}>
+              {showMerged ? "Hide" : "Show merged"}
+            </button>
+            {showMerged && (
+              <div className="w-full mt-1 flex flex-wrap gap-2">
+                {Object.entries(mergedHashes).map(([sha256, m]) => (
+                  <div key={sha256} className="text-[10px] rounded-lg px-2 py-1" style={{ background: "rgba(10,14,20,0.6)", border: "1px solid rgba(124,156,255,0.2)", color: "#8aa0ad" }}>
+                    <span style={{ color: "#7c9cff", fontFamily: "monospace" }}>{sha256.slice(0, 16)}…</span>
+                    {" ← "}{m.removed.map(r => <span key={r.cat+r.value}><span style={{ color: "#c084fc" }}>{r.cat}</span> {r.value.slice(0, 12)}… </span>)}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
