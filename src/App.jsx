@@ -404,6 +404,13 @@ const setFavicon = () => {
       15%  { opacity: 1; transform: translate(-50%,-80%) scale(1.05); }
       70%  { opacity: 1; transform: translate(-50%,-80%) scale(1); }
       100% { opacity: 0; transform: translate(-50%,-90%) scale(0.95); }
+    }
+    @keyframes toastSlide {
+      0%   { opacity: 0; transform: translateY(-20px) scale(0.9); }
+      10%  { opacity: 1; transform: translateY(0) scale(1.02); }
+      15%  { opacity: 1; transform: translateY(0) scale(1); }
+      85%  { opacity: 1; transform: translateY(0) scale(1); }
+      100% { opacity: 0; transform: translateY(-20px) scale(0.95); }
     }`;
     document.head.appendChild(s);
   }
@@ -2078,6 +2085,8 @@ export default function App() {
             if (entry.removed.some(r => r.cat === cat && r.value.toLowerCase() === value.toLowerCase())) return m;
             return { ...m, [canonical]: { removed: [...entry.removed, { cat, value }], sources: [...new Set([...entry.sources, cat])] } };
           });
+          // Fire the guaranteed-visible toast immediately
+          fireDedupToast(cat, value, canonical);
           // Trigger graph arc animation (500ms delay for nodes to render)
           // Keep source node in iocData during the arc, remove only after animation ends.
           setTimeout(() => {
@@ -3117,6 +3126,8 @@ export default function App() {
               // Fire blast immediately so user sees it, then let it complete before row disappears
               setBlastNodes(s => new Set([...s, value]));
               setTimeout(() => setBlastNodes(s => { const n = new Set(s); n.delete(value); return n; }), 950);
+              // Fire the guaranteed-visible toast
+              fireDedupToast(cat, value, canonical);
             }
           }
           return next;
@@ -3160,6 +3171,14 @@ export default function App() {
   // Graph arc animation: { fromId, toId, startTime } triggers the collapse arc
   const [blastNodes, setBlastNodes] = useState(new Set()); // IOC values with active blast animation
   const [hashCollapseAnims, setHashCollapseAnims] = useState([]);
+  // Simple, always-visible toast for hash consolidation events.
+  // { id, fromCat, fromValue, toValue } — displayed as centered floating card for 3s
+  const [dedupToasts, setDedupToasts] = useState([]);
+  const fireDedupToast = (fromCat, fromValue, toValue) => {
+    const id = `${fromValue}-${Date.now()}`;
+    setDedupToasts(t => [...t, { id, fromCat, fromValue, toValue }]);
+    setTimeout(() => setDedupToasts(t => t.filter(x => x.id !== id)), 3000);
+  };
   const [customAddCat, setCustomAddCat] = useState(null);           // category currently showing add input
   const [customAddValue, setCustomAddValue] = useState("");
   const [condensed, setCondensed] = useState(false);
@@ -3823,6 +3842,45 @@ export default function App() {
 
   return (
     <div style={rootStyle} className="font-mono">
+      {/* Hash dedup toasts — fixed position, cannot be missed */}
+      {dedupToasts.length > 0 && (
+        <div style={{
+          position: "fixed", top: 24, left: "50%", transform: "translateX(-50%)",
+          zIndex: 9999, display: "flex", flexDirection: "column", gap: 8,
+          pointerEvents: "none",
+        }}>
+          {dedupToasts.map(t => (
+            <div key={t.id} style={{
+              background: "rgba(10,14,20,0.95)",
+              border: "1px solid rgba(0,229,255,0.6)",
+              borderRadius: 12,
+              padding: "12px 18px",
+              boxShadow: "0 0 32px rgba(0,229,255,0.35), 0 8px 24px rgba(0,0,0,0.6)",
+              backdropFilter: "blur(8px)",
+              animation: "toastSlide 3s ease-out forwards",
+              minWidth: 340,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{
+                  fontSize: 20, lineHeight: 1,
+                  filter: "drop-shadow(0 0 8px rgba(0,229,255,0.8))",
+                }}>🔗</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ color: "#00e5ff", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 2 }}>
+                    Hash consolidated → SHA256
+                  </div>
+                  <div style={{ color: "#8aa0ad", fontSize: 10, fontFamily: "monospace" }}>
+                    <span style={{ color: "#c084fc", fontWeight: 700 }}>{t.fromCat}</span> {t.fromValue.slice(0, 20)}…
+                  </div>
+                  <div style={{ color: "#8aa0ad", fontSize: 10, fontFamily: "monospace" }}>
+                    → <span style={{ color: "#00ff9c" }}>SHA256</span> {t.toValue.slice(0, 20)}…
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       <style>{`
         * { scrollbar-width: thin; scrollbar-color: #0e7490 #070b10; }
         *::-webkit-scrollbar { width: 10px; height: 10px; }
