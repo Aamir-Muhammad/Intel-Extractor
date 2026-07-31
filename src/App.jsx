@@ -2073,11 +2073,14 @@ export default function App() {
             return { ...m, [canonical]: { removed: [...entry.removed, { cat, value }], sources: [...new Set([...entry.sources, cat])] } };
           });
           // Trigger graph arc animation (500ms delay for nodes to render)
+          // Keep source node in iocData during the arc, remove only after animation ends.
           setTimeout(() => {
             setHashCollapseAnims(a => [...a, {
               fromId: value.toLowerCase(), toId: canonical, startTime: Date.now(), id: `${value}->${canonical}`,
             }]);
-            // Remove from IOC list after animation (800ms for arc to complete)
+            // Blast animation on the card row
+            setBlastNodes(s => new Set([...s, value]));
+            // Remove source from IOC list AFTER arc animation completes (1400ms + buffer)
             setTimeout(() => {
               setIocData(prev => {
                 if (!prev) return prev;
@@ -2090,9 +2093,10 @@ export default function App() {
                 else if (!next.SHA256.map(v=>v.toLowerCase()).includes(canonical)) next.SHA256 = [...next.SHA256, canonical];
                 return next;
               });
-              // Clean up animation after 2s
-              setTimeout(() => setHashCollapseAnims(a => a.filter(x => x.id !== `${value}->${canonical}`)), 2000);
-            }, 800);
+              setBlastNodes(s => { const n = new Set(s); n.delete(value); return n; });
+              // Clean up animation after another 600ms
+              setTimeout(() => setHashCollapseAnims(a => a.filter(x => x.id !== `${value}->${canonical}`)), 600);
+            }, 1600); // wait for arc to finish (1400ms) + 200ms buffer
           }, 500);
           return; // ← SHORT-CIRCUIT: skip all remaining enrichment calls
         }
@@ -3104,8 +3108,9 @@ export default function App() {
                 };
               });
               // Blast animation: radial pulse on the IOC card being consolidated
+              // Fire blast immediately so user sees it, then let it complete before row disappears
               setBlastNodes(s => new Set([...s, value]));
-              setTimeout(() => setBlastNodes(s => { const n = new Set(s); n.delete(value); return n; }), 900);
+              setTimeout(() => setBlastNodes(s => { const n = new Set(s); n.delete(value); return n; }), 950);
             }
           }
           return next;
@@ -4468,16 +4473,18 @@ export default function App() {
                     const isRowCollapsed = rowOverride[eKey] !== undefined ? rowOverride[eKey] : inheritedCollapse;
                     const isBlasting = blastNodes.has(arr[i]) || blastNodes.has(arr[i].toLowerCase());
                     return (
-                      <div key={i} style={{
-                        ...(hoveredActionRow === eKey ? { background: `${c}14`, borderRadius: "6px", boxShadow: `inset 0 0 0 1px ${c}44` } : {}),
-                        ...(isBlasting ? {
+                      <div key={i} style={
+                        isBlasting ? {
                           borderRadius: "6px",
-                          boxShadow: `0 0 0 2px rgba(124,156,255,0.8), 0 0 20px rgba(124,156,255,0.4)`,
-                          background: "rgba(124,156,255,0.12)",
-                          animation: "hashBlast 0.9s ease-out forwards",
-                        } : {}),
-                        transition: "background 0.15s, box-shadow 0.15s",
-                      }}>
+                          animation: "hashBlast 0.95s ease-out forwards",
+                        } : hoveredActionRow === eKey ? {
+                          background: `${c}14`, borderRadius: "6px",
+                          boxShadow: `inset 0 0 0 1px ${c}44`,
+                          transition: "background 0.15s, box-shadow 0.15s",
+                        } : {
+                          transition: "background 0.15s, box-shadow 0.15s",
+                        }
+                      }>
                         <div className="group flex items-start gap-1.5 py-0.5 leading-relaxed"
                           draggable
                           onDragStart={(e) => { e.dataTransfer.setData("text/plain", arr[i]); handleDragStart(cat, arr[i]); }}
