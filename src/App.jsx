@@ -1992,13 +1992,34 @@ export default function App() {
     const _t0 = Date.now();
     const _apiLog = [];
 
+    // Push partial results to the cache immediately as each engine completes,
+    // so the card renders progressively rather than waiting for all engines.
+    const setPartial = () => {
+      setEnrichCache((c) => ({ ...c, [key]: { loading: true, data: Object.keys(results).length > 0 ? { ...results } : null } }));
+    };
+    const callEnrich = async (api, otxType, otxSection, overrideValue, extra) => {
+      const body = { api, value: overrideValue || value, cat }; // cat for server-side D1 logging
+      if (otxType) body.otx_type = otxType;
+      if (otxSection) body.otx_section = otxSection;
+      if (extra && typeof extra === "object") Object.assign(body, extra);
+      const _apiT0 = Date.now();
+      const r = await fetch(`${WORKER_BASE}/enrich`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      _apiLog.push({ api, status: r.status, ms: Date.now() - _apiT0 });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const text = await r.text();
+      try { return JSON.parse(text); } catch {
+        throw new Error(text.slice(0, 100));
+      }
+    };
+
     // ═══════════════════════════════════════════════════════════════
     // PRE-FLIGHT: For MD5/SHA1, run Tri.age then Kaspersky first.
     // If either resolves to a canonical SHA256 that's already in the
     // IOC list → short-circuit: skip all remaining calls, transfer
     // data to the SHA256 card, trigger collapse animation.
-    // The Tri.age result is cached under the SHA256 key so the full
-    // SHA256 enrichment reuses it — zero double-billing.
     // ═══════════════════════════════════════════════════════════════
     if (["MD5","SHA1"].includes(cat)) {
       try {
@@ -2118,29 +2139,6 @@ export default function App() {
       }
     }
     // End pre-flight
-    // Push partial results to the cache immediately as each engine completes,
-    // so the card renders progressively rather than waiting for all engines.
-    // The card reads `loading: true` to show a spinner while still in flight.
-    const setPartial = () => {
-      setEnrichCache((c) => ({ ...c, [key]: { loading: true, data: Object.keys(results).length > 0 ? { ...results } : null } }));
-    };
-    const callEnrich = async (api, otxType, otxSection, overrideValue, extra) => {
-      const body = { api, value: overrideValue || value, cat }; // cat for server-side D1 logging
-      if (otxType) body.otx_type = otxType;
-      if (otxSection) body.otx_section = otxSection;
-      if (extra && typeof extra === "object") Object.assign(body, extra);
-      const _apiT0 = Date.now();
-      const r = await fetch(`${WORKER_BASE}/enrich`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      _apiLog.push({ api, status: r.status, ms: Date.now() - _apiT0 });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const text = await r.text();
-      try { return JSON.parse(text); } catch {
-        throw new Error(text.slice(0, 100)); // Surface the raw error (e.g. "ERROR: invalid auth key")
-      }
-    };
 
     // Generic OTX tags to filter out (low signal)
     const GENERIC_TAGS = new Set(["malware","threat","ioc","indicator","phishing","spam","suspicious",
