@@ -44,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v89";
+const APP_VERSION = "v90";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -1967,6 +1967,127 @@ export default function App() {
     const results = {};
     const _t0 = Date.now();
     const _apiLog = [];
+
+    // ═══════════════════════════════════════════════════════════════
+    // PRE-FLIGHT: For MD5/SHA1, run Tri.age then Kaspersky first.
+    // If either resolves to a canonical SHA256 that's already in the
+    // IOC list → short-circuit: skip all remaining calls, transfer
+    // data to the SHA256 card, trigger collapse animation.
+    // The Tri.age result is cached under the SHA256 key so the full
+    // SHA256 enrichment reuses it — zero double-billing.
+    // ═══════════════════════════════════════════════════════════════
+    if (["MD5","SHA1"].includes(cat)) {
+      try {
+        // Step 1: Tri.age hash search
+        const triageAlgo = { MD5: "md5", SHA1: "sha1" }[cat];
+        const tj = await callEnrich("triage", triageAlgo, null);
+        if (tj && !tj.error && tj.found) {
+          // Cache under SHA256 immediately so SHA256 enrichment reuses it
+          const tSHA256 = (tj.sha256 || tj.SHA256 || "").toLowerCase();
+          if (tSHA256) {
+            const sha256Key = `SHA256::${tSHA256}`;
+            results._canonicalSHA256 = tSHA256;
+            results.triage = {
+              sampleId: tj.sampleId, score: tj.score, families: tj.families || [],
+              tags: tj.tags || [], filename: tj.filename || null,
+              submitted: tj.submitted ? tj.submitted.split("T")[0] : null,
+              completed: tj.completed ? tj.completed.split("T")[0] : null,
+              c2Urls: tj.c2Urls || [], triageUrl: tj.triageUrl,
+            };
+            // Pre-cache the Triage result for the SHA256 key
+            setEnrichCache((c) => ({
+              ...c,
+              [sha256Key]: c[sha256Key] || { loading: false, data: { triage: results.triage, _preflightSource: key }, error: false },
+            }));
+          }
+        }
+      } catch (e) { console.warn("Pre-flight Tri.age failed:", e.message); }
+
+      // Step 2: Kaspersky (only if Tri.age didn't resolve)
+      if (!results._canonicalSHA256) {
+        try {
+          const kType = "hash";
+          const kj = await callEnrich("kaspersky", null, null, undefined, { kaspersky_type: kType });
+          if (kj && !kj.error && kj.Zone) {
+            const generalInfo = kj.FileGeneralInfo || {};
+            const kSHA256 = (generalInfo.SHA256 || generalInfo.Sha256 || kj.SHA256 || "").toLowerCase();
+            if (kSHA256) results._canonicalSHA256 = kSHA256;
+            // Store Kaspersky result so we don't call it again in the full flow
+            const zone = String(kj.Zone).toLowerCase();
+            const detections = (kj.DetectionsInfo || []).map(d => d.DetectionName).filter(Boolean).slice(0,3);
+            const categories = Array.isArray(kj.CategoriesWithZone)
+              ? kj.CategoriesWithZone.map(c => c.Name).filter(Boolean).slice(0,3)
+              : (Array.isArray(kj.Categories) ? kj.Categories.slice(0,3) : []);
+            results.kaspersky = {
+              zone, fileStatus: generalInfo.FileStatus || null,
+              signer: generalInfo.Signer || null, productName: generalInfo.ProductName || null,
+              firstSeen: generalInfo.FirstSeen ? String(generalInfo.FirstSeen).split("T")[0] : null,
+              lastSeen: generalInfo.LastSeen ? String(generalInfo.LastSeen).split("T")[0] : null,
+              hits: typeof generalInfo.HitsCount === "number" ? generalInfo.HitsCount : null,
+              detections: detections.length ? detections.join(", ") : null,
+              categories: categories.length ? categories.join(", ") : null,
+              size: generalInfo.Size ? `${Math.round(Number(generalInfo.Size)/1024)}KB` : null,
+            };
+          }
+        } catch (e) { console.warn("Pre-flight Kaspersky failed:", e.message); }
+      }
+
+      // If canonical SHA256 found, check if it's in the current IOC list
+      if (results._canonicalSHA256) {
+        const canonical = results._canonicalSHA256;
+        const currentSHA256s = (Object.keys(iocData || {}).includes("SHA256")
+          ? (iocData.SHA256 || []) : []).map(v => v.toLowerCase());
+        if (currentSHA256s.includes(canonical)) {
+          // ✅ SHORT-CIRCUIT: SHA256 already in list — transfer enrichment and stop
+          const sha256Key = `SHA256::${canonical}`;
+          // Transfer our partial results to the SHA256 card with provenance
+          setEnrichCache((c) => ({
+            ...c,
+            [key]: { loading: false, data: { ...results, _verdict: "Unknown", _transferredTo: sha256Key }, error: false },
+            [sha256Key]: {
+              loading: false,
+              data: {
+                ...(c[sha256Key]?.data || {}),
+                ...results,
+                _verdict: "Unknown",
+                _sourcedFrom: { cat, value, label: `${cat} ${value.slice(0,12)}…` },
+              },
+              error: false,
+            },
+          }));
+          // Trigger merge dedup
+          setMergedHashes(m => {
+            const entry = m[canonical] || { removed: [], sources: [] };
+            if (entry.removed.some(r => r.cat === cat && r.value.toLowerCase() === value.toLowerCase())) return m;
+            return { ...m, [canonical]: { removed: [...entry.removed, { cat, value }], sources: [...new Set([...entry.sources, cat])] } };
+          });
+          // Trigger graph arc animation (500ms delay for nodes to render)
+          setTimeout(() => {
+            setHashCollapseAnims(a => [...a, {
+              fromId: value.toLowerCase(), toId: canonical, startTime: Date.now(), id: `${value}->${canonical}`,
+            }]);
+            // Remove from IOC list after animation (800ms for arc to complete)
+            setTimeout(() => {
+              setIocData(prev => {
+                if (!prev) return prev;
+                const next = { ...prev };
+                if (next[cat]) {
+                  next[cat] = next[cat].filter(v => v.toLowerCase() !== value.toLowerCase());
+                  if (!next[cat].length) delete next[cat];
+                }
+                if (!next.SHA256) next.SHA256 = [canonical];
+                else if (!next.SHA256.map(v=>v.toLowerCase()).includes(canonical)) next.SHA256 = [...next.SHA256, canonical];
+                return next;
+              });
+              // Clean up animation after 2s
+              setTimeout(() => setHashCollapseAnims(a => a.filter(x => x.id !== `${value}->${canonical}`)), 2000);
+            }, 800);
+          }, 500);
+          return; // ← SHORT-CIRCUIT: skip all remaining enrichment calls
+        }
+      }
+    }
+    // End pre-flight
     // Push partial results to the cache immediately as each engine completes,
     // so the card renders progressively rather than waiting for all engines.
     // The card reads `loading: true` to show a spinner while still in flight.
@@ -2183,9 +2304,11 @@ export default function App() {
         // Tri.age (Recorded Future Sandbox) — hash lookup + C2 extraction.
         // Two-step: search → overview+summary. Only proceeds if the hash exists
         // in Triage's public corpus. Extracts: family, behavioral score, tags, C2 URLs.
+        // Skip if pre-flight already ran Tri.age for this IOC (MD5/SHA1 that didn't short-circuit).
         try {
           const triageAlgo = { MD5: "md5", SHA1: "sha1", SHA256: "sha256" }[cat];
-          if (triageAlgo) {
+          const preflightRanTriage = ["MD5","SHA1"].includes(cat) && !!results.triage;
+          if (triageAlgo && !preflightRanTriage) {
             const tj = await callEnrich("triage", triageAlgo, null);
             if (tj && !tj.error && tj.found) {
               results.triage = {
@@ -2411,9 +2534,11 @@ export default function App() {
       // Kaspersky OpenTIP — hash / IP / domain / URL enrichment.
       // Free tier 500/day. Zone (Red/Yellow/Green) is the headline signal.
       // Returns 401 when token expired, 429 when rate-limited — both silent.
+      // Skip for MD5/SHA1 if pre-flight already ran Kaspersky (avoids double-billing).
       const kMap = { MD5: "hash", SHA1: "hash", SHA256: "hash", IPV4: "ip", IPV6: "ip", DOMAIN: "domain", URL: "url" };
       const kType = kMap[cat];
-      if (kType) {
+      const preflightRanKaspersky = ["MD5","SHA1"].includes(cat) && !!results.kaspersky;
+      if (kType && !preflightRanKaspersky) {
         try {
           const kj = await callEnrich("kaspersky", null, null, undefined, { kaspersky_type: kType });
           if (kj && !kj.error && kj.Zone) {
@@ -3007,6 +3132,8 @@ export default function App() {
   // Hash dedup: { sha256: { removed: [{cat, value}], sources: Set } }
   const [mergedHashes, setMergedHashes] = useState({});
   const [showMerged, setShowMerged] = useState(false);
+  // Graph arc animation: { fromId, toId, startTime } triggers the collapse arc
+  const [hashCollapseAnims, setHashCollapseAnims] = useState([]);
   const [customAddCat, setCustomAddCat] = useState(null);           // category currently showing add input
   const [customAddValue, setCustomAddValue] = useState("");
   const [condensed, setCondensed] = useState(false);
@@ -4163,7 +4290,8 @@ export default function App() {
                 removeIoc={removeIoc}
                 anyEnriched={iocData ? Object.entries(iocData).some(([cat, arr]) =>
                   Array.isArray(arr) && arr.some(v => enrichCache[`${cat}::${v}`]?.data)
-                ) : false} />
+                ) : false}
+                hashCollapseAnims={hashCollapseAnims} />
             </GraphErrorBoundary>
           </div>
         )}
@@ -4485,6 +4613,18 @@ export default function App() {
                           );
                           return (
                           <div className="ml-4 mb-1.5 text-[10px]">
+                            {/* Provenance badge — shown when this SHA256 card received data via hash dedup */}
+                            {d._sourcedFrom && (
+                              <div className="flex items-center gap-2 mb-2 rounded-lg px-2.5 py-1.5"
+                                style={{ background: "rgba(124,156,255,0.08)", border: "1px solid rgba(124,156,255,0.3)" }}>
+                                <span style={{ color: "#7c9cff" }}>🔗 Enrichment data sourced from {d._sourcedFrom.cat} <span style={{ fontFamily: "monospace" }}>{d._sourcedFrom.value.slice(0,16)}…</span> — partial results until re-enriched as SHA256</span>
+                                <button onClick={() => { const newKey = `SHA256::${arr[i]}`; setEnrichCache(c=>({...c,[newKey]:undefined})); enrichIOC("SHA256", arr[i]); }}
+                                  className="shrink-0 rounded-md px-2 py-0.5 text-[10px] font-bold"
+                                  style={{ color: "#04111a", background: "#7c9cff", border: "none", cursor: "pointer" }}>
+                                  Re-enrich as SHA256
+                                </button>
+                              </div>
+                            )}
                             {/* ── VERDICT & IDENTITY ── */}
                             {!isCondensed && (hasVerdict || hasThreatfox || hasMalBaz || hasUrlhaus || hasCircl || (hasKaspersky && isHash)) && secRow("Verdict & Identity", (
                               <>
@@ -5185,7 +5325,7 @@ class GraphErrorBoundary extends Component {
   }
 }
 
-function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copyText, addPivotIOC, isPivotAdded, removeIoc, anyEnriched }) {
+function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copyText, addPivotIOC, isPivotAdded, removeIoc, anyEnriched, hashCollapseAnims = [] }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const stateRef = useRef({ nodes: [], edges: [], t: 0 });
@@ -5407,6 +5547,8 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
   // already exist (incremental layout) so the graph doesn't re-explode on every
   // enrichment; only brand-new nodes spawn fresh near their parent.
   const prevPosRef = useRef(new Map()); // id -> {x,y,vx,vy}
+  const animsRef = useRef([]); // always-fresh ref to hashCollapseAnims
+  animsRef.current = hashCollapseAnims;
   useEffect(() => {
     const prev = prevPosRef.current;
     const edgesByNode = {};
@@ -5841,6 +5983,67 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
         }
         ctx.globalAlpha = 1;
       }
+
+      // ── Hash collapse arc animations ──────────────────────────────
+      const _anims = animsRef.current;
+      if (_anims && _anims.length > 0) {
+        const POS = prevPosRef.current; // Map of id -> {x,y,vx,vy}
+        for (const anim of _anims) {
+          const fromPos = POS.get(anim.fromId);
+          const toPos   = POS.get(anim.toId);
+          if (!fromPos || !toPos) continue;
+          const elapsed = Date.now() - anim.startTime;
+          const DUR = 1400;
+          if (elapsed > DUR) continue;
+          const t = Math.min(elapsed / DUR, 1);
+          const fx = fromPos.x * cam.zoom + cam.ox;
+          const fy = fromPos.y * cam.zoom + cam.oy;
+          const tx = toPos.x  * cam.zoom + cam.ox;
+          const ty = toPos.y  * cam.zoom + cam.oy;
+          const cx1 = (fx + tx) / 2 + (ty - fy) * 0.4;
+          const cy1 = (fy + ty) / 2 - (tx - fx) * 0.4;
+          if (t < 0.6) {
+            const arcT = t / 0.6;
+            const pulse = 0.5 + 0.5 * Math.sin(t * Math.PI * 8);
+            ctx.save(); ctx.globalAlpha = 0.7 * pulse; ctx.shadowBlur = 24 * pulse;
+            ctx.shadowColor = "#00e5ff"; ctx.beginPath();
+            ctx.arc(fx, fy, 14 * cam.zoom, 0, Math.PI * 2);
+            ctx.fillStyle = "rgba(0,229,255,0.25)"; ctx.fill(); ctx.restore();
+            const endStep = Math.floor(arcT * 30);
+            ctx.save(); ctx.globalAlpha = 0.9; ctx.shadowBlur = 10;
+            ctx.shadowColor = "#00e5ff"; ctx.strokeStyle = "#00e5ff";
+            ctx.lineWidth = 2.5; ctx.beginPath();
+            for (let s = 0; s <= endStep; s++) {
+              const bt = s / 30;
+              const bx = (1-bt)*(1-bt)*fx + 2*(1-bt)*bt*cx1 + bt*bt*tx;
+              const by = (1-bt)*(1-bt)*fy + 2*(1-bt)*bt*cy1 + bt*bt*ty;
+              s === 0 ? ctx.moveTo(bx, by) : ctx.lineTo(bx, by);
+            }
+            ctx.stroke(); ctx.restore();
+          } else {
+            const fadeT = (t - 0.6) / 0.4;
+            ctx.save(); ctx.globalAlpha = 0.9 * (1 - fadeT); ctx.shadowBlur = 8;
+            ctx.shadowColor = "#00e5ff"; ctx.strokeStyle = "#00e5ff"; ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let s = 0; s <= 30; s++) {
+              const bt = s / 30;
+              const bx = (1-bt)*(1-bt)*fx + 2*(1-bt)*bt*cx1 + bt*bt*tx;
+              const by = (1-bt)*(1-bt)*fy + 2*(1-bt)*bt*cy1 + bt*bt*ty;
+              s === 0 ? ctx.moveTo(bx, by) : ctx.lineTo(bx, by);
+            }
+            ctx.stroke(); ctx.restore();
+            ctx.save(); ctx.globalAlpha = (1 - fadeT) * 0.6;
+            ctx.beginPath(); ctx.arc(fx, fy, 12 * cam.zoom, 0, Math.PI * 2);
+            ctx.fillStyle = "rgba(0,229,255,0.3)"; ctx.fill(); ctx.restore();
+            const pulse2 = 0.5 + 0.5 * Math.sin(fadeT * Math.PI * 4);
+            ctx.save(); ctx.globalAlpha = 0.6 * pulse2 * fadeT; ctx.shadowBlur = 30 * pulse2;
+            ctx.shadowColor = "#00ff9c"; ctx.beginPath();
+            ctx.arc(tx, ty, 18 * cam.zoom, 0, Math.PI * 2);
+            ctx.fillStyle = "rgba(0,255,156,0.2)"; ctx.fill(); ctx.restore();
+          }
+        }
+      }
+      // ── end arc animations ─────────────────────────────────────────
 
       raf = requestAnimationFrame(step);
     };
