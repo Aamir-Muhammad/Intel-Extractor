@@ -6146,6 +6146,14 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
           let toPos   = POS.get(anim.toId);
           if (!fromPos) fromPos = N.find(n => n.id === anim.fromId);
           if (!toPos)   toPos   = N.find(n => n.id === anim.toId);
+          // Debug: log ONCE per animation to see why lookup fails
+          if (!anim._debugged) {
+            anim._debugged = true;
+            console.log("[HashArc] Attempting animation", anim.id);
+            console.log("[HashArc] fromId:", anim.fromId, "found:", !!fromPos);
+            console.log("[HashArc] toId:", anim.toId, "found:", !!toPos);
+            console.log("[HashArc] All node IDs in graph:", N.map(n => n.id).slice(0, 20));
+          }
           if (!fromPos || !toPos) continue;
           const elapsed = Date.now() - anim.startTime;
           const DUR = 1400;
