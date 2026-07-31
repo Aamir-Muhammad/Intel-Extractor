@@ -398,6 +398,12 @@ const setFavicon = () => {
       0%   { box-shadow: 0 0 0 0 rgba(124,156,255,0.8), 0 0 0 0 rgba(124,156,255,0.4); background: rgba(124,156,255,0.18); }
       40%  { box-shadow: 0 0 0 6px rgba(124,156,255,0.4), 0 0 28px rgba(124,156,255,0.3); background: rgba(124,156,255,0.10); }
       100% { box-shadow: 0 0 0 14px rgba(124,156,255,0), 0 0 0 rgba(124,156,255,0); background: transparent; }
+    }
+    @keyframes hashFlash {
+      0%   { opacity: 0; transform: translate(-50%,-80%) scale(0.8); }
+      15%  { opacity: 1; transform: translate(-50%,-80%) scale(1.05); }
+      70%  { opacity: 1; transform: translate(-50%,-80%) scale(1); }
+      100% { opacity: 0; transform: translate(-50%,-90%) scale(0.95); }
     }`;
     document.head.appendChild(s);
   }
@@ -4298,11 +4304,33 @@ export default function App() {
         )}
 
         {entries.length > 0 && (
-          <div className="mb-4">
+          <div className="mb-4" style={{ position: "relative" }}>
             <div className="px-4 py-2 flex items-center gap-3" style={{ borderBottom: "1px solid rgba(120,160,180,0.12)" }}>
               <span className="text-xs uppercase tracking-widest font-bold" style={{ color: "#5d7382" }}>Threat Graph</span>
               <span className="text-[10px]" style={{ color: "#3a4a54" }}>· {entries.length} indicator types · click nodes to investigate</span>
             </div>
+            {/* Hash collapse flash overlay — visible confirmation of arc animation */}
+            {hashCollapseAnims.length > 0 && (
+              <div className="absolute inset-0 pointer-events-none z-20 flex items-center justify-center" style={{ top: "32px" }}>
+                <div style={{
+                  position: "absolute", inset: 0,
+                  background: "radial-gradient(ellipse at center, rgba(0,229,255,0.08) 0%, transparent 70%)",
+                  animation: "hashBlast 1.4s ease-out forwards",
+                }} />
+                {hashCollapseAnims.map(anim => (
+                  <div key={anim.id} className="absolute flex items-center gap-1.5 rounded-full px-3 py-1.5"
+                    style={{
+                      top: "50%", left: "50%", transform: "translate(-50%,-80%)",
+                      background: "rgba(0,229,255,0.15)", border: "1px solid rgba(0,229,255,0.5)",
+                      backdropFilter: "blur(4px)", animation: "hashFlash 1.4s ease-out forwards",
+                    }}>
+                    <span className="text-[11px] font-bold" style={{ color: "#00e5ff" }}>
+                      🔗 {anim.fromId.slice(0,10)}… → SHA256
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
             <GraphErrorBoundary>
               <ThreatGraph iocData={iocData} enrichCache={enrichCache} colorFor={colorFor}
                 enrichIOC={enrichIOC} logEvent={logEvent} copyText={copyText}
@@ -6055,17 +6083,21 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
       if (_anims && _anims.length > 0) {
         const POS = prevPosRef.current; // Map of id -> {x,y,vx,vy}
         for (const anim of _anims) {
-          const fromPos = POS.get(anim.fromId);
-          const toPos   = POS.get(anim.toId);
+          // Look up in prevPosRef first, fall back to live S.nodes for new nodes
+          let fromPos = POS.get(anim.fromId);
+          let toPos   = POS.get(anim.toId);
+          if (!fromPos) fromPos = N.find(n => n.id === anim.fromId);
+          if (!toPos)   toPos   = N.find(n => n.id === anim.toId);
           if (!fromPos || !toPos) continue;
           const elapsed = Date.now() - anim.startTime;
           const DUR = 1400;
           if (elapsed > DUR) continue;
           const t = Math.min(elapsed / DUR, 1);
-          const fx = fromPos.x * cam.zoom + cam.ox;
-          const fy = fromPos.y * cam.zoom + cam.oy;
-          const tx = toPos.x  * cam.zoom + cam.ox;
-          const ty = toPos.y  * cam.zoom + cam.oy;
+          // Convert world positions to screen coords (same formula as toScreen())
+          const fx = cx + (fromPos.x + cam.x) * cam.zoom;
+          const fy = cy + (fromPos.y + cam.y) * cam.zoom;
+          const tx = cx + (toPos.x  + cam.x) * cam.zoom;
+          const ty = cy + (toPos.y  + cam.y) * cam.zoom;
           const cx1 = (fx + tx) / 2 + (ty - fy) * 0.4;
           const cy1 = (fy + ty) / 2 - (tx - fx) * 0.4;
           if (t < 0.6) {
