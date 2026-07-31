@@ -44,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v90";
+const APP_VERSION = "v91";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -390,6 +390,17 @@ const setFavicon = () => {
   link.type = "image/svg+xml";
   link.href = "data:image/svg+xml," + encodeURIComponent(FAVICON_SVG);
   document.head.appendChild(link);
+  // Blast animation keyframe for hash consolidation
+  if (!document.getElementById("hash-blast-style")) {
+    const s = document.createElement("style");
+    s.id = "hash-blast-style";
+    s.textContent = `@keyframes hashBlast {
+      0%   { box-shadow: 0 0 0 0 rgba(124,156,255,0.8), 0 0 0 0 rgba(124,156,255,0.4); background: rgba(124,156,255,0.18); }
+      40%  { box-shadow: 0 0 0 6px rgba(124,156,255,0.4), 0 0 28px rgba(124,156,255,0.3); background: rgba(124,156,255,0.10); }
+      100% { box-shadow: 0 0 0 14px rgba(124,156,255,0), 0 0 0 rgba(124,156,255,0); background: transparent; }
+    }`;
+    document.head.appendChild(s);
+  }
 };
 
 // ============================================================
@@ -3092,6 +3103,9 @@ export default function App() {
                   }
                 };
               });
+              // Blast animation: radial pulse on the IOC card being consolidated
+              setBlastNodes(s => new Set([...s, value]));
+              setTimeout(() => setBlastNodes(s => { const n = new Set(s); n.delete(value); return n; }), 900);
             }
           }
           return next;
@@ -3133,6 +3147,7 @@ export default function App() {
   const [mergedHashes, setMergedHashes] = useState({});
   const [showMerged, setShowMerged] = useState(false);
   // Graph arc animation: { fromId, toId, startTime } triggers the collapse arc
+  const [blastNodes, setBlastNodes] = useState(new Set()); // IOC values with active blast animation
   const [hashCollapseAnims, setHashCollapseAnims] = useState([]);
   const [customAddCat, setCustomAddCat] = useState(null);           // category currently showing add input
   const [customAddValue, setCustomAddValue] = useState("");
@@ -4297,31 +4312,53 @@ export default function App() {
         )}
 
         {/* Hash dedup banner */}
-        {Object.keys(mergedHashes).length > 0 && (
-          <div className="rounded-xl px-4 py-3 mb-4 flex items-center gap-3 flex-wrap"
-            style={{ background: "rgba(124,156,255,0.08)", border: "1px solid rgba(124,156,255,0.3)" }}>
-            <span className="text-xs font-semibold" style={{ color: "#7c9cff" }}>
-              🔗 {Object.values(mergedHashes).reduce((s, m) => s + m.removed.length, 0)} hash{Object.values(mergedHashes).reduce((s, m) => s + m.removed.length, 0) !== 1 ? "es" : ""} merged into SHA256
-              {" "}—{" "}
-              {Object.entries(mergedHashes).map(([sha256, m]) => m.sources.join(", ")).filter((v, i, a) => a.indexOf(v) === i).join("; ")} resolved to same file
-            </span>
-            <button onClick={() => setShowMerged(v => !v)}
-              className="text-[11px] rounded-md px-2 py-0.5"
-              style={{ color: "#7c9cff", background: "rgba(124,156,255,0.12)", border: "1px solid rgba(124,156,255,0.35)", cursor: "pointer" }}>
-              {showMerged ? "Hide" : "Show merged"}
-            </button>
-            {showMerged && (
-              <div className="w-full mt-1 flex flex-wrap gap-2">
-                {Object.entries(mergedHashes).map(([sha256, m]) => (
-                  <div key={sha256} className="text-[10px] rounded-lg px-2 py-1" style={{ background: "rgba(10,14,20,0.6)", border: "1px solid rgba(124,156,255,0.2)", color: "#8aa0ad" }}>
-                    <span style={{ color: "#7c9cff", fontFamily: "monospace" }}>{sha256.slice(0, 16)}…</span>
-                    {" ← "}{m.removed.map(r => <span key={r.cat+r.value}><span style={{ color: "#c084fc" }}>{r.cat}</span> {r.value.slice(0, 12)}… </span>)}
-                  </div>
-                ))}
+        {Object.keys(mergedHashes).length > 0 && (() => {
+          const totalMerged = Object.values(mergedHashes).reduce((s, m) => s + m.removed.length, 0);
+          return (
+            <div className="rounded-xl mb-4 overflow-hidden"
+              style={{ border: "1px solid rgba(124,156,255,0.25)", background: "rgba(124,156,255,0.05)" }}>
+              {/* Header row */}
+              <div className="flex items-center justify-between px-4 py-2.5"
+                style={{ borderBottom: showMerged ? "1px solid rgba(124,156,255,0.15)" : "none" }}>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold" style={{ color: "#7c9cff" }}>
+                    {totalMerged} {totalMerged === 1 ? "hash" : "hashes"} consolidated into SHA256
+                  </span>
+                  <span className="text-xs" style={{ color: "#5d7382" }}>
+                    · duplicate identifiers removed
+                  </span>
+                </div>
+                <button onClick={() => setShowMerged(v => !v)}
+                  className="text-[11px] rounded-md px-2.5 py-1"
+                  style={{ color: "#7c9cff", background: "rgba(124,156,255,0.1)", border: "1px solid rgba(124,156,255,0.3)", cursor: "pointer" }}>
+                  {showMerged ? "Hide" : "Show details"}
+                </button>
               </div>
-            )}
-          </div>
-        )}
+              {/* Expanded detail — full hashes in clean table */}
+              {showMerged && (
+                <div className="px-4 py-3 flex flex-col gap-3">
+                  {Object.entries(mergedHashes).map(([sha256, m]) => (
+                    <div key={sha256}>
+                      {/* Target SHA256 */}
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <span className="text-[9px] uppercase tracking-widest font-bold w-12 shrink-0" style={{ color: "#5d7382" }}>SHA256</span>
+                        <span className="font-mono text-[11px] break-all" style={{ color: "#7c9cff" }}>{sha256}</span>
+                      </div>
+                      {/* Merged sources */}
+                      {m.removed.map(r => (
+                        <div key={r.cat + r.value} className="flex items-center gap-2 ml-14 mb-1">
+                          <span className="text-[9px] uppercase tracking-widest font-bold w-12 shrink-0" style={{ color: "#5d7382" }}>{r.cat}</span>
+                          <span className="font-mono text-[11px] break-all" style={{ color: "#c084fc" }}>{r.value}</span>
+                          <span className="text-[9px] shrink-0" style={{ color: "#3a4a54" }}>→ consolidated</span>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         <div className="grid grid-cols-1 gap-4">
           {entries.map(([cat, arr]) => {
@@ -4429,8 +4466,18 @@ export default function App() {
                     const enrichable = ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat);
                     // Precedence: row override > card/global effective (inheritedCollapse from card scope).
                     const isRowCollapsed = rowOverride[eKey] !== undefined ? rowOverride[eKey] : inheritedCollapse;
+                    const isBlasting = blastNodes.has(arr[i]) || blastNodes.has(arr[i].toLowerCase());
                     return (
-                      <div key={i} style={hoveredActionRow === eKey ? { background: `${c}14`, borderRadius: "6px", boxShadow: `inset 0 0 0 1px ${c}44`, transition: "background 0.15s, box-shadow 0.15s" } : { transition: "background 0.15s, box-shadow 0.15s" }}>
+                      <div key={i} style={{
+                        ...(hoveredActionRow === eKey ? { background: `${c}14`, borderRadius: "6px", boxShadow: `inset 0 0 0 1px ${c}44` } : {}),
+                        ...(isBlasting ? {
+                          borderRadius: "6px",
+                          boxShadow: `0 0 0 2px rgba(124,156,255,0.8), 0 0 20px rgba(124,156,255,0.4)`,
+                          background: "rgba(124,156,255,0.12)",
+                          animation: "hashBlast 0.9s ease-out forwards",
+                        } : {}),
+                        transition: "background 0.15s, box-shadow 0.15s",
+                      }}>
                         <div className="group flex items-start gap-1.5 py-0.5 leading-relaxed"
                           draggable
                           onDragStart={(e) => { e.dataTransfer.setData("text/plain", arr[i]); handleDragStart(cat, arr[i]); }}
@@ -5756,12 +5803,24 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { alpha: true });
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     canvas.width = dims.w * dpr;
     canvas.height = dims.h * dpr;
+    // Keep canvas on GPU compositing layer to prevent texture eviction
+    // when user scrolls away — the main cause of black patches on scroll-back.
+    canvas.style.willChange = "transform";
     ctx.scale(dpr, dpr);
     let raf;
+    // Force a redraw when the page becomes visible again after being
+    // backgrounded/scrolled off — prevents stale GPU texture showing as black.
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(step);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
 
     const catColor = (n) => colorFor(n.cat);
     const verdictColor = (v) => v === "Malicious" ? "#ff4d6d" : v === "Suspicious" ? "#fbbf24" : v === "Whitelisted" ? "#00ff9c" : null;
@@ -6048,7 +6107,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
       raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
+    return () => { cancelAnimationFrame(raf); document.removeEventListener("visibilitychange", onVisible); };
   }, [dims, model, colorFor]);
 
   // ---- Pointer interaction ----
