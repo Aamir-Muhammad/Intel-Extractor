@@ -44,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v91";
+const APP_VERSION = "v92";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -1333,7 +1333,18 @@ const buildSPL = (details) => {
 | table _time, host, Image, TargetObject, Details`;
 };
 
-// ---- Universal hunt query builders: per-category KQL / CQL / SPL ----
+const buildAQL = (details) => {
+  const clauses = uniqDetails(details).map((d) => {
+    const keyEsc = stripHive(d.key).replace(/'/g, "''");
+    const parts = [`payload LIKE '%${keyEsc}%'`];
+    if (d.valueName) parts.push(`payload LIKE '%${String(d.valueName).replace(/'/g, "''")}%'`);
+    if (d.data !== undefined && d.data !== null && d.data !== "") parts.push(`payload LIKE '%${String(d.data).replace(/'/g, "''")}%'`);
+    return parts.length > 1 ? `(${parts.join(" AND ")})` : parts[0];
+  });
+  return `SELECT * FROM events WHERE ${clauses.join("\n    OR ")} LAST 7 DAYS`;
+};
+
+// ---- Universal hunt query builders: per-category KQL / CQL / SPL / AQL ----
 const kqlList = (arr) => arr.map((v) => `"${v.replace(/"/g, '\\"')}"`).join(", ");
 const cqlPat = (arr) => arr.map((v) => reEsc(v)).join("|");
 
@@ -1501,6 +1512,52 @@ const huntSPL = (cat, arr) => {
       const distinctive = [...tokens].filter((t) => t.length > 3).slice(0, 15);
       const patterns = (distinctive.length ? distinctive : arr.slice(0, 10)).map((t) => `"*${t}*"`).join(", ");
       return `index=* source="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1\n| search CommandLine IN (${patterns})\n| table _time, host, Image, CommandLine, ParentImage, User`;
+    }
+    default: return null;
+  }
+};
+
+const huntAQL = (cat, arr) => {
+  const ql = (a) => a.map((v) => `'${v.replace(/'/g, "''")}'`).join(", ");
+  const likeOr = (field, a) => a.map((v) => `${field} LIKE '%${v.replace(/'/g, "''")}%'`).join("\n    OR ");
+  switch (cat) {
+    case "IPV4": case "IPV6":
+      return `SELECT * FROM events WHERE sourceip IN (${ql(arr)}) OR destinationip IN (${ql(arr)}) OR identityip IN (${ql(arr)})\n-- Flow data\nSELECT * FROM flows WHERE sourceip IN (${ql(arr)}) OR destinationip IN (${ql(arr)})`;
+    case "DOMAIN":
+      return `SELECT * FROM events WHERE hostname IN (${ql(arr)})\n    OR ${likeOr("url", arr)}\n-- DNS queries\nSELECT * FROM events WHERE qid = 5000001\n    AND (${likeOr("payload", arr)})\n-- HTTP proxy / firewall\nSELECT * FROM events WHERE category = 1000\n    AND (${likeOr("url", arr)}) LAST 7 DAYS`;
+    case "URL": {
+      const hosts = [...new Set(arr.map((u) => { try { return u.replace(/^https?:\/\//i, "").split("/")[0].split(":")[0]; } catch { return u; } }))];
+      return `SELECT * FROM events WHERE ${likeOr("url", arr)}\n    OR hostname IN (${ql(hosts)})\n-- DNS for URL hosts\nSELECT * FROM events WHERE qid = 5000001\n    AND (${likeOr("payload", hosts)})\n-- HTTP proxy\nSELECT * FROM events WHERE category = 1000\n    AND (${likeOr("url", arr)}) LAST 7 DAYS`;
+    }
+    case "MD5":
+      return `SELECT * FROM events WHERE md5hash IN (${ql(arr)}) OR filehash IN (${ql(arr)})\n-- Payload search\nSELECT * FROM events WHERE ${likeOr("payload", arr)}\n-- File integrity monitoring\nSELECT * FROM events WHERE category = 7000 AND (md5hash IN (${ql(arr)}) OR filehash IN (${ql(arr)})) LAST 7 DAYS`;
+    case "SHA1":
+      return `SELECT * FROM events WHERE sha1hash IN (${ql(arr)}) OR filehash IN (${ql(arr)})\n-- Payload search\nSELECT * FROM events WHERE ${likeOr("payload", arr)}\n-- File integrity monitoring\nSELECT * FROM events WHERE category = 7000 AND (sha1hash IN (${ql(arr)}) OR filehash IN (${ql(arr)})) LAST 7 DAYS`;
+    case "SHA256":
+      return `SELECT * FROM events WHERE sha256hash IN (${ql(arr)}) OR filehash IN (${ql(arr)})\n-- Payload search\nSELECT * FROM events WHERE ${likeOr("payload", arr)}\n-- File integrity monitoring\nSELECT * FROM events WHERE category = 7000 AND (sha256hash IN (${ql(arr)}) OR filehash IN (${ql(arr)})) LAST 7 DAYS`;
+    case "EMAIL":
+      return `SELECT * FROM events WHERE LOWER(username) IN (${ql(arr.map((v) => v.toLowerCase()))})\n-- Payload search\nSELECT * FROM events WHERE ${likeOr("payload", arr)}\n-- Mail category\nSELECT * FROM events WHERE category = 16000\n    AND LOWER(username) IN (${ql(arr.map((v) => v.toLowerCase()))}) LAST 7 DAYS`;
+    case "FILE_NAME": case "FILE_PATH":
+      return `SELECT * FROM events WHERE ${likeOr("payload", arr)} LAST 7 DAYS`;
+    case "CVE":
+      return `SELECT * FROM events WHERE ${likeOr("payload", arr)} LAST 30 DAYS`;
+    case "SCHEDULED_TASK": {
+      const names = arr.map((v) => v.split(" → ")[0].trim());
+      return `SELECT * FROM events WHERE ${likeOr("payload", names)} LAST 7 DAYS`;
+    }
+    case "SERVICE": {
+      const names = arr.map((v) => v.split(" → ")[0].trim());
+      return `SELECT * FROM events WHERE ${likeOr("payload", names)} LAST 7 DAYS`;
+    }
+    case "COMMAND_LINE": {
+      const tokens = new Set();
+      arr.forEach((cl) => {
+        (String(cl).match(/"[^"]{4,80}"/g) || []).forEach((m) => tokens.add(m.slice(1, -1)));
+        (String(cl).match(/[A-Za-z]:\\[^\s"']{3,150}/g) || []).forEach((m) => tokens.add(m));
+      });
+      const distinctive = [...tokens].filter((t) => t.length > 3).slice(0, 15);
+      const patterns = distinctive.length ? distinctive : arr.slice(0, 10);
+      return `SELECT * FROM events WHERE ${likeOr("payload", patterns)} LAST 7 DAYS`;
     }
     default: return null;
   }
@@ -5359,6 +5416,7 @@ export default function App() {
                     <CopyBtn label="Defender KQL" copied={copied === "reg-kql"} onClick={() => copyText(buildKQL(visibleRegDetails), "reg-kql")} color={c} />
                     <CopyBtn label="CrowdStrike CQL" copied={copied === "reg-cql"} onClick={() => copyText(buildCQL(visibleRegDetails), "reg-cql")} color={c} />
                     <CopyBtn label="Splunk SPL" copied={copied === "reg-spl"} onClick={() => copyText(buildSPL(visibleRegDetails), "reg-spl")} color={c} />
+                    <CopyBtn label="QRadar AQL" copied={copied === "reg-aql"} onClick={() => copyText(buildAQL(visibleRegDetails), "reg-aql")} color={c} />
                   </div>
                 )}
 
@@ -5370,6 +5428,7 @@ export default function App() {
                     {huntKQL(cat, arr) && <CopyBtn label="Defender KQL" copied={copied === `${cat}-hunt-kql`} onClick={() => copyText(huntKQL(cat, arr), `${cat}-hunt-kql`)} color={c} />}
                     {huntCQL(cat, arr) && <CopyBtn label="CrowdStrike CQL" copied={copied === `${cat}-hunt-cql`} onClick={() => copyText(huntCQL(cat, arr), `${cat}-hunt-cql`)} color={c} />}
                     {huntSPL(cat, arr) && <CopyBtn label="Splunk SPL" copied={copied === `${cat}-hunt-spl`} onClick={() => copyText(huntSPL(cat, arr), `${cat}-hunt-spl`)} color={c} />}
+                    {huntAQL(cat, arr) && <CopyBtn label="QRadar AQL" copied={copied === `${cat}-hunt-aql`} onClick={() => copyText(huntAQL(cat, arr), `${cat}-hunt-aql`)} color={c} />}
                   </div>
                 )}
 
