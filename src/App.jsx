@@ -10,7 +10,7 @@ import * as XLSX from "xlsx";
 import {
   Shield, Search, Download, Copy, Check, Loader2, Globe,
   ClipboardPaste, AlertTriangle, ShieldOff, Trash2, Wand2,
-  Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles, ChevronDown, RefreshCw, FileUp, Pencil, Share2
+  Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles, ChevronDown, RefreshCw, FileUp, Pencil, Share2, Zap
 } from "lucide-react";
 
 // ============================================================
@@ -44,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v94";
+const APP_VERSION = "v95";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -598,7 +598,7 @@ const TYPE_COLORS = {
   DOMAIN: "#00ff9c", HOSTNAME: "#34d399",
   URL: "#7c9cff", EMAIL: "#c084fc",
   MD5: "#fbbf24", SHA1: "#fb923c", SHA256: "#ff4d6d", SHA512: "#ff2d78",
-  SSDEEP: "#f472b6", IMPHASH: "#f59e0b",
+  SSDEEP: "#f472b6", IMPHASH: "#f59e0b", AUTHENTIHASH: "#eab308",
   CVE: "#ff3b3b", BTC: "#f7931a", XMR: "#ff6600", ETH: "#8a92b2",
   ASN: "#2dd4bf", MAC_ADDRESS: "#a3e635",
   REGISTRY: "#e879f9", FILE_NAME: "#94a3b8", FILE_PATH: "#a5b4fc",
@@ -1036,7 +1036,7 @@ const classify = (t) => {
   return null;
 };
 
-const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","CVE","MITRE_ATTACK","YARA","ASN","MAC_ADDRESS","BTC","XMR","ETH","REGISTRY","SCHEDULED_TASK","SERVICE","COMMAND_LINE","FILE_NAME","FILE_PATH"];
+const ORDER = ["IPV4","IPV6","DOMAIN","URL","EMAIL","MD5","SHA1","SHA256","SHA512","SSDEEP","IMPHASH","AUTHENTIHASH","CVE","MITRE_ATTACK","YARA","ASN","MAC_ADDRESS","BTC","XMR","ETH","REGISTRY","SCHEDULED_TASK","SERVICE","COMMAND_LINE","FILE_NAME","FILE_PATH"];
 
 // Fixed on-screen card order: Domain, URL, IPs, all hashes first — then the rest.
 // Static (not count-based) so discarding IOCs never shuffles box positions.
@@ -1062,6 +1062,19 @@ const extractIocs = (text) => {
   };
 
   let work = refangSoft(text);
+
+  // Label-based extraction for IMPHASH / AUTHENTIHASH — these share the 32/40-hex
+  // format with MD5/SHA1, so we can only distinguish them when explicitly labeled
+  // (e.g. "imphash: abc123..." or "Authentihash: def456..."). Extract and strip
+  // so they don't get misclassified as MD5/SHA1 in the general pass.
+  work = work.replace(/\b(imphash|imp[_\s-]?hash)\s*[:=]\s*([a-fA-F0-9]{32})\b/gi, (_m, _l, h) => {
+    add("IMPHASH", h.toLowerCase());
+    return " ";
+  });
+  work = work.replace(/\b(authentihash|authenti[_\s-]?hash)\s*[:=]\s*([a-fA-F0-9]{40,64})\b/gi, (_m, _l, h) => {
+    add("AUTHENTIHASH", h.toLowerCase());
+    return " ";
+  });
 
   work = work.replace(/\[([^\]\n]+)\]\(([^)\n]*)\)/g, (_m, label) => {
     const t = trimTok(label.trim());
@@ -2143,6 +2156,22 @@ export default function App() {
         } catch (e) { console.warn("Pre-flight Kaspersky failed:", e.message); }
       }
 
+      // Step 3: Hybrid Analysis /search/hash (last pre-flight — cheap SHA256 resolver)
+      // Uses lightweight search/hash endpoint; overview/{sha256} is called later
+      // for the SHA256 card's full behavioral data. Only resolves canonical SHA256
+      // and sibling hashes here — verdict data comes from main enrichment.
+      if (!results._canonicalSHA256) {
+        try {
+          const hj = await callEnrich("hybrid_analysis", null, null, undefined, { ha_type: "hash" });
+          if (hj && !hj.error && Array.isArray(hj) && hj.length > 0) {
+            const best = hj.find(r => r && r.sha256) || hj[0];
+            if (best?.sha256) results._canonicalSHA256 = String(best.sha256).toLowerCase();
+            if (best?.md5) results._siblingMD5 = results._siblingMD5 || String(best.md5).toLowerCase();
+            if (best?.sha1) results._siblingSHA1 = results._siblingSHA1 || String(best.sha1).toLowerCase();
+          }
+        } catch (e) { console.warn("Pre-flight Hybrid Analysis failed:", e.message); }
+      }
+
       // If canonical SHA256 found, check if it's in the current IOC list
       if (results._canonicalSHA256) {
         const canonical = results._canonicalSHA256;
@@ -2459,17 +2488,71 @@ export default function App() {
         setPartial();
       }
       // Hybrid Analysis (Falcon Sandbox) — hash lookup with behavioral analysis.
-      // Returns: verdict, threat_score (0-100), AV detection rate, malware family,
-      // MITRE ATT&CK mappings, contacted domains/hosts, all sibling hashes.
+      // SHA256: uses /overview/{sha256} for full behavioral data (verdict, threat_score,
+      //         MITRE, family, contacted infra, siblings).
+      // MD5/SHA1/SHA512: uses /search/hash for sibling extraction — pre-flight already
+      //                  ran /search/hash for MD5/SHA1, so we skip duplicate call.
       // Rate limit: 200/min, 2000/hr — generous, no throttling needed.
-      if (["MD5","SHA1","SHA256","SHA512"].includes(cat)) {
+      if (cat === "SHA256") {
+        try {
+          const hj = await callEnrich("hybrid_analysis", null, null, undefined, { ha_type: "overview" });
+          if (hj && !hj.error && hj.sha256) {
+            const best = hj;
+            const haVerdict = best.verdict || null;
+            const threatScore = typeof best.threat_score === "number" ? best.threat_score : null;
+            const avDetect = best.av_detect != null ? String(best.av_detect) : null;
+            const family = best.vx_family || null;
+            const tags = Array.isArray(best.tags) ? best.tags.filter(Boolean).slice(0, 8) : [];
+            const classifTags = Array.isArray(best.classification_tags) ? best.classification_tags.filter(Boolean).slice(0, 5) : [];
+            const mitreAttacks = Array.isArray(best.mitre_attcks) ? best.mitre_attcks.map(m => m.technique || m.tactic || m).filter(Boolean).slice(0, 6) : [];
+            const domains = Array.isArray(best.domains) ? best.domains.filter(Boolean).slice(0, 10) : [];
+            const hosts = Array.isArray(best.hosts) ? best.hosts.filter(Boolean).slice(0, 10) : [];
+            const compromised = Array.isArray(best.compromised_hosts) ? best.compromised_hosts.filter(Boolean).slice(0, 5) : [];
+            const fileName = best.submit_name || null;
+            const fileType = best.type || null;
+            const typeShort = Array.isArray(best.type_short) ? best.type_short.filter(Boolean) : [];
+            const fileSize = best.size ? `${Math.round(best.size / 1024)}KB` : null;
+            const envDesc = best.environment_description || null;
+            const analysisTime = best.analysis_start_time ? best.analysis_start_time.split(" ")[0] : null;
+            const netConns = best.total_network_connections || 0;
+            const totalProcs = best.total_processes || 0;
+            const totalSigs = best.total_signatures || 0;
+            const impHash = best.imphash || null;
+            const ssdeepHash = best.ssdeep || null;
+            const authentiHash = best.authentihash || null;
+
+            results.hybridAnalysis = {
+              verdict: haVerdict, threatScore, avDetect, family,
+              tags: tags.length ? tags.join(", ") : null,
+              classifTags: classifTags.length ? classifTags.join(", ") : null,
+              mitreAttacks: mitreAttacks.length ? mitreAttacks : null,
+              domains: domains.length ? domains : null,
+              hosts: hosts.length ? hosts : null,
+              compromised: compromised.length ? compromised : null,
+              fileName,
+              fileType: typeShort.length ? typeShort.join("/") : fileType,
+              fileSize, envDesc, analysisTime,
+              netConns, totalProcs, totalSigs,
+              impHash, ssdeepHash, authentiHash,
+              reportUrl: best.sha256 ? `https://www.hybrid-analysis.com/sample/${best.sha256}` : null,
+            };
+
+            // Sibling hashes
+            if (best.md5) results._siblingMD5 = results._siblingMD5 || String(best.md5).toLowerCase();
+            if (best.sha1) results._siblingSHA1 = results._siblingSHA1 || String(best.sha1).toLowerCase();
+            if (best.sha256) results._siblingSHA256 = results._siblingSHA256 || String(best.sha256).toLowerCase();
+          }
+        } catch (e) { console.warn("Enrich Hybrid Analysis (overview) failed:", e.message); }
+        setPartial();
+      }
+      // MD5/SHA1: /search/hash was already called in pre-flight — reuse if not
+      // present via a lightweight second call for behavioral data (verdict, family).
+      // SHA512: full search/hash call (no pre-flight coverage).
+      else if (["MD5","SHA1","SHA512"].includes(cat)) {
         try {
           const hj = await callEnrich("hybrid_analysis", null, null, undefined, { ha_type: "hash" });
           if (hj && !hj.error && Array.isArray(hj) && hj.length > 0) {
-            // Pick the analysis with the highest threat_score (most decisive result)
-            const best = hj
-              .filter(r => r && typeof r === "object" && r.verdict)
-              .sort((a, b) => (b.threat_score || 0) - (a.threat_score || 0))[0];
+            const best = hj.filter(r => r && typeof r === "object").sort((a, b) => (b.threat_score || 0) - (a.threat_score || 0))[0];
             if (best) {
               const haVerdict = best.verdict || null;
               const threatScore = typeof best.threat_score === "number" ? best.threat_score : null;
@@ -2485,17 +2568,9 @@ export default function App() {
               const fileType = best.type || null;
               const typeShort = Array.isArray(best.type_short) ? best.type_short.filter(Boolean) : [];
               const fileSize = best.size ? `${Math.round(best.size / 1024)}KB` : null;
-              const envDesc = best.environment_description || null;
-              const analysisTime = best.analysis_start_time ? best.analysis_start_time.split(" ")[0] : null;
-              const netConns = best.total_network_connections || 0;
-              const totalProcs = best.total_processes || 0;
-              const totalSigs = best.total_signatures || 0;
 
               results.hybridAnalysis = {
-                verdict: haVerdict,
-                threatScore,
-                avDetect,
-                family,
+                verdict: haVerdict, threatScore, avDetect, family,
                 tags: tags.length ? tags.join(", ") : null,
                 classifTags: classifTags.length ? classifTags.join(", ") : null,
                 mitreAttacks: mitreAttacks.length ? mitreAttacks : null,
@@ -2505,13 +2580,15 @@ export default function App() {
                 fileName,
                 fileType: typeShort.length ? typeShort.join("/") : fileType,
                 fileSize,
-                envDesc,
-                analysisTime,
-                netConns, totalProcs, totalSigs,
+                envDesc: best.environment_description || null,
+                netConns: best.total_network_connections || 0,
+                totalProcs: best.total_processes || 0,
+                totalSigs: best.total_signatures || 0,
+                impHash: best.imphash || null,
+                ssdeepHash: best.ssdeep || null,
+                authentiHash: best.authentihash || null,
                 reportUrl: best.sha256 ? `https://www.hybrid-analysis.com/sample/${best.sha256}` : null,
               };
-
-              // Sibling hashes for cross-type dedup
               if (best.md5) results._siblingMD5 = results._siblingMD5 || String(best.md5).toLowerCase();
               if (best.sha1) results._siblingSHA1 = results._siblingSHA1 || String(best.sha1).toLowerCase();
               if (best.sha256) {
@@ -2522,15 +2599,14 @@ export default function App() {
               }
             }
           }
-        } catch (e) { console.warn("Enrich Hybrid Analysis failed:", e.message); }
+        } catch (e) { console.warn("Enrich Hybrid Analysis (search/hash) failed:", e.message); }
         setPartial();
       }
-      // Hybrid Analysis — domain/IP: sandbox submissions that contacted this host.
-      // Shows if any analyzed malware samples phoned home to this infrastructure.
-      if (["IPV4","IPV6","DOMAIN"].includes(cat)) {
+      // IMPHASH / SSDEEP / AUTHENTIHASH — hunt for related samples via search/terms
+      if (["IMPHASH","SSDEEP","AUTHENTIHASH"].includes(cat)) {
         try {
-          const haType = ["IPV4","IPV6"].includes(cat) ? "host" : "domain";
-          const hj = await callEnrich("hybrid_analysis", null, null, undefined, { ha_type: haType });
+          const termField = cat === "IMPHASH" ? "imp_hash" : cat === "SSDEEP" ? "ssdeep" : "authentihash";
+          const hj = await callEnrich("hybrid_analysis", null, null, undefined, { ha_type: "terms", ha_term_field: termField });
           const haArr = Array.isArray(hj) ? hj : (hj && Array.isArray(hj.result) ? hj.result : []);
           if (haArr.length > 0) {
             const valid = haArr.filter(r => r && typeof r === "object");
@@ -2538,13 +2614,51 @@ export default function App() {
             const suspCount = valid.filter(r => r.verdict === "suspicious").length;
             const families = [...new Set(valid.map(r => r.vx_family).filter(Boolean))].slice(0, 4);
             const bestScore = valid.reduce((m, r) => Math.max(m, r.threat_score || 0), 0);
+            const avgScore = valid.length ? Math.round(valid.reduce((s, r) => s + (r.threat_score || 0), 0) / valid.length) : 0;
+            const relatedSHA256s = [...new Set(valid.map(r => r.sha256).filter(Boolean))].slice(0, 6);
+            // Verdict: real reading of the aggregate, not defaulting to "no specific threat"
+            let hv = null;
+            if (malCount > 0 || bestScore >= 70) hv = "malicious";
+            else if (suspCount > 0 || bestScore >= 30) hv = "suspicious";
+            else if (valid.length > 0) hv = "seen but no verdict";
             results.hybridAnalysis = {
-              submissions: valid.length,
-              malicious: malCount,
-              suspicious: suspCount,
-              threatScore: bestScore > 0 ? bestScore : null,
+              submissions: valid.length, malicious: malCount, suspicious: suspCount,
+              threatScore: bestScore > 0 ? bestScore : null, avgScore: avgScore || null,
               families: families.length ? families.join(", ") : null,
-              verdict: malCount > 0 ? "malicious" : suspCount > 0 ? "suspicious" : "no specific threat",
+              relatedSHA256s: relatedSHA256s.length ? relatedSHA256s : null,
+              verdict: hv,
+            };
+          }
+        } catch (e) { console.warn("Enrich Hybrid Analysis (terms/hash-code) failed:", e.message); }
+        setPartial();
+      }
+      // Hybrid Analysis — domain/IP/URL: samples that contacted this infra.
+      // Fixed verdict logic — reads real threat data, not always "no specific threat".
+      if (["IPV4","IPV6","DOMAIN","URL"].includes(cat)) {
+        try {
+          const haType = ["IPV4","IPV6"].includes(cat) ? "host"
+            : cat === "URL" ? "url" : "domain";
+          const hj = await callEnrich("hybrid_analysis", null, null, undefined, { ha_type: "terms", ha_term_field: haType });
+          const haArr = Array.isArray(hj) ? hj : (hj && Array.isArray(hj.result) ? hj.result : []);
+          if (haArr.length > 0) {
+            const valid = haArr.filter(r => r && typeof r === "object");
+            const malCount = valid.filter(r => r.verdict === "malicious").length;
+            const suspCount = valid.filter(r => r.verdict === "suspicious").length;
+            const families = [...new Set(valid.map(r => r.vx_family).filter(Boolean))].slice(0, 4);
+            const bestScore = valid.reduce((m, r) => Math.max(m, r.threat_score || 0), 0);
+            const avgScore = valid.length ? Math.round(valid.reduce((s, r) => s + (r.threat_score || 0), 0) / valid.length) : 0;
+            const relatedSHA256s = [...new Set(valid.map(r => r.sha256).filter(Boolean))].slice(0, 6);
+            // Real verdict aggregation
+            let hv = null;
+            if (malCount > 0 || bestScore >= 70) hv = "malicious";
+            else if (suspCount > 0 || bestScore >= 30) hv = "suspicious";
+            else if (valid.length > 0) hv = "seen but no verdict";
+            results.hybridAnalysis = {
+              submissions: valid.length, malicious: malCount, suspicious: suspCount,
+              threatScore: bestScore > 0 ? bestScore : null, avgScore: avgScore || null,
+              families: families.length ? families.join(", ") : null,
+              relatedSHA256s: relatedSHA256s.length ? relatedSHA256s : null,
+              verdict: hv,
             };
           }
         } catch (e) { console.warn("Enrich Hybrid Analysis (domain/IP) failed:", e.message); }
@@ -3285,55 +3399,60 @@ export default function App() {
       setEnrichCache((c) => ({ ...c, [key]: { loading: false, data: hasData ? results : null, error: !hasData } }));
 
       // ---- Hash dedup: MD5/SHA1 → SHA256 consolidation ----
-      // If this MD5/SHA1 resolved to a canonical SHA256, merge it AND the
-      // sibling weak hash (e.g. enriching MD5 also removes SHA1 of the same file).
+      // GATED: consolidation only fires when the canonical SHA256 is ALREADY
+      // present in the IOC list. If not, the MD5/SHA1 stays as-is with its
+      // enrichment — the user can manually convert via the header button.
+      // Sibling weak hash removal ALSO fires only if canonical is in list.
       if (results._canonicalSHA256 && ["MD5","SHA1"].includes(cat)) {
         const canonical = results._canonicalSHA256;
         const otherCat = cat === "MD5" ? "SHA1" : "MD5";
         const otherHash = cat === "MD5" ? results._siblingSHA1 : results._siblingMD5;
-        setIocData((prev) => {
-          if (!prev) return prev;
-          const next = { ...prev };
-          const sha256List = (prev.SHA256 || []).map(v => v.toLowerCase());
-          if (!sha256List.includes(canonical)) {
-            next.SHA256 = [...(prev.SHA256 || []), canonical];
-          }
-          // Remove the enriched hash
-          if (next[cat]) {
-            const removed = next[cat].filter(v => v.toLowerCase() === value.toLowerCase());
-            next[cat] = next[cat].filter(v => v.toLowerCase() !== value.toLowerCase());
-            if (!next[cat].length) delete next[cat];
-            if (removed.length) {
-              setMergedHashes(m => {
-                const entry = m[canonical] || { removed: [], sources: [] };
-                if (entry.removed.some(r => r.cat === cat && r.value.toLowerCase() === value.toLowerCase())) return m;
-                return { ...m, [canonical]: { removed: [...entry.removed, { cat, value }], sources: [...new Set([...entry.sources, cat])] } };
-              });
-              setBlastNodes(s => new Set([...s, value]));
-              setTimeout(() => setBlastNodes(s => { const n = new Set(s); n.delete(value); return n; }), 950);
-              fireDedupToast(cat, value, canonical);
+        // Only proceed if SHA256 already exists in the IOC list
+        const currentSHA256s = ((iocData || {}).SHA256 || []).map(v => v.toLowerCase());
+        const canonicalInList = currentSHA256s.includes(canonical);
+        if (canonicalInList) {
+          setIocData((prev) => {
+            if (!prev) return prev;
+            const next = { ...prev };
+            // Remove the enriched hash (SHA256 already in list — no need to add)
+            if (next[cat]) {
+              const removed = next[cat].filter(v => v.toLowerCase() === value.toLowerCase());
+              next[cat] = next[cat].filter(v => v.toLowerCase() !== value.toLowerCase());
+              if (!next[cat].length) delete next[cat];
+              if (removed.length) {
+                setMergedHashes(m => {
+                  const entry = m[canonical] || { removed: [], sources: [] };
+                  if (entry.removed.some(r => r.cat === cat && r.value.toLowerCase() === value.toLowerCase())) return m;
+                  return { ...m, [canonical]: { removed: [...entry.removed, { cat, value, manual: false }], sources: [...new Set([...entry.sources, cat])] } };
+                });
+                setBlastNodes(s => new Set([...s, value]));
+                setTimeout(() => setBlastNodes(s => { const n = new Set(s); n.delete(value); return n; }), 950);
+                fireDedupToast(cat, value, canonical);
+              }
             }
-          }
-          // Also remove sibling weak hash (e.g. SHA1 when MD5 was enriched)
-          if (otherHash && next[otherCat]) {
-            const siblingFound = next[otherCat].some(v => v.toLowerCase() === otherHash);
-            if (siblingFound) {
-              next[otherCat] = next[otherCat].filter(v => v.toLowerCase() !== otherHash);
-              if (!next[otherCat].length) delete next[otherCat];
-              setMergedHashes(m => {
-                const entry = m[canonical] || { removed: [], sources: [] };
-                if (entry.removed.some(r => r.cat === otherCat && r.value.toLowerCase() === otherHash)) return m;
-                return { ...m, [canonical]: { removed: [...entry.removed, { cat: otherCat, value: otherHash }], sources: [...new Set([...entry.sources, otherCat])] } };
-              });
-              setBlastNodes(s => new Set([...s, otherHash]));
-              setTimeout(() => setBlastNodes(s => { const n = new Set(s); n.delete(otherHash); return n; }), 950);
-              fireDedupToast(otherCat, otherHash, canonical);
+            // Also remove sibling weak hash if it's in the list
+            if (otherHash && next[otherCat]) {
+              const siblingFound = next[otherCat].some(v => v.toLowerCase() === otherHash);
+              if (siblingFound) {
+                next[otherCat] = next[otherCat].filter(v => v.toLowerCase() !== otherHash);
+                if (!next[otherCat].length) delete next[otherCat];
+                setMergedHashes(m => {
+                  const entry = m[canonical] || { removed: [], sources: [] };
+                  if (entry.removed.some(r => r.cat === otherCat && r.value.toLowerCase() === otherHash)) return m;
+                  return { ...m, [canonical]: { removed: [...entry.removed, { cat: otherCat, value: otherHash, manual: false }], sources: [...new Set([...entry.sources, otherCat])] } };
+                });
+                setBlastNodes(s => new Set([...s, otherHash]));
+                setTimeout(() => setBlastNodes(s => { const n = new Set(s); n.delete(otherHash); return n; }), 950);
+                fireDedupToast(otherCat, otherHash, canonical);
+              }
             }
-          }
-          return next;
-        });
-        // Auto-trigger SHA256 enrichment after consolidation
-        setTimeout(() => enrichIOC("SHA256", canonical), 2000);
+            return next;
+          });
+          // Auto-trigger SHA256 enrichment after consolidation
+          setTimeout(() => enrichIOC("SHA256", canonical), 2000);
+        }
+        // else: canonical SHA256 not in list — leave MD5/SHA1 as-is.
+        // User can click "Consolidate as SHA256 IOC" on card header to manually convert.
       }
 
       // ---- SHA256 enrichment: remove any MD5/SHA1 siblings still in the IOC list ----
@@ -3407,6 +3526,43 @@ export default function App() {
     const id = `${fromValue}-${Date.now()}`;
     setDedupToasts(t => [...t, { id, fromCat, fromValue, toValue }]);
     setTimeout(() => setDedupToasts(t => t.filter(x => x.id !== id)), 3000);
+  };
+  // Manual consolidation: user clicked "Consolidate as SHA256 IOC" on MD5/SHA1 card.
+  // For each resolvable weak hash, add the canonical SHA256 to the IOC list,
+  // remove the weak hash, log to mergedHashes with manual:true flag so the
+  // consolidation summary can distinguish auto-dedup vs manual conversion.
+  const manualConsolidateToSHA256 = (cat, values) => {
+    setIocData(prev => {
+      if (!prev) return prev;
+      const next = { ...prev };
+      values.forEach(value => {
+        const k = `${cat}::${String(value).toLowerCase()}`;
+        const canonical = enrichCache[k]?.data?._canonicalSHA256;
+        if (!canonical) return;
+        // Add SHA256 if not already there
+        const sha256List = (next.SHA256 || []).map(v => v.toLowerCase());
+        if (!sha256List.includes(canonical)) {
+          next.SHA256 = [...(next.SHA256 || []), canonical];
+        }
+        // Remove the weak hash
+        if (next[cat]) {
+          next[cat] = next[cat].filter(v => v.toLowerCase() !== value.toLowerCase());
+          if (!next[cat].length) delete next[cat];
+        }
+        // Track with manual flag
+        setMergedHashes(m => {
+          const entry = m[canonical] || { removed: [], sources: [] };
+          if (entry.removed.some(r => r.cat === cat && r.value.toLowerCase() === value.toLowerCase())) return m;
+          return { ...m, [canonical]: { removed: [...entry.removed, { cat, value, manual: true }], sources: [...new Set([...entry.sources, cat])] } };
+        });
+        setBlastNodes(s => new Set([...s, value]));
+        setTimeout(() => setBlastNodes(s => { const n = new Set(s); n.delete(value); return n; }), 950);
+        fireDedupToast(cat, value, canonical);
+        // Auto-trigger enrichment of the new SHA256
+        setTimeout(() => enrichIOC("SHA256", canonical), 1500);
+      });
+      return next;
+    });
   };
   const [customAddCat, setCustomAddCat] = useState(null);           // category currently showing add input
   const [customAddValue, setCustomAddValue] = useState("");
@@ -4681,7 +4837,13 @@ export default function App() {
                         <div key={r.cat + r.value} className="flex items-center gap-2 ml-14 mb-1">
                           <span className="text-[9px] uppercase tracking-widest font-bold w-12 shrink-0" style={{ color: "#5d7382" }}>{r.cat}</span>
                           <span className="font-mono text-[11px] break-all" style={{ color: "#c084fc" }}>{r.value}</span>
-                          <span className="text-[9px] shrink-0" style={{ color: "#3a4a54" }}>→ consolidated</span>
+                          <span className="text-[9px] shrink-0 rounded-full px-1.5 py-0.5" style={{
+                            color: r.manual ? "#ff4d6d" : "#7c9cff",
+                            backgroundColor: r.manual ? "rgba(255,77,109,0.10)" : "rgba(124,156,255,0.10)",
+                            border: `1px solid ${r.manual ? "rgba(255,77,109,0.3)" : "rgba(124,156,255,0.25)"}`
+                          }}>
+                            {r.manual ? "⚡ Manually converted" : "→ Auto-deduplicated"}
+                          </span>
                         </div>
                       ))}
                     </div>
@@ -4757,6 +4919,34 @@ export default function App() {
                         https://
                       </button>
                     )}
+                    {/* Manual "Consolidate as SHA256 IOC" — MD5/SHA1 cards only.
+                        Shows resolved canonical SHA256 count for any IOC in this card.
+                        Click promotes all resolvable weak hashes to SHA256 in one go. */}
+                    {["MD5","SHA1"].includes(cat) && (() => {
+                      const resolvable = arr.filter(v => {
+                        const k = `${cat}::${String(v).toLowerCase()}`;
+                        const canonical = enrichCache[k]?.data?._canonicalSHA256;
+                        if (!canonical) return false;
+                        const alreadyIn = ((iocData || {}).SHA256 || []).some(s => s.toLowerCase() === canonical);
+                        return !alreadyIn;
+                      });
+                      if (!resolvable.length) return null;
+                      return (
+                        <button
+                          onClick={() => manualConsolidateToSHA256(cat, resolvable)}
+                          title={`Manually promote ${resolvable.length} ${cat}${resolvable.length !== 1 ? "es" : ""} to SHA256 IOCs (using canonical SHA256 resolved from enrichment)`}
+                          className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-bold"
+                          style={{
+                            color: "#04111a",
+                            backgroundColor: "#ff4d6d",
+                            border: "1px solid rgba(255,77,109,0.7)",
+                            boxShadow: "0 0 12px rgba(255,77,109,0.4)",
+                            cursor: "pointer",
+                          }}>
+                          <Zap size={11} /> Consolidate as SHA256 ({resolvable.length})
+                        </button>
+                      );
+                    })()}
                     <span className="flex items-center justify-center text-base font-extrabold tabular-nums rounded-lg px-2.5 py-0.5 min-w-[2.2rem]"
                       style={{ backgroundColor: `${c}22`, color: c, border: `1px solid ${c}66`, textShadow: `0 0 10px ${c}66` }}>
                       {arr.length}
@@ -4795,7 +4985,7 @@ export default function App() {
                     const isEditing = editingKey === rowKey;
                     const eKey = `${cat}::${arr[i]}`;
                     const enr = enrichCache[eKey];
-                    const enrichable = ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat);
+                    const enrichable = ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","SSDEEP","IMPHASH","AUTHENTIHASH","CVE"].includes(cat);
                     // Precedence: row override > card/global effective (inheritedCollapse from card scope).
                     const isRowCollapsed = rowOverride[eKey] !== undefined ? rowOverride[eKey] : inheritedCollapse;
                     const isBlasting = blastNodes.has(arr[i]) || blastNodes.has(arr[i].toLowerCase());
