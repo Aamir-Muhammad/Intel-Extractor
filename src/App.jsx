@@ -44,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v92";
+const APP_VERSION = "v93";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -1333,15 +1333,21 @@ const buildSPL = (details) => {
 | table _time, host, Image, TargetObject, Details`;
 };
 
+const AQL_BASE = `SELECT DATEFORMAT("startTime", 'dd MMM yyyy hh:mm a') AS 'Start Time', QIDNAME(qid) AS 'Event Name', logsourcename(logSourceId) AS 'Log Source', categoryname(category) AS 'Low Level Category'`;
+const AQL_NET = `, "hostname" AS 'Domain', "URL" AS 'URL', "sourceIP" AS 'Source IP', "sourcePort" AS 'Source Port', "destinationIP" AS 'Destination IP', "destinationPort" AS 'Destination Port', "userName" AS 'Username', "eventCount" AS 'Event Count'`;
+const AQL_TAIL = `\nORDER BY "Start Time" DESC LAST 30 DAYS`;
+const aqlHashFields = (label, field) => `, "${field}" AS '${label}', "file hash" AS 'File Hash', "Command" AS 'CommandLine', "Process Path" AS 'Child Process Path', "Parent Process Path" AS 'Parent Process Path', "Parent Command" AS 'Parent CommandLine', "sourceIP" AS 'Source IP', "destinationIP" AS 'Destination IP', "userName" AS 'Username', "eventCount" AS 'Event Count'`;
+const ilikeOr = (field, arr) => arr.map((v) => `"${field}" ILIKE '%${v.replace(/'/g, "''")}%'`).join("\n    OR ");
+
 const buildAQL = (details) => {
   const clauses = uniqDetails(details).map((d) => {
     const keyEsc = stripHive(d.key).replace(/'/g, "''");
-    const parts = [`payload LIKE '%${keyEsc}%'`];
-    if (d.valueName) parts.push(`payload LIKE '%${String(d.valueName).replace(/'/g, "''")}%'`);
-    if (d.data !== undefined && d.data !== null && d.data !== "") parts.push(`payload LIKE '%${String(d.data).replace(/'/g, "''")}%'`);
+    const parts = [`"payload" ILIKE '%${keyEsc}%'`];
+    if (d.valueName) parts.push(`"payload" ILIKE '%${String(d.valueName).replace(/'/g, "''")}%'`);
+    if (d.data !== undefined && d.data !== null && d.data !== "") parts.push(`"payload" ILIKE '%${String(d.data).replace(/'/g, "''")}%'`);
     return parts.length > 1 ? `(${parts.join(" AND ")})` : parts[0];
   });
-  return `SELECT * FROM events WHERE ${clauses.join("\n    OR ")} LAST 7 DAYS`;
+  return `${AQL_BASE}${AQL_NET} FROM events WHERE ${clauses.join("\n    OR ")}${AQL_TAIL}`;
 };
 
 // ---- Universal hunt query builders: per-category KQL / CQL / SPL / AQL ----
@@ -1519,35 +1525,35 @@ const huntSPL = (cat, arr) => {
 
 const huntAQL = (cat, arr) => {
   const ql = (a) => a.map((v) => `'${v.replace(/'/g, "''")}'`).join(", ");
-  const likeOr = (field, a) => a.map((v) => `${field} LIKE '%${v.replace(/'/g, "''")}%'`).join("\n    OR ");
   switch (cat) {
     case "IPV4": case "IPV6":
-      return `SELECT * FROM events WHERE sourceip IN (${ql(arr)}) OR destinationip IN (${ql(arr)}) OR identityip IN (${ql(arr)})\n-- Flow data\nSELECT * FROM flows WHERE sourceip IN (${ql(arr)}) OR destinationip IN (${ql(arr)})`;
+      return `${AQL_BASE}${AQL_NET} FROM events WHERE sourceip IN (${ql(arr)}) OR destinationip IN (${ql(arr)})${AQL_TAIL}`;
     case "DOMAIN":
-      return `SELECT * FROM events WHERE hostname IN (${ql(arr)})\n    OR ${likeOr("url", arr)}\n-- DNS queries\nSELECT * FROM events WHERE qid = 5000001\n    AND (${likeOr("payload", arr)})\n-- HTTP proxy / firewall\nSELECT * FROM events WHERE category = 1000\n    AND (${likeOr("url", arr)}) LAST 7 DAYS`;
+      return `${AQL_BASE}${AQL_NET} FROM events WHERE (${ilikeOr("url", arr)})\n    OR (${ilikeOr("hostname", arr)})${AQL_TAIL}`;
     case "URL": {
       const hosts = [...new Set(arr.map((u) => { try { return u.replace(/^https?:\/\//i, "").split("/")[0].split(":")[0]; } catch { return u; } }))];
-      return `SELECT * FROM events WHERE ${likeOr("url", arr)}\n    OR hostname IN (${ql(hosts)})\n-- DNS for URL hosts\nSELECT * FROM events WHERE qid = 5000001\n    AND (${likeOr("payload", hosts)})\n-- HTTP proxy\nSELECT * FROM events WHERE category = 1000\n    AND (${likeOr("url", arr)}) LAST 7 DAYS`;
+      const allTerms = [...new Set([...arr, ...hosts])];
+      return `${AQL_BASE}${AQL_NET} FROM events WHERE (${ilikeOr("url", allTerms)})\n    OR (${ilikeOr("hostname", hosts)})${AQL_TAIL}`;
     }
     case "MD5":
-      return `SELECT * FROM events WHERE md5hash IN (${ql(arr)}) OR filehash IN (${ql(arr)})\n-- Payload search\nSELECT * FROM events WHERE ${likeOr("payload", arr)}\n-- File integrity monitoring\nSELECT * FROM events WHERE category = 7000 AND (md5hash IN (${ql(arr)}) OR filehash IN (${ql(arr)})) LAST 7 DAYS`;
+      return `${AQL_BASE}${aqlHashFields("MD5", "MD5 Hash")} FROM events WHERE (${arr.map((v) => `"MD5 Hash" ILIKE '${v.replace(/'/g, "''")}'`).join("\n    OR ")})\n    OR (${arr.map((v) => `"file hash" ILIKE '${v.replace(/'/g, "''")}'`).join("\n    OR ")})${AQL_TAIL}`;
     case "SHA1":
-      return `SELECT * FROM events WHERE sha1hash IN (${ql(arr)}) OR filehash IN (${ql(arr)})\n-- Payload search\nSELECT * FROM events WHERE ${likeOr("payload", arr)}\n-- File integrity monitoring\nSELECT * FROM events WHERE category = 7000 AND (sha1hash IN (${ql(arr)}) OR filehash IN (${ql(arr)})) LAST 7 DAYS`;
+      return `${AQL_BASE}${aqlHashFields("SHA1", "SHA1 Hash")} FROM events WHERE (${arr.map((v) => `"SHA1 Hash" ILIKE '${v.replace(/'/g, "''")}'`).join("\n    OR ")})\n    OR (${arr.map((v) => `"file hash" ILIKE '${v.replace(/'/g, "''")}'`).join("\n    OR ")})${AQL_TAIL}`;
     case "SHA256":
-      return `SELECT * FROM events WHERE sha256hash IN (${ql(arr)}) OR filehash IN (${ql(arr)})\n-- Payload search\nSELECT * FROM events WHERE ${likeOr("payload", arr)}\n-- File integrity monitoring\nSELECT * FROM events WHERE category = 7000 AND (sha256hash IN (${ql(arr)}) OR filehash IN (${ql(arr)})) LAST 7 DAYS`;
+      return `${AQL_BASE}${aqlHashFields("SHA256", "SHA256 Hash")} FROM events WHERE (${arr.map((v) => `"SHA256 Hash" ILIKE '${v.replace(/'/g, "''")}'`).join("\n    OR ")})\n    OR (${arr.map((v) => `"file hash" ILIKE '${v.replace(/'/g, "''")}'`).join("\n    OR ")})${AQL_TAIL}`;
     case "EMAIL":
-      return `SELECT * FROM events WHERE LOWER(username) IN (${ql(arr.map((v) => v.toLowerCase()))})\n-- Payload search\nSELECT * FROM events WHERE ${likeOr("payload", arr)}\n-- Mail category\nSELECT * FROM events WHERE category = 16000\n    AND LOWER(username) IN (${ql(arr.map((v) => v.toLowerCase()))}) LAST 7 DAYS`;
+      return `${AQL_BASE}${AQL_NET} FROM events WHERE ${ilikeOr("userName", arr)}${AQL_TAIL}`;
     case "FILE_NAME": case "FILE_PATH":
-      return `SELECT * FROM events WHERE ${likeOr("payload", arr)} LAST 7 DAYS`;
+      return `${AQL_BASE}${AQL_NET} FROM events WHERE ${ilikeOr("payload", arr)}${AQL_TAIL}`;
     case "CVE":
-      return `SELECT * FROM events WHERE ${likeOr("payload", arr)} LAST 30 DAYS`;
+      return `${AQL_BASE}${AQL_NET} FROM events WHERE ${ilikeOr("payload", arr)}${AQL_TAIL}`;
     case "SCHEDULED_TASK": {
       const names = arr.map((v) => v.split(" → ")[0].trim());
-      return `SELECT * FROM events WHERE ${likeOr("payload", names)} LAST 7 DAYS`;
+      return `${AQL_BASE}${AQL_NET} FROM events WHERE ${ilikeOr("payload", names)}${AQL_TAIL}`;
     }
     case "SERVICE": {
       const names = arr.map((v) => v.split(" → ")[0].trim());
-      return `SELECT * FROM events WHERE ${likeOr("payload", names)} LAST 7 DAYS`;
+      return `${AQL_BASE}${AQL_NET} FROM events WHERE ${ilikeOr("payload", names)}${AQL_TAIL}`;
     }
     case "COMMAND_LINE": {
       const tokens = new Set();
@@ -1557,7 +1563,7 @@ const huntAQL = (cat, arr) => {
       });
       const distinctive = [...tokens].filter((t) => t.length > 3).slice(0, 15);
       const patterns = distinctive.length ? distinctive : arr.slice(0, 10);
-      return `SELECT * FROM events WHERE ${likeOr("payload", patterns)} LAST 7 DAYS`;
+      return `${AQL_BASE}${AQL_NET} FROM events WHERE ${ilikeOr("payload", patterns)}${AQL_TAIL}`;
     }
     default: return null;
   }
@@ -2114,6 +2120,9 @@ export default function App() {
             const generalInfo = kj.FileGeneralInfo || {};
             const kSHA256 = (generalInfo.SHA256 || generalInfo.Sha256 || kj.SHA256 || "").toLowerCase();
             if (kSHA256) results._canonicalSHA256 = kSHA256;
+            // Sibling hashes for cross-type dedup
+            if (generalInfo.MD5) results._siblingMD5 = String(generalInfo.MD5).toLowerCase();
+            if (generalInfo.SHA1) results._siblingSHA1 = String(generalInfo.SHA1).toLowerCase();
             // Store Kaspersky result so we don't call it again in the full flow
             const zone = String(kj.Zone).toLowerCase();
             const detections = (kj.DetectionsInfo || []).map(d => d.DetectionName).filter(Boolean).slice(0,3);
@@ -2175,6 +2184,9 @@ export default function App() {
             setBlastNodes(s => new Set([...s, value]));
             // Remove source from IOC list AFTER arc animation completes (1400ms + buffer)
             setTimeout(() => {
+              // Identify sibling weak hash to also remove
+              const otherCat = cat === "MD5" ? "SHA1" : "MD5";
+              const otherHash = cat === "MD5" ? results._siblingSHA1 : results._siblingMD5;
               setIocData(prev => {
                 if (!prev) return prev;
                 const next = { ...prev };
@@ -2182,13 +2194,34 @@ export default function App() {
                   next[cat] = next[cat].filter(v => v.toLowerCase() !== value.toLowerCase());
                   if (!next[cat].length) delete next[cat];
                 }
+                // Also remove sibling weak hash (e.g. SHA1 when MD5 was enriched)
+                if (otherHash && next[otherCat]) {
+                  const siblingFound = next[otherCat].some(v => v.toLowerCase() === otherHash);
+                  if (siblingFound) {
+                    next[otherCat] = next[otherCat].filter(v => v.toLowerCase() !== otherHash);
+                    if (!next[otherCat].length) delete next[otherCat];
+                  }
+                }
                 if (!next.SHA256) next.SHA256 = [canonical];
                 else if (!next.SHA256.map(v=>v.toLowerCase()).includes(canonical)) next.SHA256 = [...next.SHA256, canonical];
                 return next;
               });
+              // Toast + blast for sibling weak hash
+              if (otherHash) {
+                setMergedHashes(m => {
+                  const entry = m[canonical] || { removed: [], sources: [] };
+                  if (entry.removed.some(r => r.cat === otherCat && r.value.toLowerCase() === otherHash)) return m;
+                  return { ...m, [canonical]: { removed: [...entry.removed, { cat: otherCat, value: otherHash }], sources: [...new Set([...entry.sources, otherCat])] } };
+                });
+                fireDedupToast(otherCat, otherHash, canonical);
+                setBlastNodes(s => new Set([...s, otherHash]));
+                setTimeout(() => setBlastNodes(s => { const n = new Set(s); n.delete(otherHash); return n; }), 950);
+              }
               setBlastNodes(s => { const n = new Set(s); n.delete(value); return n; });
               // Clean up animation after another 600ms
               setTimeout(() => setHashCollapseAnims(a => a.filter(x => x.id !== `${value}->${canonical}`)), 600);
+              // Auto-trigger SHA256 enrichment after consolidation
+              setTimeout(() => enrichIOC("SHA256", canonical), 500);
             }, 1600); // wait for arc to finish (1400ms) + 200ms buffer
           }, 500);
           return; // ← SHORT-CIRCUIT: skip all remaining enrichment calls
@@ -2332,6 +2365,10 @@ export default function App() {
             if (mbSHA256 && ["MD5","SHA1"].includes(cat)) {
               results._canonicalSHA256 = mbSHA256.toLowerCase();
             }
+            // Sibling hashes for cross-type dedup (MD5↔SHA1↔SHA256)
+            if (d.md5_hash) results._siblingMD5 = results._siblingMD5 || String(d.md5_hash).toLowerCase();
+            if (d.sha1_hash) results._siblingSHA1 = results._siblingSHA1 || String(d.sha1_hash).toLowerCase();
+            if (d.sha256_hash) results._siblingSHA256 = results._siblingSHA256 || String(d.sha256_hash).toLowerCase();
           }
         } catch (e) { console.warn("Enrich MalwareBazaar failed:", e.message); }
         setPartial();
@@ -2380,6 +2417,10 @@ export default function App() {
               if (cSHA256 && ["MD5","SHA1"].includes(cat)) {
                 results._canonicalSHA256 = cSHA256.toLowerCase();
               }
+              // Sibling hashes for cross-type dedup
+              if (cj.MD5) results._siblingMD5 = results._siblingMD5 || String(cj.MD5).toLowerCase();
+              if (cj["SHA-1"]) results._siblingSHA1 = results._siblingSHA1 || String(cj["SHA-1"]).toLowerCase();
+              if (cSHA256) results._siblingSHA256 = results._siblingSHA256 || cSHA256.toLowerCase();
             } // end if (cj && ...)
           } // end if (algo)
           // 404 = hash unknown to CIRCL (not an error, just quiet)
@@ -2653,6 +2694,10 @@ export default function App() {
             // Canonical SHA256 from Kaspersky (case-insensitive — API may return any case)
             const kSHA256 = generalInfo.SHA256 || generalInfo.Sha256 || kj.SHA256 || kj.Sha256 || null;
             if (kSHA256 && ["MD5","SHA1"].includes(cat)) results._canonicalSHA256 = kSHA256.toLowerCase();
+            // Sibling hashes for cross-type dedup
+            if (generalInfo.MD5) results._siblingMD5 = results._siblingMD5 || String(generalInfo.MD5).toLowerCase();
+            if (generalInfo.SHA1) results._siblingSHA1 = results._siblingSHA1 || String(generalInfo.SHA1).toLowerCase();
+            if (kSHA256) results._siblingSHA256 = results._siblingSHA256 || kSHA256.toLowerCase();
           }
           // 401/403 = expired/invalid key; 404 = not in DB; 429 = rate limited — all silent
         } catch (e) { console.warn("Enrich Kaspersky failed:", e.message); }
@@ -3144,22 +3189,21 @@ export default function App() {
       if (hasData) results._verdict = verdict;
       setEnrichCache((c) => ({ ...c, [key]: { loading: false, data: hasData ? results : null, error: !hasData } }));
 
-      // ---- Hash dedup: if this MD5/SHA1 resolved to a canonical SHA256,
-      // check if that SHA256 exists in (or can be derived from) the IOC list
-      // and merge, removing the lower-specificity hash. Case-insensitive.
+      // ---- Hash dedup: MD5/SHA1 → SHA256 consolidation ----
+      // If this MD5/SHA1 resolved to a canonical SHA256, merge it AND the
+      // sibling weak hash (e.g. enriching MD5 also removes SHA1 of the same file).
       if (results._canonicalSHA256 && ["MD5","SHA1"].includes(cat)) {
-        const canonical = results._canonicalSHA256; // already lowercased
+        const canonical = results._canonicalSHA256;
+        const otherCat = cat === "MD5" ? "SHA1" : "MD5";
+        const otherHash = cat === "MD5" ? results._siblingSHA1 : results._siblingMD5;
         setIocData((prev) => {
           if (!prev) return prev;
           const next = { ...prev };
-          // Check if canonical SHA256 already in list (case-insensitive)
           const sha256List = (prev.SHA256 || []).map(v => v.toLowerCase());
-          const alreadyHasSHA256 = sha256List.includes(canonical);
-          if (!alreadyHasSHA256) {
-            // Add the SHA256 if not present
+          if (!sha256List.includes(canonical)) {
             next.SHA256 = [...(prev.SHA256 || []), canonical];
           }
-          // Remove the MD5/SHA1 that resolved to this SHA256
+          // Remove the enriched hash
           if (next[cat]) {
             const removed = next[cat].filter(v => v.toLowerCase() === value.toLowerCase());
             next[cat] = next[cat].filter(v => v.toLowerCase() !== value.toLowerCase());
@@ -3167,24 +3211,59 @@ export default function App() {
             if (removed.length) {
               setMergedHashes(m => {
                 const entry = m[canonical] || { removed: [], sources: [] };
-                const alreadyRemoved = entry.removed.some(r => r.cat === cat && r.value.toLowerCase() === value.toLowerCase());
-                if (alreadyRemoved) return m;
-                return {
-                  ...m,
-                  [canonical]: {
-                    removed: [...entry.removed, { cat, value }],
-                    sources: [...new Set([...entry.sources, cat])],
-                  }
-                };
+                if (entry.removed.some(r => r.cat === cat && r.value.toLowerCase() === value.toLowerCase())) return m;
+                return { ...m, [canonical]: { removed: [...entry.removed, { cat, value }], sources: [...new Set([...entry.sources, cat])] } };
               });
-              // Blast animation: radial pulse on the IOC card being consolidated
-              // Fire blast immediately so user sees it, then let it complete before row disappears
               setBlastNodes(s => new Set([...s, value]));
               setTimeout(() => setBlastNodes(s => { const n = new Set(s); n.delete(value); return n; }), 950);
-              // Fire the guaranteed-visible toast
               fireDedupToast(cat, value, canonical);
             }
           }
+          // Also remove sibling weak hash (e.g. SHA1 when MD5 was enriched)
+          if (otherHash && next[otherCat]) {
+            const siblingFound = next[otherCat].some(v => v.toLowerCase() === otherHash);
+            if (siblingFound) {
+              next[otherCat] = next[otherCat].filter(v => v.toLowerCase() !== otherHash);
+              if (!next[otherCat].length) delete next[otherCat];
+              setMergedHashes(m => {
+                const entry = m[canonical] || { removed: [], sources: [] };
+                if (entry.removed.some(r => r.cat === otherCat && r.value.toLowerCase() === otherHash)) return m;
+                return { ...m, [canonical]: { removed: [...entry.removed, { cat: otherCat, value: otherHash }], sources: [...new Set([...entry.sources, otherCat])] } };
+              });
+              setBlastNodes(s => new Set([...s, otherHash]));
+              setTimeout(() => setBlastNodes(s => { const n = new Set(s); n.delete(otherHash); return n; }), 950);
+              fireDedupToast(otherCat, otherHash, canonical);
+            }
+          }
+          return next;
+        });
+        // Auto-trigger SHA256 enrichment after consolidation
+        setTimeout(() => enrichIOC("SHA256", canonical), 2000);
+      }
+
+      // ---- SHA256 enrichment: remove any MD5/SHA1 siblings still in the IOC list ----
+      // When SHA256 is enriched directly, enrichment engines return the file's
+      // MD5 and SHA1 — check if those exist as IOCs and consolidate them.
+      if (cat === "SHA256" && (results._siblingMD5 || results._siblingSHA1)) {
+        setIocData((prev) => {
+          if (!prev) return prev;
+          const next = { ...prev };
+          [["MD5", results._siblingMD5], ["SHA1", results._siblingSHA1]].forEach(([weakCat, weakHash]) => {
+            if (!weakHash || !next[weakCat]) return;
+            const found = next[weakCat].find(v => v.toLowerCase() === weakHash);
+            if (!found) return;
+            next[weakCat] = next[weakCat].filter(v => v.toLowerCase() !== weakHash);
+            if (!next[weakCat].length) delete next[weakCat];
+            setMergedHashes(m => {
+              const sha = value.toLowerCase();
+              const entry = m[sha] || { removed: [], sources: [] };
+              if (entry.removed.some(r => r.cat === weakCat && r.value.toLowerCase() === weakHash)) return m;
+              return { ...m, [sha]: { removed: [...entry.removed, { cat: weakCat, value: found }], sources: [...new Set([...entry.sources, weakCat])] } };
+            });
+            setBlastNodes(s => new Set([...s, found]));
+            setTimeout(() => setBlastNodes(s => { const n = new Set(s); n.delete(found); return n; }), 950);
+            fireDedupToast(weakCat, found, value);
+          });
           return next;
         });
       }
