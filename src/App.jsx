@@ -44,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v95";
+const APP_VERSION = "v96";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -2520,6 +2520,11 @@ export default function App() {
             const impHash = best.imphash || null;
             const ssdeepHash = best.ssdeep || null;
             const authentiHash = best.authentihash || null;
+            // submit_context — URLs the sample was originally downloaded from.
+            // Filter for real URL/domain strings; drop empty/non-URL entries.
+            const submitContext = Array.isArray(best.submit_context)
+              ? best.submit_context.filter(s => typeof s === "string" && s.trim() && /[.:\/]/.test(s)).slice(0, 8)
+              : [];
 
             results.hybridAnalysis = {
               verdict: haVerdict, threatScore, avDetect, family,
@@ -2529,6 +2534,7 @@ export default function App() {
               domains: domains.length ? domains : null,
               hosts: hosts.length ? hosts : null,
               compromised: compromised.length ? compromised : null,
+              submitContext: submitContext.length ? submitContext : null,
               fileName,
               fileType: typeShort.length ? typeShort.join("/") : fileType,
               fileSize, envDesc, analysisTime,
@@ -2564,6 +2570,9 @@ export default function App() {
               const domains = Array.isArray(best.domains) ? best.domains.filter(Boolean).slice(0, 10) : [];
               const hosts = Array.isArray(best.hosts) ? best.hosts.filter(Boolean).slice(0, 10) : [];
               const compromised = Array.isArray(best.compromised_hosts) ? best.compromised_hosts.filter(Boolean).slice(0, 5) : [];
+              const submitContext = Array.isArray(best.submit_context)
+                ? best.submit_context.filter(s => typeof s === "string" && s.trim() && /[.:\/]/.test(s)).slice(0, 8)
+                : [];
               const fileName = best.submit_name || null;
               const fileType = best.type || null;
               const typeShort = Array.isArray(best.type_short) ? best.type_short.filter(Boolean) : [];
@@ -2577,6 +2586,7 @@ export default function App() {
                 domains: domains.length ? domains : null,
                 hosts: hosts.length ? hosts : null,
                 compromised: compromised.length ? compromised : null,
+                submitContext: submitContext.length ? submitContext : null,
                 fileName,
                 fileType: typeShort.length ? typeShort.join("/") : fileType,
                 fileSize,
@@ -4123,6 +4133,7 @@ export default function App() {
       ha_tags:           e.hybridAnalysis?.tags || "",
       ha_mitre:          e.hybridAnalysis?.mitreAttacks?.join(", ") || "",
       ha_url:            e.hybridAnalysis?.reportUrl || "",
+      ha_downloaded:     e.hybridAnalysis?.submitContext?.join(" | ") || "",
       // Domain registration
       domain_age:        e.domainReg?.ageDays != null ? smartAge(e.domainReg.ageDays) : "",
       domain_registered: e.domainReg?.registered || "",
@@ -4158,7 +4169,7 @@ export default function App() {
     // Tri.age
     "Triage Score","Triage Family","Triage Tags","Triage C2","Triage URL",
     // Hybrid Analysis
-    "HA Verdict","HA Score","HA Family","HA AV","HA Tags","HA MITRE","HA URL",
+    "HA Verdict","HA Score","HA Family","HA AV","HA Tags","HA MITRE","HA URL","HA Downloaded From",
     // Domain
     "Domain Age","Domain Registered","Domain Status",
     // Timeline
@@ -4186,7 +4197,7 @@ export default function App() {
       "Triage Score": r.triage_score, "Triage Family": r.triage_family,
       "Triage Tags": r.triage_tags, "Triage C2": r.triage_c2, "Triage URL": r.triage_url,
       "HA Verdict": r.ha_verdict, "HA Score": r.ha_score, "HA Family": r.ha_family,
-      "HA AV": r.ha_av, "HA Tags": r.ha_tags, "HA MITRE": r.ha_mitre, "HA URL": r.ha_url,
+      "HA AV": r.ha_av, "HA Tags": r.ha_tags, "HA MITRE": r.ha_mitre, "HA URL": r.ha_url, "HA Downloaded From": r.ha_downloaded,
       "Domain Age": r.domain_age, "Domain Registered": r.domain_registered,
       "Domain Status": r.domain_status,
       "First Seen": r.first_seen, "Last Seen": r.last_seen,
@@ -5343,6 +5354,11 @@ export default function App() {
                                             📡 C2: {ha.compromised.join(", ")}
                                           </span>
                                         )}
+                                        {ha.submitContext && ha.submitContext.length > 0 && (
+                                          <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#ffb84d", backgroundColor: "rgba(255,184,77,0.08)", border: "1px solid rgba(255,184,77,0.3)" }}>
+                                            ⬇️ Downloaded from: {ha.submitContext.join(", ")}
+                                          </span>
+                                        )}
                                         {isHashHA && (ha.netConns > 0 || ha.totalProcs > 0 || ha.totalSigs > 0) && (
                                           <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.04)", border: "1px solid rgba(148,163,184,0.15)" }}>
                                             📊 {ha.totalProcs} processes · {ha.netConns} network · {ha.totalSigs} signatures
@@ -6109,6 +6125,64 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
               addEdge(val, raw, "c2", "rgba(255,77,109,0.6)");
             } catch { /* skip malformed */ }
           }
+        });
+
+        // Hybrid Analysis behavioral pivots — sandbox-observed infrastructure.
+        // submit_context is high-value: the URL the sample was downloaded from
+        // (creates the download-chain: URL → SHA256, and if the URL's IP is
+        // already an IOC, the shared-pivot logic auto-bridges IP → URL → SHA256).
+        // hosts / domains / compromised_hosts = contacted infra during detonation.
+        (d.hybridAnalysis?.submitContext || []).forEach((sc) => {
+          if (!sc || typeof sc !== "string") return;
+          try {
+            const u = new URL(sc.includes("://") ? sc : "http://" + sc);
+            const host = u.hostname;
+            // URL node (SHA256 → URL — the URL that dropped/served this sample)
+            addNode(sc, sc, "URL", true, "Malicious");
+            addEdge(val, sc, "downloaded_from", "rgba(255,77,109,0.55)");
+            // Auto-derive host node (URL → IP/DOMAIN) so it can bridge with other IOCs.
+            // Classify by whether hostname is IPv4 or a domain.
+            const isIP = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+            const hostCat = isIP ? "IPV4" : "DOMAIN";
+            if (norm(host) !== norm(sc)) {
+              addNode(host, host, hostCat, true, null);
+              addEdge(sc, host, "hosted_on", "rgba(0,229,255,0.4)");
+            }
+          } catch { /* skip malformed */ }
+        });
+        // HA contacted hosts (IPs the sample talked to during detonation)
+        (d.hybridAnalysis?.hosts || []).forEach((ip) => {
+          if (!ip || typeof ip !== "string") return;
+          if (norm(ip) === srcId) return;
+          const n = addNode(ip, ip, "IPV4", true, null);
+          if (n) n.contacted = true;
+          addEdge(val, ip, "contacted", "rgba(251,146,60,0.4)");
+        });
+        // HA contacted domains (domains resolved during detonation)
+        (d.hybridAnalysis?.domains || []).forEach((dom) => {
+          if (!dom || typeof dom !== "string") return;
+          if (norm(dom) === srcId) return;
+          const n = addNode(dom, dom, "DOMAIN", true, null);
+          if (n) n.contacted = true;
+          addEdge(val, dom, "contacted", "rgba(251,146,60,0.4)");
+        });
+        // HA compromised hosts — C2/attacker-controlled infra confirmed by HA
+        (d.hybridAnalysis?.compromised || []).forEach((host) => {
+          if (!host || typeof host !== "string") return;
+          if (norm(host) === srcId) return;
+          const isIP = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+          const hcat = isIP ? "IPV4" : "DOMAIN";
+          const n = addNode(host, host, hcat, true, "Malicious");
+          if (n) n.c2 = true;
+          addEdge(val, host, "c2", "rgba(255,77,109,0.6)");
+        });
+        // HA related SHA256s from imp_hash/ssdeep/authentihash/domain/ip pivots
+        // — samples that share code lineage or infrastructure with this IOC.
+        (d.hybridAnalysis?.relatedSHA256s || []).forEach((rh) => {
+          if (!rh || typeof rh !== "string") return;
+          if (norm(rh) === srcId) return;
+          addNode(rh, rh.slice(0, 12) + "…", "SHA256", true, null);
+          addEdge(val, rh, "related", "rgba(255,77,109,0.35)");
         });
       });
     });
