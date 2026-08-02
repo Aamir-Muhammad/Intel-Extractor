@@ -44,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v93";
+const APP_VERSION = "v94";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -2458,6 +2458,98 @@ export default function App() {
         } catch (e) { console.warn("Enrich Tri.age failed:", e.message); }
         setPartial();
       }
+      // Hybrid Analysis (Falcon Sandbox) — hash lookup with behavioral analysis.
+      // Returns: verdict, threat_score (0-100), AV detection rate, malware family,
+      // MITRE ATT&CK mappings, contacted domains/hosts, all sibling hashes.
+      // Rate limit: 200/min, 2000/hr — generous, no throttling needed.
+      if (["MD5","SHA1","SHA256","SHA512"].includes(cat)) {
+        try {
+          const hj = await callEnrich("hybrid_analysis", null, null, undefined, { ha_type: "hash" });
+          if (hj && !hj.error && Array.isArray(hj) && hj.length > 0) {
+            // Pick the analysis with the highest threat_score (most decisive result)
+            const best = hj
+              .filter(r => r && typeof r === "object" && r.verdict)
+              .sort((a, b) => (b.threat_score || 0) - (a.threat_score || 0))[0];
+            if (best) {
+              const haVerdict = best.verdict || null;
+              const threatScore = typeof best.threat_score === "number" ? best.threat_score : null;
+              const avDetect = best.av_detect != null ? String(best.av_detect) : null;
+              const family = best.vx_family || null;
+              const tags = Array.isArray(best.tags) ? best.tags.filter(Boolean).slice(0, 8) : [];
+              const classifTags = Array.isArray(best.classification_tags) ? best.classification_tags.filter(Boolean).slice(0, 5) : [];
+              const mitreAttacks = Array.isArray(best.mitre_attcks) ? best.mitre_attcks.map(m => m.technique || m.tactic || m).filter(Boolean).slice(0, 6) : [];
+              const domains = Array.isArray(best.domains) ? best.domains.filter(Boolean).slice(0, 10) : [];
+              const hosts = Array.isArray(best.hosts) ? best.hosts.filter(Boolean).slice(0, 10) : [];
+              const compromised = Array.isArray(best.compromised_hosts) ? best.compromised_hosts.filter(Boolean).slice(0, 5) : [];
+              const fileName = best.submit_name || null;
+              const fileType = best.type || null;
+              const typeShort = Array.isArray(best.type_short) ? best.type_short.filter(Boolean) : [];
+              const fileSize = best.size ? `${Math.round(best.size / 1024)}KB` : null;
+              const envDesc = best.environment_description || null;
+              const analysisTime = best.analysis_start_time ? best.analysis_start_time.split(" ")[0] : null;
+              const netConns = best.total_network_connections || 0;
+              const totalProcs = best.total_processes || 0;
+              const totalSigs = best.total_signatures || 0;
+
+              results.hybridAnalysis = {
+                verdict: haVerdict,
+                threatScore,
+                avDetect,
+                family,
+                tags: tags.length ? tags.join(", ") : null,
+                classifTags: classifTags.length ? classifTags.join(", ") : null,
+                mitreAttacks: mitreAttacks.length ? mitreAttacks : null,
+                domains: domains.length ? domains : null,
+                hosts: hosts.length ? hosts : null,
+                compromised: compromised.length ? compromised : null,
+                fileName,
+                fileType: typeShort.length ? typeShort.join("/") : fileType,
+                fileSize,
+                envDesc,
+                analysisTime,
+                netConns, totalProcs, totalSigs,
+                reportUrl: best.sha256 ? `https://www.hybrid-analysis.com/sample/${best.sha256}` : null,
+              };
+
+              // Sibling hashes for cross-type dedup
+              if (best.md5) results._siblingMD5 = results._siblingMD5 || String(best.md5).toLowerCase();
+              if (best.sha1) results._siblingSHA1 = results._siblingSHA1 || String(best.sha1).toLowerCase();
+              if (best.sha256) {
+                results._siblingSHA256 = results._siblingSHA256 || String(best.sha256).toLowerCase();
+                if (["MD5","SHA1"].includes(cat)) {
+                  results._canonicalSHA256 = results._canonicalSHA256 || String(best.sha256).toLowerCase();
+                }
+              }
+            }
+          }
+        } catch (e) { console.warn("Enrich Hybrid Analysis failed:", e.message); }
+        setPartial();
+      }
+      // Hybrid Analysis — domain/IP: sandbox submissions that contacted this host.
+      // Shows if any analyzed malware samples phoned home to this infrastructure.
+      if (["IPV4","IPV6","DOMAIN"].includes(cat)) {
+        try {
+          const haType = ["IPV4","IPV6"].includes(cat) ? "host" : "domain";
+          const hj = await callEnrich("hybrid_analysis", null, null, undefined, { ha_type: haType });
+          const haArr = Array.isArray(hj) ? hj : (hj && Array.isArray(hj.result) ? hj.result : []);
+          if (haArr.length > 0) {
+            const valid = haArr.filter(r => r && typeof r === "object");
+            const malCount = valid.filter(r => r.verdict === "malicious").length;
+            const suspCount = valid.filter(r => r.verdict === "suspicious").length;
+            const families = [...new Set(valid.map(r => r.vx_family).filter(Boolean))].slice(0, 4);
+            const bestScore = valid.reduce((m, r) => Math.max(m, r.threat_score || 0), 0);
+            results.hybridAnalysis = {
+              submissions: valid.length,
+              malicious: malCount,
+              suspicious: suspCount,
+              threatScore: bestScore > 0 ? bestScore : null,
+              families: families.length ? families.join(", ") : null,
+              verdict: malCount > 0 ? "malicious" : suspCount > 0 ? "suspicious" : "no specific threat",
+            };
+          }
+        } catch (e) { console.warn("Enrich Hybrid Analysis (domain/IP) failed:", e.message); }
+        setPartial();
+      }
       // AlienVault OTX — general (pulses, reputation, ASN, country, high-fidelity tags)
       if (["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE"].includes(cat)) {
         try {
@@ -3140,6 +3232,9 @@ export default function App() {
       // Tri.age score 10 = confirmed malicious; 5-9 = suspicious
       else if (results.triage?.score === 10) verdict = "Malicious";
       else if ((results.triage?.score || 0) >= 5) verdict = "Suspicious";
+      // Hybrid Analysis verdict — sandbox behavioral analysis with AV consensus
+      else if (results.hybridAnalysis?.verdict === "malicious" || (results.hybridAnalysis?.threatScore || 0) >= 70) verdict = "Malicious";
+      else if (results.hybridAnalysis?.verdict === "suspicious" || (results.hybridAnalysis?.threatScore || 0) >= 30) verdict = "Suspicious";
       // urlscan's own engine flagged the latest scan malicious.
       else if (results.urlscan?.overallMalicious) verdict = "Malicious";
       else if (results.urlhaus?.status === "offline") verdict = "Suspicious";
@@ -3177,7 +3272,7 @@ export default function App() {
       }
 
       // OTX-only with 0 pulses and no other signals → Unknown
-      const hasNonOtx = results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin || results.abuseipdb || results.urlscan || results.circl || results.kaspersky || results.triage;
+      const hasNonOtx = results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin || results.abuseipdb || results.urlscan || results.circl || results.kaspersky || results.triage || results.hybridAnalysis;
       if (!hasNonOtx && results.otx && results.otx.pulses === 0 && !results.otx.validation) verdict = "Unknown";
 
       // Final verdict normalization — catch any non-standard strings
@@ -3864,6 +3959,14 @@ export default function App() {
       triage_tags:       e.triage?.tags?.join(", ") || "",
       triage_c2:         e.triage?.c2Urls?.join(", ") || "",
       triage_url:        e.triage?.triageUrl || "",
+      // Hybrid Analysis
+      ha_verdict:        e.hybridAnalysis?.verdict || "",
+      ha_score:          e.hybridAnalysis?.threatScore != null ? `${e.hybridAnalysis.threatScore}/100` : "",
+      ha_family:         e.hybridAnalysis?.family || e.hybridAnalysis?.families || "",
+      ha_av:             e.hybridAnalysis?.avDetect ? `${e.hybridAnalysis.avDetect}%` : "",
+      ha_tags:           e.hybridAnalysis?.tags || "",
+      ha_mitre:          e.hybridAnalysis?.mitreAttacks?.join(", ") || "",
+      ha_url:            e.hybridAnalysis?.reportUrl || "",
       // Domain registration
       domain_age:        e.domainReg?.ageDays != null ? smartAge(e.domainReg.ageDays) : "",
       domain_registered: e.domainReg?.registered || "",
@@ -3898,6 +4001,8 @@ export default function App() {
     "CIRCL",
     // Tri.age
     "Triage Score","Triage Family","Triage Tags","Triage C2","Triage URL",
+    // Hybrid Analysis
+    "HA Verdict","HA Score","HA Family","HA AV","HA Tags","HA MITRE","HA URL",
     // Domain
     "Domain Age","Domain Registered","Domain Status",
     // Timeline
@@ -3924,6 +4029,8 @@ export default function App() {
       "Kaspersky": r.kaspersky, "CIRCL": r.circl,
       "Triage Score": r.triage_score, "Triage Family": r.triage_family,
       "Triage Tags": r.triage_tags, "Triage C2": r.triage_c2, "Triage URL": r.triage_url,
+      "HA Verdict": r.ha_verdict, "HA Score": r.ha_score, "HA Family": r.ha_family,
+      "HA AV": r.ha_av, "HA Tags": r.ha_tags, "HA MITRE": r.ha_mitre, "HA URL": r.ha_url,
       "Domain Age": r.domain_age, "Domain Registered": r.domain_registered,
       "Domain Status": r.domain_status,
       "First Seen": r.first_seen, "Last Seen": r.last_seen,
@@ -4997,6 +5104,58 @@ export default function App() {
                                         {d.triage.c2Urls?.length > 0 && (
                                           <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#ff8a9b", backgroundColor: "rgba(255,77,109,0.08)", border: "1px solid rgba(255,77,109,0.3)" }}>
                                             📡 C2: {d.triage.c2Urls.slice(0, 3).join(", ")}{d.triage.c2Urls.length > 3 ? ` +${d.triage.c2Urls.length - 3} more` : ""}
+                                          </span>
+                                        )}
+                                      </span>
+                                    );
+                                  })()}
+                                  {d.hybridAnalysis && (() => {
+                                    const ha = d.hybridAnalysis;
+                                    const isHashHA = ["MD5","SHA1","SHA256","SHA512"].includes(cat);
+                                    const score = ha.threatScore || 0;
+                                    const col = ha.verdict === "malicious" || score >= 70 ? "#ff4d6d" : ha.verdict === "suspicious" || score >= 30 ? "#fbbf24" : "#4ade80";
+                                    const bg = ha.verdict === "malicious" || score >= 70 ? "rgba(255,77,109,0.12)" : ha.verdict === "suspicious" || score >= 30 ? "rgba(251,191,36,0.10)" : "rgba(74,222,128,0.08)";
+                                    const bd = ha.verdict === "malicious" || score >= 70 ? "rgba(255,77,109,0.35)" : ha.verdict === "suspicious" || score >= 30 ? "rgba(251,191,36,0.35)" : "rgba(74,222,128,0.3)";
+                                    const icon = ha.verdict === "malicious" || score >= 70 ? "🔴" : ha.verdict === "suspicious" || score >= 30 ? "🟡" : "🟢";
+                                    return (
+                                      <span className="flex flex-col gap-0.5">
+                                        <span className="rounded-full px-2 py-0.5" style={{ color: col, backgroundColor: bg, border: `1px solid ${bd}` }}
+                                          title="Hybrid Analysis (Falcon Sandbox) — CrowdStrike behavioral sandbox">
+                                          {icon} Hybrid Analysis{isHashHA && score > 0 ? ` · Score ${score}/100` : ""}
+                                          {isHashHA ? ` · ${(ha.verdict || "unknown").charAt(0).toUpperCase() + (ha.verdict || "unknown").slice(1)}` : ` · ${ha.submissions} submission${ha.submissions !== 1 ? "s" : ""}`}
+                                          {ha.family ? ` · ${ha.family}` : (ha.families ? ` · ${ha.families}` : "")}
+                                          {ha.avDetect ? ` · AV ${ha.avDetect}%` : ""}
+                                          {ha.fileName ? ` · ${ha.fileName}` : ""}
+                                          {ha.fileType ? ` · ${ha.fileType}` : ""}
+                                          {ha.fileSize ? ` (${ha.fileSize})` : ""}
+                                          {isHashHA && ha.envDesc ? ` · ${ha.envDesc}` : ""}
+                                          {!isHashHA && ha.malicious > 0 ? ` · 🔴 ${ha.malicious} malicious` : ""}
+                                          {!isHashHA && ha.suspicious > 0 ? ` · 🟡 ${ha.suspicious} suspicious` : ""}
+                                          {ha.reportUrl ? <>{" · "}<a href={ha.reportUrl} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a></> : ""}
+                                        </span>
+                                        {ha.classifTags && (
+                                          <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
+                                            🏷️ {ha.classifTags}
+                                          </span>
+                                        )}
+                                        {ha.tags && (
+                                          <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
+                                            🔬 {ha.tags}
+                                          </span>
+                                        )}
+                                        {ha.mitreAttacks && ha.mitreAttacks.length > 0 && (
+                                          <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#f43f5e", backgroundColor: "rgba(244,63,94,0.08)", border: "1px solid rgba(244,63,94,0.25)" }}>
+                                            🎯 MITRE: {ha.mitreAttacks.join(", ")}
+                                          </span>
+                                        )}
+                                        {ha.compromised && ha.compromised.length > 0 && (
+                                          <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#ff8a9b", backgroundColor: "rgba(255,77,109,0.08)", border: "1px solid rgba(255,77,109,0.3)" }}>
+                                            📡 C2: {ha.compromised.join(", ")}
+                                          </span>
+                                        )}
+                                        {isHashHA && (ha.netConns > 0 || ha.totalProcs > 0 || ha.totalSigs > 0) && (
+                                          <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.04)", border: "1px solid rgba(148,163,184,0.15)" }}>
+                                            📊 {ha.totalProcs} processes · {ha.netConns} network · {ha.totalSigs} signatures
                                           </span>
                                         )}
                                       </span>
