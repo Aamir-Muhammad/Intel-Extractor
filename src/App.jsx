@@ -10,7 +10,7 @@ import * as XLSX from "xlsx";
 import {
   Shield, Search, Download, Copy, Check, Loader2, Globe,
   ClipboardPaste, AlertTriangle, ShieldOff, Trash2, Wand2,
-  Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles, ChevronDown, RefreshCw, FileUp, Pencil, Share2, Zap
+  Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles, ChevronDown, RefreshCw, FileUp, Pencil, Share2, Zap, FileBarChart
 } from "lucide-react";
 
 // ============================================================
@@ -44,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v96";
+const APP_VERSION = "v97";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -3585,6 +3585,15 @@ export default function App() {
   const [expiringTokens, setExpiringTokens] = useState([]);
   const [tokenBannerDismissed, setTokenBannerDismissed] = useState(false);
   const [cardCondensed, setCardCondensed] = useState({});        // { cat: true } per-card collapse
+  // ---- Report Builder state ----
+  const [reportOpen, setReportOpen] = useState(false);
+  const [reportTemplate, setReportTemplate] = useState("full"); // exec | technical | mitre | hunting | full
+  const [reportAnalyst, setReportAnalyst] = useState(() => localStorage.getItem("ie_analyst") || "");
+  const [reportOrg, setReportOrg] = useState(() => localStorage.getItem("ie_org") || "");
+  const [reportTLP, setReportTLP] = useState("AMBER"); // WHITE|GREEN|AMBER|RED
+  const [reportWatermark, setReportWatermark] = useState("");
+  const [reportRefNum, setReportRefNum] = useState("");
+  const reportPreviewRef = useRef(null);
   const [rowOverride, setRowOverride] = useState({});            // { "cat::value": bool } per-IOC override
   const [dragging, setDragging] = useState(null);               // { cat, value }
   const [dragOverCat, setDragOverCat] = useState(null);
@@ -4226,6 +4235,822 @@ export default function App() {
     });
     downloadBlob(buildWorkbook(sheets), "all_iocs.xlsx");
   };
+  // ============================================================
+  // Report Builder — HTML / Markdown / Print-to-PDF
+  // Templates: Executive, Technical IOC, MITRE ATT&CK, Hunting Playbook, Full
+  // ============================================================
+  const genReportId = () => {
+    const d = new Date();
+    const yy = String(d.getFullYear()).slice(-2);
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const rand = Math.floor(Math.random() * 9000 + 1000);
+    return `IE-${yy}${mm}${dd}-${rand}`;
+  };
+  const [reportId] = useState(() => genReportId());
+
+  // Aggregate report data from current on-screen state
+  const buildReportData = () => {
+    const rid = reportRefNum || reportId;
+    const generatedAt = new Date();
+    const verdictCounts = { Malicious: 0, Suspicious: 0, Whitelisted: 0, Unknown: 0 };
+    const typeCounts = {};
+    const allTechniques = new Set();
+    const allFamilies = new Set();
+    const c2Nodes = new Set();
+    const contactedHosts = new Set();
+    entries.forEach(([cat, arr]) => {
+      typeCounts[cat] = arr.length;
+      arr.forEach((v) => {
+        const d = enrichCache[`${cat}::${v}`]?.data;
+        if (!d) { verdictCounts.Unknown++; return; }
+        const vd = d._verdict || "Unknown";
+        if (verdictCounts[vd] != null) verdictCounts[vd]++;
+        else verdictCounts.Unknown++;
+        (d.hybridAnalysis?.mitreAttacks || []).forEach(t => allTechniques.add(t));
+        (d.triage?.tags || []).forEach(t => { if (t.startsWith("attack.")) allTechniques.add(t.replace("attack.", "").toUpperCase()); });
+        if (d.hybridAnalysis?.family) allFamilies.add(d.hybridAnalysis.family);
+        if (d.triage?.families) d.triage.families.forEach(f => allFamilies.add(f));
+        if (d.malwarebazaar?.signature) allFamilies.add(d.malwarebazaar.signature);
+        (d.hybridAnalysis?.compromised || []).forEach(h => c2Nodes.add(h));
+        (d.triage?.c2Urls || []).forEach(c => c2Nodes.add(c));
+        (d.hybridAnalysis?.hosts || []).forEach(h => contactedHosts.add(h));
+        (d.hybridAnalysis?.domains || []).forEach(h => contactedHosts.add(h));
+      });
+    });
+    return {
+      reportId: rid,
+      generatedAt,
+      analyst: reportAnalyst || "—",
+      org: reportOrg || "—",
+      tlp: reportTLP,
+      watermark: reportWatermark,
+      sourceUrl: sourceUrl || null,
+      articleHeadline: aiSummary?.headline || null,
+      execSummary: aiSummary?.executive_summary || null,
+      techSummary: aiSummary?.summary || null,
+      recommendations: aiSummary?.recommendations || [],
+      totalIOCs: total,
+      typeCounts,
+      verdictCounts,
+      techniques: [...allTechniques].sort(),
+      families: [...allFamilies].sort(),
+      c2Nodes: [...c2Nodes],
+      contactedHosts: [...contactedHosts],
+      entries,
+      enrichCache,
+      mergedHashes,
+    };
+  };
+
+  // MITRE ATT&CK tactic → technique mapping (subset — most common)
+  const MITRE_TACTICS = [
+    { id: "TA0001", name: "Initial Access", techniques: ["T1078","T1133","T1189","T1190","T1195","T1199","T1200","T1566"] },
+    { id: "TA0002", name: "Execution", techniques: ["T1053","T1059","T1072","T1106","T1129","T1203","T1204","T1559","T1569","T1610"] },
+    { id: "TA0003", name: "Persistence", techniques: ["T1053","T1078","T1098","T1136","T1176","T1197","T1505","T1543","T1546","T1547"] },
+    { id: "TA0004", name: "Privilege Escalation", techniques: ["T1053","T1055","T1068","T1078","T1134","T1484","T1543","T1546","T1547","T1548"] },
+    { id: "TA0005", name: "Defense Evasion", techniques: ["T1027","T1036","T1055","T1070","T1078","T1112","T1140","T1197","T1218","T1553","T1562"] },
+    { id: "TA0006", name: "Credential Access", techniques: ["T1003","T1040","T1056","T1110","T1187","T1212","T1552","T1555","T1556","T1558"] },
+    { id: "TA0007", name: "Discovery", techniques: ["T1007","T1010","T1012","T1016","T1018","T1033","T1046","T1049","T1057","T1082","T1083","T1087"] },
+    { id: "TA0008", name: "Lateral Movement", techniques: ["T1021","T1091","T1210","T1534","T1550","T1563","T1570"] },
+    { id: "TA0009", name: "Collection", techniques: ["T1005","T1039","T1056","T1074","T1113","T1114","T1115","T1119","T1213","T1560"] },
+    { id: "TA0011", name: "Command and Control", techniques: ["T1071","T1090","T1092","T1095","T1102","T1104","T1105","T1132","T1568","T1571","T1572","T1573"] },
+    { id: "TA0010", name: "Exfiltration", techniques: ["T1011","T1020","T1029","T1030","T1041","T1048","T1052","T1567"] },
+    { id: "TA0040", name: "Impact", techniques: ["T1485","T1486","T1489","T1490","T1491","T1495","T1496","T1498","T1499","T1529","T1561"] },
+  ];
+
+  const inlineLogoSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2 L3 5 L3 11 C3 16.5 6.5 20.7 12 22 C17.5 20.7 21 16.5 21 11 L21 5 Z" stroke="#00e5ff" stroke-width="1.5" fill="rgba(0,229,255,0.08)"/><path d="M9 12 L11 14 L15 10" stroke="#00ff9c" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+  const escapeHtml = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  // Generate the full HTML report (styled, printable)
+  const generateReportHTML = (template) => {
+    const data = buildReportData();
+    const tlpColors = { WHITE: "#ffffff", GREEN: "#00ff9c", AMBER: "#ffb84d", RED: "#ff4d6d" };
+    const tlpBgs = { WHITE: "rgba(255,255,255,0.1)", GREEN: "rgba(0,255,156,0.1)", AMBER: "rgba(255,184,77,0.1)", RED: "rgba(255,77,109,0.12)" };
+    const tlpColor = tlpColors[data.tlp] || "#ffb84d";
+    const tlpBg = tlpBgs[data.tlp] || "rgba(255,184,77,0.1)";
+    const dateStr = data.generatedAt.toLocaleString("en-US", { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+
+    // --- Cover Page ---
+    const coverPage = `
+      <section class="page cover">
+        <div class="tlp-ribbon" style="background:${tlpBg};border-color:${tlpColor};color:${tlpColor};">TLP:${data.tlp}</div>
+        <div class="cover-content">
+          <div class="cover-badge">
+            <span class="cover-badge-icon">${inlineLogoSVG}</span>
+            <span class="cover-badge-label">INTEL EXTRACTOR</span>
+          </div>
+          <h1 class="cover-title">Threat Intelligence<br/>Report</h1>
+          <div class="cover-subtitle">${escapeHtml(data.articleHeadline || "Enrichment Analysis")}</div>
+          <div class="cover-stats">
+            <div class="cover-stat"><div class="stat-num" style="color:#00ff9c;">${data.totalIOCs}</div><div class="stat-label">INDICATORS</div></div>
+            <div class="cover-stat"><div class="stat-num" style="color:#00e5ff;">${data.entries.length}</div><div class="stat-label">TYPES</div></div>
+            <div class="cover-stat"><div class="stat-num" style="color:#ff4d6d;">${data.verdictCounts.Malicious}</div><div class="stat-label">MALICIOUS</div></div>
+            <div class="cover-stat"><div class="stat-num" style="color:#fbbf24;">${data.verdictCounts.Suspicious}</div><div class="stat-label">SUSPICIOUS</div></div>
+          </div>
+          <div class="cover-meta">
+            <div class="meta-row"><span class="meta-label">Report ID</span><span class="meta-val">${escapeHtml(data.reportId)}</span></div>
+            <div class="meta-row"><span class="meta-label">Prepared By</span><span class="meta-val">${escapeHtml(data.analyst)}</span></div>
+            <div class="meta-row"><span class="meta-label">Organization</span><span class="meta-val">${escapeHtml(data.org)}</span></div>
+            <div class="meta-row"><span class="meta-label">Generated</span><span class="meta-val">${dateStr}</span></div>
+            ${data.sourceUrl ? `<div class="meta-row"><span class="meta-label">Source</span><span class="meta-val meta-source">${escapeHtml(data.sourceUrl)}</span></div>` : ""}
+          </div>
+        </div>
+        <div class="cover-footer">
+          <span>Generated with Intel Extractor · ${APP_VERSION}</span>
+          <span>aamir-muhammad.github.io/Intel-Extractor</span>
+        </div>
+      </section>
+    `;
+
+    // --- Executive Summary ---
+    const executiveSection = `
+      <section class="page">
+        <div class="section-header">
+          <div class="section-title">Executive Summary</div>
+          <div class="section-badge">FOR LEADERSHIP</div>
+        </div>
+        ${data.articleHeadline ? `<div class="callout callout-primary"><div class="callout-label">THREAT HEADLINE</div><div class="callout-body">${escapeHtml(data.articleHeadline)}</div></div>` : ""}
+        ${data.execSummary ? `<div class="prose"><h3>Business Impact</h3><p>${escapeHtml(data.execSummary)}</p></div>` : ""}
+        <div class="verdict-grid">
+          <div class="verdict-card verdict-mal">
+            <div class="verdict-num">${data.verdictCounts.Malicious}</div>
+            <div class="verdict-label">MALICIOUS</div>
+            <div class="verdict-desc">Confirmed threats requiring immediate blocking</div>
+          </div>
+          <div class="verdict-card verdict-susp">
+            <div class="verdict-num">${data.verdictCounts.Suspicious}</div>
+            <div class="verdict-label">SUSPICIOUS</div>
+            <div class="verdict-desc">Requires investigation and monitoring</div>
+          </div>
+          <div class="verdict-card verdict-clean">
+            <div class="verdict-num">${data.verdictCounts.Whitelisted}</div>
+            <div class="verdict-label">CLEAN</div>
+            <div class="verdict-desc">Verified benign, false positive candidates</div>
+          </div>
+          <div class="verdict-card verdict-unk">
+            <div class="verdict-num">${data.verdictCounts.Unknown}</div>
+            <div class="verdict-label">UNKNOWN</div>
+            <div class="verdict-desc">Insufficient telemetry, additional research advised</div>
+          </div>
+        </div>
+        ${data.families.length ? `<div class="prose"><h3>Malware Families Identified</h3><div class="chip-row">${data.families.slice(0, 12).map(f => `<span class="chip chip-mal">${escapeHtml(f)}</span>`).join("")}</div></div>` : ""}
+        ${data.recommendations.length ? `<div class="prose"><h3>Priority Actions</h3><ol class="action-list">${data.recommendations.slice(0, 3).map(r => `<li>${escapeHtml(r)}</li>`).join("")}</ol></div>` : ""}
+        <div class="prose"><h3>Bottom Line</h3><p>${data.verdictCounts.Malicious > 0 ? `<strong>Action required.</strong> This analysis identified ${data.verdictCounts.Malicious} confirmed malicious indicator${data.verdictCounts.Malicious !== 1 ? "s" : ""}. Recommend immediate deployment to blocklists, review of endpoint telemetry for the past 30 days, and threat hunting using the queries in the Hunting Playbook.` : data.verdictCounts.Suspicious > 0 ? `<strong>Investigation recommended.</strong> ${data.verdictCounts.Suspicious} suspicious indicator${data.verdictCounts.Suspicious !== 1 ? "s were" : " was"} identified. Deploy to watchlists and correlate with endpoint activity.` : `No confirmed threats identified in this dataset. Standard hygiene applies.`}</p></div>
+      </section>
+    `;
+
+    // --- Technical IOC Report ---
+    const iocTables = data.entries.map(([cat, arr]) => {
+      const rows = arr.map(v => {
+        const d = enrichCache[`${cat}::${v}`]?.data;
+        const verdict = d?._verdict || "Unknown";
+        const vClass = verdict === "Malicious" ? "vmal" : verdict === "Suspicious" ? "vsusp" : verdict === "Whitelisted" ? "vclean" : "vunk";
+        const source = [
+          d?.virustotal?.malicious ? `VT ${d.virustotal.malicious}/${d.virustotal.total}` : null,
+          d?.kaspersky?.zone ? `KSN:${d.kaspersky.zone}` : null,
+          d?.abuseipdb?.abuseScore != null ? `AIPDB ${d.abuseipdb.abuseScore}%` : null,
+          d?.threatfox?.malwareName || null,
+          d?.urlhaus?.threat || null,
+          d?.malwarebazaar?.signature || null,
+          d?.otx?.pulseCount ? `OTX ${d.otx.pulseCount}` : null,
+          d?.hybridAnalysis?.family || null,
+          d?.triage?.families?.[0] || null,
+        ].filter(Boolean).slice(0, 3).join(" · ") || "—";
+        return `<tr>
+          <td class="ioc-val">${escapeHtml(v)}</td>
+          <td><span class="verdict-pill ${vClass}">${verdict}</span></td>
+          <td class="sources">${escapeHtml(source)}</td>
+        </tr>`;
+      }).join("");
+      return `
+        <div class="ioc-block">
+          <div class="ioc-block-header">
+            <span class="type-chip" style="color:${colorFor(cat)};background:${colorFor(cat)}18;border-color:${colorFor(cat)}55;">${cat}</span>
+            <span class="type-count">${arr.length}</span>
+          </div>
+          <table class="ioc-table">
+            <thead><tr><th>Indicator</th><th>Verdict</th><th>Enrichment</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      `;
+    }).join("");
+
+    const technicalSection = `
+      <section class="page">
+        <div class="section-header">
+          <div class="section-title">Technical IOC Report</div>
+          <div class="section-badge">FOR SOC</div>
+        </div>
+        ${data.techSummary ? `<div class="prose"><h3>Technical Summary</h3><p>${escapeHtml(data.techSummary)}</p></div>` : ""}
+        <div class="prose"><h3>Indicators of Compromise (${data.totalIOCs})</h3></div>
+        ${iocTables}
+      </section>
+    `;
+
+    // --- MITRE ATT&CK Mapping ---
+    const observed = new Set(data.techniques.map(t => t.split(".")[0]));
+    const mitreGrid = MITRE_TACTICS.map(tac => {
+      const cells = tac.techniques.map(tid => {
+        const obs = observed.has(tid);
+        return `<div class="mitre-cell ${obs ? "mitre-obs" : ""}" title="${tid}${obs ? " — observed" : ""}">${tid}</div>`;
+      }).join("");
+      return `
+        <div class="mitre-col">
+          <div class="mitre-col-header">${tac.name}<br/><span class="mitre-tid">${tac.id}</span></div>
+          ${cells}
+        </div>
+      `;
+    }).join("");
+
+    const observedList = data.techniques.length ? data.techniques.map(t => `
+      <div class="tech-row">
+        <span class="tech-id">${escapeHtml(t)}</span>
+        <span class="tech-tactic">${MITRE_TACTICS.find(tc => tc.techniques.includes(t.split(".")[0]))?.name || "—"}</span>
+      </div>
+    `).join("") : `<div class="empty-state">No MITRE ATT&CK techniques identified from enrichment data.</div>`;
+
+    const mitreSection = `
+      <section class="page">
+        <div class="section-header">
+          <div class="section-title">MITRE ATT&amp;CK Mapping</div>
+          <div class="section-badge">FOR THREAT ANALYSTS</div>
+        </div>
+        <div class="prose"><p>Techniques observed across all enriched indicators. Highlighted cells indicate techniques attributed to this campaign by enrichment sources (Hybrid Analysis, Tri.age behavioral analysis).</p></div>
+        <div class="mitre-heatmap">${mitreGrid}</div>
+        <div class="mitre-legend">
+          <span class="legend-item"><span class="legend-swatch legend-obs"></span> Observed technique</span>
+          <span class="legend-item"><span class="legend-swatch legend-none"></span> Not observed in this dataset</span>
+        </div>
+        <div class="prose"><h3>Observed Techniques (${data.techniques.length})</h3></div>
+        <div class="tech-list">${observedList}</div>
+      </section>
+    `;
+
+    // --- Hunting Playbook ---
+    const huntBlocks = data.entries.filter(([cat]) => ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","FILE_NAME","FILE_PATH","EMAIL","CVE"].includes(cat)).map(([cat, arr]) => {
+      const kql = huntKQL(cat, arr);
+      const spl = huntSPL(cat, arr);
+      const aql = huntAQL(cat, arr);
+      if (!kql && !spl && !aql) return "";
+      return `
+        <div class="hunt-block">
+          <div class="hunt-block-header">
+            <span class="type-chip" style="color:${colorFor(cat)};background:${colorFor(cat)}18;border-color:${colorFor(cat)}55;">${cat}</span>
+            <span class="hunt-count">${arr.length} IOC${arr.length !== 1 ? "s" : ""}</span>
+          </div>
+          ${kql ? `<div class="hunt-query"><div class="hunt-lang">Microsoft Sentinel · Defender XDR (KQL)</div><pre>${escapeHtml(kql)}</pre></div>` : ""}
+          ${spl ? `<div class="hunt-query"><div class="hunt-lang">Splunk (SPL)</div><pre>${escapeHtml(spl)}</pre></div>` : ""}
+          ${aql ? `<div class="hunt-query"><div class="hunt-lang">IBM QRadar (AQL)</div><pre>${escapeHtml(aql)}</pre></div>` : ""}
+        </div>
+      `;
+    }).filter(Boolean).join("");
+
+    const huntingSection = `
+      <section class="page">
+        <div class="section-header">
+          <div class="section-title">Hunting Playbook</div>
+          <div class="section-badge">FOR THREAT HUNTERS</div>
+        </div>
+        <div class="prose"><p>Copy-paste hunt queries for the leading SIEM and EDR platforms. Recommended lookback: 30 days for infrastructure IOCs, 7 days for host-based artifacts.</p></div>
+        ${huntBlocks || `<div class="empty-state">No huntable IOCs in this dataset.</div>`}
+        ${data.c2Nodes.length ? `
+          <div class="prose"><h3>Command &amp; Control Infrastructure</h3><p>Confirmed C2 endpoints identified by behavioral analysis. Prioritize network blocking and hunt for outbound connections to these hosts.</p></div>
+          <div class="chip-row">${data.c2Nodes.slice(0, 20).map(c => `<span class="chip chip-mal">${escapeHtml(c)}</span>`).join("")}</div>
+        ` : ""}
+      </section>
+    `;
+
+    // --- Consolidation & Appendix ---
+    const consolSection = Object.keys(data.mergedHashes).length ? `
+      <section class="page">
+        <div class="section-header">
+          <div class="section-title">Hash Consolidation</div>
+          <div class="section-badge">APPENDIX</div>
+        </div>
+        <div class="prose"><p>${Object.values(data.mergedHashes).reduce((s, m) => s + m.removed.length, 0)} weak hashes (MD5/SHA1) were consolidated into their canonical SHA256 identifiers during analysis.</p></div>
+        ${Object.entries(data.mergedHashes).map(([sha256, m]) => `
+          <div class="consol-block">
+            <div class="consol-target"><span class="consol-label">SHA256</span><span class="consol-val">${escapeHtml(sha256)}</span></div>
+            ${m.removed.map(r => `<div class="consol-source"><span class="consol-label">${r.cat}</span><span class="consol-val">${escapeHtml(r.value)}</span><span class="consol-tag ${r.manual ? "consol-manual" : "consol-auto"}">${r.manual ? "Manually converted" : "Auto-deduplicated"}</span></div>`).join("")}
+          </div>
+        `).join("")}
+      </section>
+    ` : "";
+
+    // Choose template
+    let sections = "";
+    if (template === "exec") sections = executiveSection;
+    else if (template === "technical") sections = technicalSection;
+    else if (template === "mitre") sections = mitreSection;
+    else if (template === "hunting") sections = huntingSection;
+    else sections = coverPage + executiveSection + technicalSection + mitreSection + huntingSection + consolSection;
+
+    // The full styled HTML doc
+    return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Intel Extractor Report · ${escapeHtml(data.reportId)}</title>
+<style>
+  :root {
+    --bg: #05070a;
+    --bg-page: #080b12;
+    --panel: rgba(10,14,20,0.72);
+    --line: rgba(120,160,180,0.16);
+    --txt: #e6f0f3;
+    --txt-strong: #eafcff;
+    --txt-muted: #7f95a3;
+    --txt-dim: #5d7382;
+    --cyan: #00e5ff;
+    --green: #00ff9c;
+    --purple: #c084fc;
+    --mal: #ff4d6d;
+    --susp: #fbbf24;
+    --clean: #00ff9c;
+    --unk: #8aa0ad;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--txt); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; line-height: 1.55; }
+  body { max-width: 900px; margin: 0 auto; padding: 24px; }
+  .page {
+    background: var(--bg-page);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 40px 44px;
+    margin-bottom: 22px;
+    position: relative;
+    overflow: hidden;
+  }
+  .page::before {
+    content: "";
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(600px 300px at 90% -5%, rgba(0,229,255,0.08), transparent 60%),
+      linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
+    background-size: auto, 36px 36px, 36px 36px;
+    pointer-events: none;
+  }
+  .page > * { position: relative; z-index: 1; }
+  ${data.watermark ? `.page::after { content: "${escapeHtml(data.watermark)}"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 90px; font-weight: 900; color: rgba(255,77,109,0.06); letter-spacing: 8px; pointer-events: none; z-index: 0; transform: rotate(-30deg); white-space: nowrap; }` : ""}
+
+  /* TLP Ribbon */
+  .tlp-ribbon {
+    position: absolute; top: 0; right: 0;
+    padding: 6px 16px;
+    font-size: 10px; font-weight: 900; letter-spacing: 3px;
+    border-left: 1px solid; border-bottom: 1px solid;
+    border-bottom-left-radius: 10px;
+    z-index: 2;
+  }
+
+  /* Cover Page */
+  .cover { min-height: 800px; display: flex; flex-direction: column; }
+  .cover-content { flex: 1; display: flex; flex-direction: column; justify-content: center; }
+  .cover-badge {
+    display: inline-flex; align-items: center; gap: 10px;
+    padding: 8px 14px;
+    background: rgba(0,229,255,0.08); border: 1px solid rgba(0,229,255,0.35);
+    border-radius: 10px;
+    font-size: 11px; font-weight: 700; letter-spacing: 3px;
+    color: var(--cyan);
+    width: fit-content;
+    margin-bottom: 32px;
+    box-shadow: 0 0 22px rgba(0,229,255,0.15);
+  }
+  .cover-badge-icon { display: inline-flex; }
+  .cover-title {
+    font-size: 56px; font-weight: 800; letter-spacing: -1.5px; line-height: 1.05;
+    color: var(--txt-strong);
+    text-shadow: 0 0 40px rgba(0,229,255,0.25);
+    margin: 0 0 20px;
+  }
+  .cover-subtitle {
+    font-size: 15px; font-weight: 500; color: var(--txt-muted);
+    padding-left: 4px;
+    border-left: 3px solid var(--cyan);
+    padding-left: 14px;
+    margin-bottom: 40px;
+    line-height: 1.5;
+  }
+  .cover-stats {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;
+    margin-bottom: 40px;
+  }
+  .cover-stat {
+    background: rgba(10,14,20,0.5);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 20px 16px;
+    text-align: center;
+  }
+  .stat-num { font-size: 40px; font-weight: 800; letter-spacing: -1px; line-height: 1; }
+  .stat-label { font-size: 9px; font-weight: 700; letter-spacing: 2px; color: var(--txt-dim); margin-top: 8px; }
+  .cover-meta {
+    background: rgba(10,14,20,0.4);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 18px 20px;
+  }
+  .meta-row { display: flex; padding: 6px 0; border-bottom: 1px dashed rgba(120,160,180,0.1); font-size: 11px; }
+  .meta-row:last-child { border-bottom: none; }
+  .meta-label { width: 130px; color: var(--txt-dim); font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; }
+  .meta-val { color: var(--txt); flex: 1; word-break: break-all; }
+  .meta-source { color: var(--cyan); }
+  .cover-footer {
+    display: flex; justify-content: space-between; align-items: center;
+    padding-top: 24px; margin-top: 30px;
+    border-top: 1px solid var(--line);
+    font-size: 10px; color: var(--txt-dim); letter-spacing: 1px;
+  }
+
+  /* Section header */
+  .section-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding-bottom: 14px; margin-bottom: 24px;
+    border-bottom: 2px solid rgba(0,229,255,0.2);
+    position: relative;
+  }
+  .section-header::before {
+    content: ""; position: absolute; bottom: -2px; left: 0; width: 60px; height: 2px;
+    background: linear-gradient(90deg, var(--cyan), transparent);
+    box-shadow: 0 0 12px var(--cyan);
+  }
+  .section-title { font-size: 22px; font-weight: 800; color: var(--txt-strong); letter-spacing: -0.5px; }
+  .section-badge {
+    padding: 5px 12px;
+    background: rgba(192,132,252,0.1); border: 1px solid rgba(192,132,252,0.35);
+    border-radius: 20px;
+    font-size: 9px; font-weight: 800; letter-spacing: 2px;
+    color: var(--purple);
+  }
+
+  /* Prose */
+  .prose { margin-bottom: 20px; }
+  .prose h3 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 2px;
+    color: var(--cyan); font-weight: 800;
+    margin: 22px 0 12px;
+    padding-left: 10px; border-left: 3px solid var(--cyan);
+  }
+  .prose p { font-size: 12px; line-height: 1.65; color: var(--txt); margin: 0 0 12px; }
+  .prose strong { color: var(--txt-strong); font-weight: 700; }
+
+  /* Callouts */
+  .callout {
+    padding: 16px 20px; margin-bottom: 20px;
+    border-radius: 10px;
+    background: rgba(0,229,255,0.05);
+    border: 1px solid rgba(0,229,255,0.25);
+    border-left: 4px solid var(--cyan);
+  }
+  .callout-label { font-size: 9px; font-weight: 800; letter-spacing: 2px; color: var(--cyan); margin-bottom: 6px; }
+  .callout-body { font-size: 15px; font-weight: 700; color: var(--txt-strong); line-height: 1.4; }
+
+  /* Verdict cards */
+  .verdict-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 20px 0; }
+  .verdict-card {
+    padding: 18px 14px;
+    background: rgba(10,14,20,0.5);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+  .verdict-num { font-size: 32px; font-weight: 800; letter-spacing: -1px; line-height: 1; }
+  .verdict-label { font-size: 9px; font-weight: 800; letter-spacing: 2px; margin-top: 6px; }
+  .verdict-desc { font-size: 10px; color: var(--txt-dim); margin-top: 8px; line-height: 1.4; }
+  .verdict-mal { border-color: rgba(255,77,109,0.4); }
+  .verdict-mal .verdict-num { color: var(--mal); }
+  .verdict-mal .verdict-label { color: var(--mal); }
+  .verdict-susp { border-color: rgba(251,191,36,0.4); }
+  .verdict-susp .verdict-num { color: var(--susp); }
+  .verdict-susp .verdict-label { color: var(--susp); }
+  .verdict-clean { border-color: rgba(0,255,156,0.4); }
+  .verdict-clean .verdict-num { color: var(--clean); }
+  .verdict-clean .verdict-label { color: var(--clean); }
+  .verdict-unk { border-color: rgba(120,160,180,0.25); }
+  .verdict-unk .verdict-num { color: var(--unk); }
+  .verdict-unk .verdict-label { color: var(--unk); }
+
+  /* Chips */
+  .chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip {
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 10px; font-weight: 600;
+    border: 1px solid;
+  }
+  .chip-mal { color: var(--mal); background: rgba(255,77,109,0.08); border-color: rgba(255,77,109,0.3); }
+
+  /* Action list */
+  .action-list { padding-left: 18px; margin: 0; }
+  .action-list li { font-size: 12px; line-height: 1.65; color: var(--txt); margin-bottom: 8px; }
+  .action-list li::marker { color: var(--cyan); font-weight: 800; }
+
+  /* IOC tables */
+  .ioc-block { margin-bottom: 24px; }
+  .ioc-block-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .type-chip {
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 10px; font-weight: 800; letter-spacing: 1.5px;
+    border: 1px solid;
+  }
+  .type-count {
+    font-size: 11px; font-weight: 700; color: var(--txt-muted);
+    padding: 3px 10px;
+    background: rgba(255,255,255,0.04);
+    border-radius: 20px;
+  }
+  .ioc-table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+  .ioc-table th {
+    text-align: left;
+    padding: 8px 10px;
+    font-size: 9px; font-weight: 800; letter-spacing: 1.5px; color: var(--txt-dim);
+    border-bottom: 1px solid var(--line);
+    text-transform: uppercase;
+  }
+  .ioc-table td {
+    padding: 7px 10px;
+    font-size: 11px;
+    border-bottom: 1px solid rgba(120,160,180,0.06);
+    vertical-align: middle;
+  }
+  .ioc-val { color: var(--cyan); word-break: break-all; font-weight: 500; }
+  .sources { color: var(--txt-muted); font-size: 10px; }
+  .verdict-pill {
+    padding: 2px 8px; border-radius: 12px; font-size: 9px; font-weight: 800;
+    letter-spacing: 1px;
+    border: 1px solid;
+    white-space: nowrap;
+  }
+  .vmal { color: var(--mal); background: rgba(255,77,109,0.1); border-color: rgba(255,77,109,0.35); }
+  .vsusp { color: var(--susp); background: rgba(251,191,36,0.1); border-color: rgba(251,191,36,0.35); }
+  .vclean { color: var(--clean); background: rgba(0,255,156,0.1); border-color: rgba(0,255,156,0.35); }
+  .vunk { color: var(--unk); background: rgba(120,160,180,0.08); border-color: rgba(120,160,180,0.25); }
+
+  /* MITRE Heatmap */
+  .mitre-heatmap {
+    display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px;
+    margin: 20px 0;
+  }
+  .mitre-col {
+    background: rgba(10,14,20,0.4);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 6px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .mitre-col-header {
+    font-size: 9px; font-weight: 800; letter-spacing: 1px;
+    color: var(--txt-strong);
+    padding-bottom: 8px; margin-bottom: 4px;
+    border-bottom: 1px solid var(--line);
+    text-align: center;
+    line-height: 1.3;
+  }
+  .mitre-tid { font-size: 8px; color: var(--txt-dim); font-weight: 500; letter-spacing: 0.5px; }
+  .mitre-cell {
+    padding: 5px 4px;
+    border-radius: 4px;
+    font-size: 8.5px;
+    text-align: center;
+    background: rgba(10,14,20,0.4);
+    color: var(--txt-dim);
+    border: 1px solid rgba(120,160,180,0.1);
+    font-weight: 600;
+  }
+  .mitre-obs {
+    background: rgba(0,229,255,0.15);
+    color: var(--cyan);
+    border-color: var(--cyan);
+    box-shadow: 0 0 8px rgba(0,229,255,0.3);
+    font-weight: 800;
+  }
+  .mitre-legend {
+    display: flex; gap: 20px; margin: 12px 0 24px;
+    font-size: 10px; color: var(--txt-muted);
+  }
+  .legend-item { display: flex; align-items: center; gap: 8px; }
+  .legend-swatch { width: 16px; height: 16px; border-radius: 3px; border: 1px solid; }
+  .legend-obs { background: rgba(0,229,255,0.15); border-color: var(--cyan); box-shadow: 0 0 6px rgba(0,229,255,0.3); }
+  .legend-none { background: rgba(10,14,20,0.4); border-color: rgba(120,160,180,0.1); }
+
+  .tech-list { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+  .tech-row {
+    display: flex; align-items: center; gap: 14px;
+    padding: 8px 12px;
+    background: rgba(10,14,20,0.4);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+  }
+  .tech-id { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--cyan); font-weight: 700; min-width: 100px; }
+  .tech-tactic { font-size: 10px; color: var(--txt-muted); text-transform: uppercase; letter-spacing: 1px; }
+
+  /* Hunting Playbook */
+  .hunt-block {
+    margin-bottom: 22px;
+    padding: 14px;
+    background: rgba(10,14,20,0.4);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+  .hunt-block-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .hunt-count { font-size: 10px; color: var(--txt-muted); }
+  .hunt-query { margin-top: 10px; }
+  .hunt-lang {
+    font-size: 9px; font-weight: 800; letter-spacing: 2px; color: var(--purple);
+    margin-bottom: 4px;
+    text-transform: uppercase;
+  }
+  .hunt-query pre {
+    background: rgba(0,0,0,0.55);
+    border: 1px solid rgba(0,229,255,0.15);
+    border-left: 3px solid var(--cyan);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin: 0;
+    font-size: 10.5px; line-height: 1.55;
+    color: #b8e5ee;
+    white-space: pre-wrap; word-break: break-word;
+    overflow-x: auto;
+  }
+
+  /* Consolidation */
+  .consol-block {
+    padding: 12px 14px; margin-bottom: 10px;
+    background: rgba(124,156,255,0.05);
+    border: 1px solid rgba(124,156,255,0.2);
+    border-radius: 8px;
+  }
+  .consol-target { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .consol-source { display: flex; align-items: center; gap: 10px; margin-left: 20px; padding: 3px 0; }
+  .consol-label { font-size: 9px; font-weight: 800; letter-spacing: 1.5px; color: var(--txt-dim); min-width: 60px; }
+  .consol-val { font-family: ui-monospace, Menlo, monospace; font-size: 10px; color: #c084fc; flex: 1; word-break: break-all; }
+  .consol-target .consol-val { color: #7c9cff; font-weight: 600; }
+  .consol-tag { font-size: 8.5px; font-weight: 700; padding: 2px 8px; border-radius: 10px; border: 1px solid; }
+  .consol-auto { color: #7c9cff; background: rgba(124,156,255,0.1); border-color: rgba(124,156,255,0.25); }
+  .consol-manual { color: var(--mal); background: rgba(255,77,109,0.1); border-color: rgba(255,77,109,0.3); }
+
+  .empty-state {
+    padding: 24px;
+    background: rgba(10,14,20,0.3);
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+    text-align: center;
+    color: var(--txt-dim);
+    font-size: 11px;
+  }
+
+  /* Print styles */
+  @media print {
+    :root {
+      --bg: #ffffff;
+      --bg-page: #ffffff;
+      --panel: #ffffff;
+      --line: #d0d7de;
+      --txt: #1a1f26;
+      --txt-strong: #05070a;
+      --txt-muted: #57636f;
+      --txt-dim: #7a8794;
+      --cyan: #0088a8;
+      --green: #008040;
+      --purple: #7c3aed;
+    }
+    html, body { background: #ffffff; color: var(--txt); }
+    body { padding: 0; max-width: none; }
+    .page {
+      background: #ffffff; border: none; border-radius: 0;
+      padding: 24px 32px; margin-bottom: 0;
+      page-break-after: always;
+    }
+    .page:last-child { page-break-after: auto; }
+    .page::before { display: none; }
+    .page::after { color: rgba(255,77,109,0.08) !important; }
+    .cover { min-height: auto; }
+    .cover-title { color: #05070a; text-shadow: none; font-size: 42px; }
+    .cover-stat, .cover-meta { background: #f6f8fa; }
+    .stat-label { color: #57636f; }
+    .hunt-query pre {
+      background: #f6f8fa;
+      color: #1a1f26;
+      border-color: #d0d7de;
+      border-left-color: #0088a8;
+    }
+    .mitre-col, .verdict-card, .tech-row, .consol-block, .callout {
+      background: #f6f8fa;
+    }
+    .mitre-cell {
+      background: #ffffff; color: #57636f; border-color: #d0d7de;
+    }
+    .mitre-obs {
+      background: #cff5fb; color: #005566; border-color: #0088a8; box-shadow: none;
+    }
+    .cover-footer, .section-header::before {
+      box-shadow: none;
+    }
+    /* Print footer with page number */
+    @page {
+      margin: 20mm 15mm 25mm 15mm;
+      @bottom-center {
+        content: "Intel Extractor Report · ${escapeHtml(data.reportId)} · Page " counter(page) " of " counter(pages);
+        font-family: monospace; font-size: 9px; color: #7a8794;
+      }
+    }
+  }
+</style>
+</head>
+<body>
+  ${sections}
+</body>
+</html>`;
+  };
+
+  // Generate Markdown version
+  const generateReportMarkdown = () => {
+    const data = buildReportData();
+    const dateStr = data.generatedAt.toISOString().split("T")[0];
+    let md = "";
+    md += `# Threat Intelligence Report\n\n`;
+    md += `**TLP:${data.tlp}** · **Report ID:** ${data.reportId} · **Generated:** ${dateStr}\n\n`;
+    md += `**Analyst:** ${data.analyst} · **Organization:** ${data.org}\n\n`;
+    if (data.sourceUrl) md += `**Source:** ${data.sourceUrl}\n\n`;
+    md += `---\n\n`;
+
+    md += `## Executive Summary\n\n`;
+    if (data.articleHeadline) md += `> **${data.articleHeadline}**\n\n`;
+    if (data.execSummary) md += `${data.execSummary}\n\n`;
+    md += `### Verdict Breakdown\n\n`;
+    md += `| Verdict | Count |\n|---|---|\n`;
+    md += `| Malicious | ${data.verdictCounts.Malicious} |\n`;
+    md += `| Suspicious | ${data.verdictCounts.Suspicious} |\n`;
+    md += `| Whitelisted | ${data.verdictCounts.Whitelisted} |\n`;
+    md += `| Unknown | ${data.verdictCounts.Unknown} |\n\n`;
+    if (data.families.length) md += `### Malware Families\n\n${data.families.map(f => `- ${f}`).join("\n")}\n\n`;
+    if (data.recommendations.length) {
+      md += `### Priority Actions\n\n`;
+      data.recommendations.forEach((r, i) => { md += `${i + 1}. ${r}\n`; });
+      md += `\n`;
+    }
+
+    md += `## Technical IOC Report\n\n`;
+    if (data.techSummary) md += `${data.techSummary}\n\n`;
+    data.entries.forEach(([cat, arr]) => {
+      md += `### ${cat} (${arr.length})\n\n`;
+      md += `| Indicator | Verdict |\n|---|---|\n`;
+      arr.forEach(v => {
+        const d = enrichCache[`${cat}::${v}`]?.data;
+        md += `| \`${v}\` | ${d?._verdict || "Unknown"} |\n`;
+      });
+      md += `\n`;
+    });
+
+    if (data.techniques.length) {
+      md += `## MITRE ATT&CK Techniques\n\n`;
+      data.techniques.forEach(t => { md += `- **${t}** — ${MITRE_TACTICS.find(tc => tc.techniques.includes(t.split(".")[0]))?.name || "—"}\n`; });
+      md += `\n`;
+    }
+
+    md += `## Hunting Playbook\n\n`;
+    data.entries.filter(([cat]) => ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","FILE_NAME","FILE_PATH","EMAIL","CVE"].includes(cat)).forEach(([cat, arr]) => {
+      const kql = huntKQL(cat, arr);
+      const spl = huntSPL(cat, arr);
+      const aql = huntAQL(cat, arr);
+      if (!kql && !spl && !aql) return;
+      md += `### ${cat}\n\n`;
+      if (kql) md += `**Sentinel / Defender XDR (KQL)**\n\n\`\`\`kql\n${kql}\n\`\`\`\n\n`;
+      if (spl) md += `**Splunk (SPL)**\n\n\`\`\`spl\n${spl}\n\`\`\`\n\n`;
+      if (aql) md += `**QRadar (AQL)**\n\n\`\`\`sql\n${aql}\n\`\`\`\n\n`;
+    });
+
+    md += `---\n\n_Generated with Intel Extractor ${APP_VERSION} · https://aamir-muhammad.github.io/Intel-Extractor_\n`;
+    return md;
+  };
+
+  const downloadReport = (fmt) => {
+    localStorage.setItem("ie_analyst", reportAnalyst);
+    localStorage.setItem("ie_org", reportOrg);
+    if (fmt === "html") {
+      const html = generateReportHTML(reportTemplate);
+      downloadBlob(new Blob([html], { type: "text/html;charset=utf-8" }), `intel-extractor-report_${reportId}.html`);
+    } else if (fmt === "md") {
+      const md = generateReportMarkdown();
+      downloadBlob(new Blob([md], { type: "text/markdown;charset=utf-8" }), `intel-extractor-report_${reportId}.md`);
+    } else if (fmt === "copy-md") {
+      const md = generateReportMarkdown();
+      copyText(md, "report-md");
+    } else if (fmt === "print") {
+      const html = generateReportHTML(reportTemplate);
+      const w = window.open("", "_blank");
+      w.document.write(html);
+      w.document.close();
+      setTimeout(() => w.print(), 500);
+    }
+  };
+
   const exportTypeCSV = (cat, arr) => {
     const shown = proc(arr, cat);
     const rows = [["Type", "IOC", ...ENRICH_HEADERS], ...arr.map((orig, i) => [cat, shown[i], ...enrichVals(enrichRow(cat, orig))])];
@@ -4250,6 +5075,229 @@ export default function App() {
 
   return (
     <div style={rootStyle} className="font-mono">
+      {/* Report Builder Modal */}
+      {reportOpen && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 10000,
+          background: "rgba(0,0,0,0.75)", backdropFilter: "blur(8px)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          padding: "20px",
+        }} onClick={(e) => { if (e.target === e.currentTarget) setReportOpen(false); }}>
+          <div style={{
+            background: "#080b12", border: "1px solid rgba(0,229,255,0.3)", borderRadius: 16,
+            width: "100%", maxWidth: 1200, maxHeight: "90vh",
+            display: "flex", flexDirection: "column",
+            boxShadow: "0 0 60px rgba(0,229,255,0.15)",
+            overflow: "hidden",
+          }}>
+            {/* Modal Header */}
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "18px 24px", borderBottom: "1px solid rgba(120,160,180,0.15)",
+              background: "linear-gradient(90deg, rgba(192,132,252,0.06), transparent)",
+            }}>
+              <div className="flex items-center gap-3">
+                <div style={{
+                  width: 36, height: 36, borderRadius: 10,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  background: "rgba(192,132,252,0.1)", border: "1px solid rgba(192,132,252,0.35)",
+                }}>
+                  <FileBarChart size={18} style={{ color: "#c084fc" }} />
+                </div>
+                <div>
+                  <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: "#eafcff", letterSpacing: "-0.3px" }}>Threat Intelligence Report Builder</h2>
+                  <p style={{ margin: 0, fontSize: 10, color: "#5d7382", letterSpacing: 1.5, marginTop: 2 }}>
+                    {total} INDICATORS · {entries.length} TYPES · REPORT ID {reportRefNum || reportId}
+                  </p>
+                </div>
+              </div>
+              <button onClick={() => setReportOpen(false)}
+                style={{
+                  padding: 8, background: "rgba(120,160,180,0.06)", border: "1px solid rgba(120,160,180,0.2)",
+                  borderRadius: 8, color: "#8aa0ad", cursor: "pointer",
+                }}>
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div style={{ display: "grid", gridTemplateColumns: "260px 1fr 300px", flex: 1, overflow: "hidden" }}>
+
+              {/* Left: Template Picker */}
+              <div style={{ padding: 20, borderRight: "1px solid rgba(120,160,180,0.15)", overflowY: "auto" }}>
+                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 2, color: "#5d7382", marginBottom: 12 }}>TEMPLATE</div>
+                {[
+                  { id: "full", name: "Full Investigation Report", desc: "Cover + all sections + appendix", audience: "COMPREHENSIVE", icon: "📊" },
+                  { id: "exec", name: "Executive Summary", desc: "Business impact, verdicts, actions", audience: "LEADERSHIP", icon: "📋" },
+                  { id: "technical", name: "Technical IOC Report", desc: "Full IOC tables with enrichment", audience: "SOC", icon: "🔍" },
+                  { id: "mitre", name: "MITRE ATT&CK Mapping", desc: "Techniques heatmap + tactics", audience: "ANALYSTS", icon: "🎯" },
+                  { id: "hunting", name: "Hunting Playbook", desc: "KQL / SPL / AQL queries", audience: "HUNTERS", icon: "🎣" },
+                ].map(t => (
+                  <button key={t.id} onClick={() => setReportTemplate(t.id)}
+                    style={{
+                      display: "block", width: "100%", textAlign: "left",
+                      padding: "12px 14px", marginBottom: 8,
+                      background: reportTemplate === t.id ? "rgba(192,132,252,0.1)" : "rgba(10,14,20,0.4)",
+                      border: `1px solid ${reportTemplate === t.id ? "rgba(192,132,252,0.5)" : "rgba(120,160,180,0.15)"}`,
+                      borderRadius: 8,
+                      cursor: "pointer",
+                      boxShadow: reportTemplate === t.id ? "0 0 12px rgba(192,132,252,0.2)" : "none",
+                    }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+                      <span style={{ fontSize: 16 }}>{t.icon}</span>
+                      <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1.5, color: reportTemplate === t.id ? "#c084fc" : "#5d7382" }}>{t.audience}</span>
+                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: reportTemplate === t.id ? "#eafcff" : "#c8d6dd", marginBottom: 3 }}>{t.name}</div>
+                    <div style={{ fontSize: 10, color: "#7f95a3", lineHeight: 1.4 }}>{t.desc}</div>
+                  </button>
+                ))}
+              </div>
+
+              {/* Center: Preview */}
+              <div style={{ padding: 0, overflow: "hidden", display: "flex", flexDirection: "column", background: "#05070a" }}>
+                <div style={{
+                  padding: "10px 16px", borderBottom: "1px solid rgba(120,160,180,0.15)",
+                  fontSize: 10, fontWeight: 800, letterSpacing: 2, color: "#7f95a3",
+                  display: "flex", justifyContent: "space-between", alignItems: "center",
+                  background: "rgba(10,14,20,0.4)",
+                }}>
+                  <span>LIVE PREVIEW</span>
+                  <span style={{ color: "#c084fc" }}>{reportTemplate.toUpperCase()}</span>
+                </div>
+                <iframe
+                  ref={reportPreviewRef}
+                  srcDoc={generateReportHTML(reportTemplate)}
+                  style={{ flex: 1, border: "none", background: "#05070a" }}
+                  title="Report Preview"
+                />
+              </div>
+
+              {/* Right: Options */}
+              <div style={{ padding: 20, borderLeft: "1px solid rgba(120,160,180,0.15)", overflowY: "auto" }}>
+                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 2, color: "#5d7382", marginBottom: 12 }}>METADATA</div>
+
+                <div style={{ marginBottom: 14 }}>
+                  <label style={{ fontSize: 10, color: "#8aa0ad", display: "block", marginBottom: 4, letterSpacing: 1 }}>ANALYST NAME</label>
+                  <input value={reportAnalyst} onChange={(e) => setReportAnalyst(e.target.value)} placeholder="Your name"
+                    style={{
+                      width: "100%", padding: "8px 10px", fontSize: 12,
+                      background: "rgba(0,0,0,0.4)", border: "1px solid rgba(120,160,180,0.25)",
+                      borderRadius: 6, color: "#e6f0f3", fontFamily: "inherit",
+                    }} />
+                </div>
+
+                <div style={{ marginBottom: 14 }}>
+                  <label style={{ fontSize: 10, color: "#8aa0ad", display: "block", marginBottom: 4, letterSpacing: 1 }}>ORGANIZATION</label>
+                  <input value={reportOrg} onChange={(e) => setReportOrg(e.target.value)} placeholder="Company or team"
+                    style={{
+                      width: "100%", padding: "8px 10px", fontSize: 12,
+                      background: "rgba(0,0,0,0.4)", border: "1px solid rgba(120,160,180,0.25)",
+                      borderRadius: 6, color: "#e6f0f3", fontFamily: "inherit",
+                    }} />
+                </div>
+
+                <div style={{ marginBottom: 14 }}>
+                  <label style={{ fontSize: 10, color: "#8aa0ad", display: "block", marginBottom: 4, letterSpacing: 1 }}>REFERENCE NUMBER (OPTIONAL)</label>
+                  <input value={reportRefNum} onChange={(e) => setReportRefNum(e.target.value)} placeholder={`Auto: ${reportId}`}
+                    style={{
+                      width: "100%", padding: "8px 10px", fontSize: 12,
+                      background: "rgba(0,0,0,0.4)", border: "1px solid rgba(120,160,180,0.25)",
+                      borderRadius: 6, color: "#e6f0f3", fontFamily: "inherit",
+                    }} />
+                </div>
+
+                <div style={{ marginBottom: 14 }}>
+                  <label style={{ fontSize: 10, color: "#8aa0ad", display: "block", marginBottom: 6, letterSpacing: 1 }}>TLP MARKING</label>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 4 }}>
+                    {[
+                      { v: "WHITE", c: "#ffffff", bg: "rgba(255,255,255,0.08)" },
+                      { v: "GREEN", c: "#00ff9c", bg: "rgba(0,255,156,0.1)" },
+                      { v: "AMBER", c: "#ffb84d", bg: "rgba(255,184,77,0.1)" },
+                      { v: "RED", c: "#ff4d6d", bg: "rgba(255,77,109,0.12)" },
+                    ].map(t => (
+                      <button key={t.v} onClick={() => setReportTLP(t.v)}
+                        style={{
+                          padding: "6px 4px", fontSize: 9, fontWeight: 800, letterSpacing: 1,
+                          background: reportTLP === t.v ? t.bg : "rgba(10,14,20,0.4)",
+                          border: `1px solid ${reportTLP === t.v ? t.c : "rgba(120,160,180,0.2)"}`,
+                          borderRadius: 5,
+                          color: reportTLP === t.v ? t.c : "#7f95a3",
+                          cursor: "pointer",
+                        }}>{t.v}</button>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 20 }}>
+                  <label style={{ fontSize: 10, color: "#8aa0ad", display: "block", marginBottom: 4, letterSpacing: 1 }}>WATERMARK (OPTIONAL)</label>
+                  <input value={reportWatermark} onChange={(e) => setReportWatermark(e.target.value)} placeholder="e.g. DRAFT, INTERNAL"
+                    style={{
+                      width: "100%", padding: "8px 10px", fontSize: 12,
+                      background: "rgba(0,0,0,0.4)", border: "1px solid rgba(120,160,180,0.25)",
+                      borderRadius: 6, color: "#e6f0f3", fontFamily: "inherit",
+                    }} />
+                </div>
+
+                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 2, color: "#5d7382", marginBottom: 12 }}>EXPORT</div>
+
+                <button onClick={() => downloadReport("print")}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                    width: "100%", padding: "10px 14px", marginBottom: 8,
+                    background: "#00e5ff", border: "none", borderRadius: 8,
+                    color: "#04111a", fontWeight: 700, fontSize: 12,
+                    cursor: "pointer",
+                    boxShadow: "0 0 18px rgba(0,229,255,0.35)",
+                  }}>
+                  <FileText size={14} /> Print / Save as PDF
+                </button>
+
+                <button onClick={() => downloadReport("html")}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                    width: "100%", padding: "10px 14px", marginBottom: 8,
+                    background: "rgba(192,132,252,0.1)", border: "1px solid rgba(192,132,252,0.4)",
+                    borderRadius: 8, color: "#c084fc", fontWeight: 700, fontSize: 12,
+                    cursor: "pointer",
+                  }}>
+                  <Download size={14} /> Download HTML
+                </button>
+
+                <button onClick={() => downloadReport("md")}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                    width: "100%", padding: "10px 14px", marginBottom: 8,
+                    background: "rgba(0,255,156,0.08)", border: "1px solid rgba(0,255,156,0.4)",
+                    borderRadius: 8, color: "#00ff9c", fontWeight: 700, fontSize: 12,
+                    cursor: "pointer",
+                  }}>
+                  <Download size={14} /> Download Markdown
+                </button>
+
+                <button onClick={() => downloadReport("copy-md")}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                    width: "100%", padding: "10px 14px",
+                    background: "rgba(120,160,180,0.06)", border: "1px solid rgba(120,160,180,0.25)",
+                    borderRadius: 8, color: "#8aa0ad", fontWeight: 600, fontSize: 11,
+                    cursor: "pointer",
+                  }}>
+                  <Copy size={12} /> {copied === "report-md" ? "Copied!" : "Copy Markdown"}
+                </button>
+
+                <div style={{
+                  marginTop: 20, padding: "12px 14px",
+                  background: "rgba(10,14,20,0.5)", border: "1px dashed rgba(120,160,180,0.2)",
+                  borderRadius: 8, fontSize: 10, color: "#7f95a3", lineHeight: 1.5,
+                }}>
+                  💡 <strong style={{ color: "#c8d6dd" }}>Tip:</strong> For best PDF quality, use "Print / Save as PDF" and select "Save as PDF" in your browser's print dialog. Print styles will apply light theme for readability.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Hash dedup toasts — fixed position, cannot be missed */}
       {dedupToasts.length > 0 && (
         <div style={{
@@ -4410,6 +5458,19 @@ export default function App() {
             </button>
             <GButton onClick={exportAllCSV} disabled={!total} color="#00ff9c" icon={<Download size={15} />}>CSV</GButton>
             <GButton onClick={exportAllXLSX} disabled={!total} color="#00e5ff" icon={<Download size={15} />}>XLSX</GButton>
+            <button onClick={() => setReportOpen(true)} disabled={!total}
+              title="Generate professional threat intelligence report (HTML / Markdown / PDF)"
+              className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold transition-opacity"
+              style={{
+                color: "#04111a",
+                backgroundColor: !total ? "rgba(192,132,252,0.14)" : "#c084fc",
+                border: `1px solid rgba(192,132,252,${!total ? "0.55" : "1"})`,
+                boxShadow: !total ? "none" : "0 0 18px rgba(192,132,252,0.4)",
+                opacity: !total ? 0.4 : 1,
+                cursor: !total ? "not-allowed" : "pointer",
+              }}>
+              <FileBarChart size={15} /> Report
+            </button>
           </div>
         </div>
         )}
