@@ -44,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v97";
+const APP_VERSION = "v98";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -3585,6 +3585,8 @@ export default function App() {
   const [expiringTokens, setExpiringTokens] = useState([]);
   const [tokenBannerDismissed, setTokenBannerDismissed] = useState(false);
   const [cardCondensed, setCardCondensed] = useState({});        // { cat: true } per-card collapse
+  // ---- Card removal confirmation state ----
+  const [confirmRemoveCat, setConfirmRemoveCat] = useState(null); // cat name showing inline confirm
   // ---- Report Builder state ----
   const [reportOpen, setReportOpen] = useState(false);
   const [reportTemplate, setReportTemplate] = useState("full"); // exec | technical | mitre | hunting | full
@@ -3593,7 +3595,56 @@ export default function App() {
   const [reportTLP, setReportTLP] = useState("AMBER"); // WHITE|GREEN|AMBER|RED
   const [reportWatermark, setReportWatermark] = useState("");
   const [reportRefNum, setReportRefNum] = useState("");
+  const [reportVariant, setReportVariant] = useState("dark"); // dark | light
+  // Section ordering + toggles — reorderable via arrows
+  const [reportSections, setReportSections] = useState([
+    { id: "cover",       name: "Cover Page",           enabled: true },
+    { id: "exec",        name: "Executive Summary",    enabled: true },
+    { id: "technical",   name: "Technical IOC Report", enabled: true },
+    { id: "graph",       name: "Shared-Pivot Graph",   enabled: true },
+    { id: "mitre",       name: "MITRE ATT&CK Mapping", enabled: true },
+    { id: "hunting",     name: "Hunting Playbook",     enabled: true },
+    { id: "consolidation", name: "Hash Consolidation", enabled: true },
+    { id: "glossary",    name: "Glossary",             enabled: true },
+  ]);
+  // IOC types to include (global filter)
+  const [reportIocTypes, setReportIocTypes] = useState({}); // { CAT: true }
+  // Query languages to include in Hunting Playbook
+  const [reportQueryLangs, setReportQueryLangs] = useState({ kql: true, spl: true, aql: true, cql: true });
+  // Right-panel tab: metadata | sections | content
+  const [reportTab, setReportTab] = useState("metadata");
   const reportPreviewRef = useRef(null);
+  // Auto-initialize IOC-type filter — moved below entries definition to avoid TDZ error
+  // Apply template preset: reset section toggles per template selection
+  const applyTemplate = (t) => {
+    setReportTemplate(t);
+    setReportSections(prev => prev.map(s => {
+      if (t === "full") return { ...s, enabled: true };
+      if (t === "exec") return { ...s, enabled: ["cover", "exec", "glossary"].includes(s.id) };
+      if (t === "technical") return { ...s, enabled: ["cover", "technical", "consolidation", "glossary"].includes(s.id) };
+      if (t === "mitre") return { ...s, enabled: ["cover", "mitre", "glossary"].includes(s.id) };
+      if (t === "hunting") return { ...s, enabled: ["cover", "hunting", "glossary"].includes(s.id) };
+      return s;
+    }));
+  };
+  const moveSection = (idx, dir) => {
+    setReportSections(prev => {
+      const next = [...prev];
+      const swap = idx + dir;
+      if (swap < 0 || swap >= next.length) return prev;
+      [next[idx], next[swap]] = [next[swap], next[idx]];
+      return next;
+    });
+  };
+  const toggleSection = (id) => {
+    setReportSections(prev => prev.map(s => s.id === id ? { ...s, enabled: !s.enabled } : s));
+  };
+  const toggleReportIocType = (cat) => {
+    setReportIocTypes(prev => ({ ...prev, [cat]: !prev[cat] }));
+  };
+  const toggleReportQueryLang = (lang) => {
+    setReportQueryLangs(prev => ({ ...prev, [lang]: !prev[lang] }));
+  };
   const [rowOverride, setRowOverride] = useState({});            // { "cat::value": bool } per-IOC override
   const [dragging, setDragging] = useState(null);               // { cat, value }
   const [dragOverCat, setDragOverCat] = useState(null);
@@ -3627,6 +3678,16 @@ export default function App() {
     [displayData]
   );
   const total = useMemo(() => entries.reduce((s, [, v]) => s + v.length, 0), [entries]);
+
+  // Auto-initialize report IOC-type filter when entries change (default: all enabled)
+  useEffect(() => {
+    setReportIocTypes(prev => {
+      const next = { ...prev };
+      entries.forEach(([cat]) => { if (next[cat] === undefined) next[cat] = true; });
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries.length]);
 
   // Registry details visible under the current scraped filter — hunt queries
   // regenerate from exactly these, so toggling off garbage rebuilds the query
@@ -4237,7 +4298,9 @@ export default function App() {
   };
   // ============================================================
   // Report Builder — HTML / Markdown / Print-to-PDF
-  // Templates: Executive, Technical IOC, MITRE ATT&CK, Hunting Playbook, Full
+  // Presets: Full, Executive, Technical IOC, MITRE ATT&CK, Hunting Playbook
+  // v98: section reordering, IOC/query filters, CQL, glossary, graph SVG,
+  //      dark/light variant, expanded enrichment labels
   // ============================================================
   const genReportId = () => {
     const d = new Date();
@@ -4249,7 +4312,7 @@ export default function App() {
   };
   const [reportId] = useState(() => genReportId());
 
-  // Aggregate report data from current on-screen state
+  // Aggregate report data from current on-screen state (respects IOC-type filter)
   const buildReportData = () => {
     const rid = reportRefNum || reportId;
     const generatedAt = new Date();
@@ -4259,7 +4322,10 @@ export default function App() {
     const allFamilies = new Set();
     const c2Nodes = new Set();
     const contactedHosts = new Set();
-    entries.forEach(([cat, arr]) => {
+    // Respect IOC-type filter for what enters the report
+    const filteredEntries = entries.filter(([cat]) => reportIocTypes[cat] !== false);
+
+    filteredEntries.forEach(([cat, arr]) => {
       typeCounts[cat] = arr.length;
       arr.forEach((v) => {
         const d = enrichCache[`${cat}::${v}`]?.data;
@@ -4290,14 +4356,14 @@ export default function App() {
       execSummary: aiSummary?.executive_summary || null,
       techSummary: aiSummary?.summary || null,
       recommendations: aiSummary?.recommendations || [],
-      totalIOCs: total,
+      totalIOCs: filteredEntries.reduce((s, [, arr]) => s + arr.length, 0),
       typeCounts,
       verdictCounts,
       techniques: [...allTechniques].sort(),
       families: [...allFamilies].sort(),
       c2Nodes: [...c2Nodes],
       contactedHosts: [...contactedHosts],
-      entries,
+      entries: filteredEntries,
       enrichCache,
       mergedHashes,
     };
@@ -4323,17 +4389,189 @@ export default function App() {
 
   const escapeHtml = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-  // Generate the full HTML report (styled, printable)
-  const generateReportHTML = (template) => {
+  // Expanded enrichment labels — human-readable instead of compressed
+  const kaspZoneLabel = (z) => {
+    const zl = String(z || "").toLowerCase();
+    if (zl === "red") return "Kaspersky: Red (Malicious)";
+    if (zl === "yellow") return "Kaspersky: Yellow (Suspicious)";
+    if (zl === "green") return "Kaspersky: Green (Clean)";
+    if (zl === "grey" || zl === "gray") return "Kaspersky: Grey (Unknown)";
+    return `Kaspersky: ${zl}`;
+  };
+  const buildSourcesLabel = (d) => {
+    const parts = [];
+    if (d?.virustotal?.malicious != null) parts.push(`VirusTotal: ${d.virustotal.malicious}/${d.virustotal.total || "—"} detections`);
+    if (d?.kaspersky?.zone) parts.push(kaspZoneLabel(d.kaspersky.zone));
+    if (d?.abuseipdb?.abuseScore != null) parts.push(`AbuseIPDB: ${d.abuseipdb.abuseScore}% abuse score`);
+    if (d?.threatfox?.malwareName) parts.push(`ThreatFox: ${d.threatfox.malwareName}`);
+    if (d?.urlhaus?.threat) parts.push(`URLhaus: ${d.urlhaus.threat}`);
+    if (d?.malwarebazaar?.signature) parts.push(`MalwareBazaar: ${d.malwarebazaar.signature}`);
+    if (d?.otx?.pulseCount) parts.push(`OTX: ${d.otx.pulseCount} pulse${d.otx.pulseCount !== 1 ? "s" : ""}`);
+    if (d?.hybridAnalysis?.verdict) {
+      const parts2 = [`Hybrid Analysis: ${d.hybridAnalysis.verdict}`];
+      if (d.hybridAnalysis.threatScore != null) parts2.push(`score ${d.hybridAnalysis.threatScore}/100`);
+      if (d.hybridAnalysis.family) parts2.push(`family: ${d.hybridAnalysis.family}`);
+      parts.push(parts2.join(", "));
+    }
+    if (d?.triage?.families?.[0]) parts.push(`Tri.age: ${d.triage.families[0]}${d.triage.score != null ? ` (score ${d.triage.score}/10)` : ""}`);
+    if (d?.urlscan?.overallMalicious) parts.push(`urlscan: malicious verdict`);
+    return parts.slice(0, 4).join(" · ") || "—";
+  };
+
+  // Radial SVG rendering of shared-pivot (bridge) nodes.
+  // Only shows nodes where 2+ primary IOCs connect through them.
+  const buildSharedPivotSVG = (data) => {
+    // Reconstruct primary IOCs and derived-node connections
+    const primaries = new Map(); // norm(id) → { cat, val, id }
+    data.entries.forEach(([cat, arr]) => {
+      arr.forEach(v => primaries.set(String(v).toLowerCase(), { cat, val: v, id: v }));
+    });
+    // Bridge candidates: derived nodes reached by ≥2 primaries
+    const bridgeCount = new Map(); // pivotVal → Set(primaryIds)
+    const pivotCat = new Map();    // pivotVal → cat
+    data.entries.forEach(([cat, arr]) => {
+      arr.forEach(v => {
+        const d = data.enrichCache[`${cat}::${v}`]?.data;
+        if (!d) return;
+        const trackPivot = (pv, pc) => {
+          if (!pv || primaries.has(String(pv).toLowerCase())) {
+            // If pv is itself a primary, this is a bridge between two primaries too
+            const key = String(pv).toLowerCase();
+            if (!bridgeCount.has(key)) bridgeCount.set(key, new Set());
+            bridgeCount.get(key).add(String(v).toLowerCase());
+            if (!pivotCat.has(key)) pivotCat.set(key, pc);
+            return;
+          }
+          const key = String(pv).toLowerCase();
+          if (!bridgeCount.has(key)) bridgeCount.set(key, new Set());
+          bridgeCount.get(key).add(String(v).toLowerCase());
+          if (!pivotCat.has(key)) pivotCat.set(key, pc);
+        };
+        if (d.urlscan?.servingIP) trackPivot(d.urlscan.servingIP, "IPV4");
+        (d.urlscan?.contactedIPs || []).forEach(ip => trackPivot(ip, "IPV4"));
+        (d.urlscan?.contactedDomains || []).forEach(dm => trackPivot(dm, "DOMAIN"));
+        (d.urlscan?.files || []).forEach(f => { if (f.sha256) trackPivot(f.sha256, "SHA256"); });
+        (d.hybridAnalysis?.hosts || []).forEach(h => trackPivot(h, "IPV4"));
+        (d.hybridAnalysis?.domains || []).forEach(dm => trackPivot(dm, "DOMAIN"));
+        (d.hybridAnalysis?.compromised || []).forEach(h => {
+          const isIP = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+          trackPivot(h, isIP ? "IPV4" : "DOMAIN");
+        });
+        (d.hybridAnalysis?.submitContext || []).forEach(sc => trackPivot(sc, "URL"));
+        (d.hybridAnalysis?.relatedSHA256s || []).forEach(sh => trackPivot(sh, "SHA256"));
+        (d.triage?.c2Urls || []).forEach(c2 => {
+          if (typeof c2 !== "string") return;
+          if (c2.startsWith("domain:")) trackPivot(c2.slice(7), "DOMAIN");
+          else if (c2.startsWith("ip:")) trackPivot(c2.slice(3), "IPV4");
+          else trackPivot(c2, "URL");
+        });
+      });
+    });
+    // Keep only true bridges: reached by ≥2 distinct primaries
+    const bridges = [...bridgeCount.entries()]
+      .filter(([, srcSet]) => srcSet.size >= 2)
+      .map(([pivotVal, srcSet]) => ({
+        pivotVal,
+        cat: pivotCat.get(pivotVal),
+        sources: [...srcSet].map(id => primaries.get(id)).filter(Boolean),
+      }));
+
+    if (bridges.length === 0) return null;
+
+    // Radial layout
+    const W = 800, H = 600, cx = W / 2, cy = H / 2;
+    const nBridges = bridges.length;
+    const bridgeRingR = Math.min(120, 40 + nBridges * 12);
+    // Collect all unique primaries touching any bridge
+    const primarySet = new Set();
+    bridges.forEach(b => b.sources.forEach(s => primarySet.add(String(s.val).toLowerCase())));
+    const primariesArr = [...primarySet].map(id => primaries.get(id)).filter(Boolean);
+    const nPrimaries = primariesArr.length;
+    const primaryRingR = Math.max(230, bridgeRingR + 180);
+
+    // Position bridges in inner ring, primaries in outer ring
+    const bridgePos = new Map();
+    bridges.forEach((b, i) => {
+      const angle = (i / nBridges) * 2 * Math.PI - Math.PI / 2;
+      bridgePos.set(b.pivotVal, { x: cx + Math.cos(angle) * bridgeRingR, y: cy + Math.sin(angle) * bridgeRingR, angle });
+    });
+    const primaryPos = new Map();
+    primariesArr.forEach((p, i) => {
+      const angle = (i / nPrimaries) * 2 * Math.PI - Math.PI / 2;
+      primaryPos.set(String(p.val).toLowerCase(), { x: cx + Math.cos(angle) * primaryRingR, y: cy + Math.sin(angle) * primaryRingR, angle, cat: p.cat, val: p.val });
+    });
+
+    // Edges
+    let edges = "";
+    bridges.forEach(b => {
+      const bp = bridgePos.get(b.pivotVal);
+      b.sources.forEach(s => {
+        const pp = primaryPos.get(String(s.val).toLowerCase());
+        if (!pp) return;
+        edges += `<line x1="${bp.x}" y1="${bp.y}" x2="${pp.x}" y2="${pp.y}" stroke="#ffb84d" stroke-width="1.5" stroke-opacity="0.5" />`;
+      });
+    });
+
+    // Label placement — outside the node, oriented away from center
+    const labelOffset = 12;
+    const nodeR = 8;
+    const bridgeNodeR = 10;
+    // Truncate long values with ellipsis for readability
+    const truncLabel = (v, max = 46) => v.length > max ? v.slice(0, max - 1) + "…" : v;
+
+    // Bridge nodes (gold, larger)
+    let bridgeNodes = "";
+    bridges.forEach(b => {
+      const bp = bridgePos.get(b.pivotVal);
+      const labelX = bp.x + Math.cos(bp.angle) * (bridgeNodeR + labelOffset);
+      const labelY = bp.y + Math.sin(bp.angle) * (bridgeNodeR + labelOffset);
+      const anchor = Math.cos(bp.angle) > 0.1 ? "start" : Math.cos(bp.angle) < -0.1 ? "end" : "middle";
+      bridgeNodes += `
+        <circle cx="${bp.x}" cy="${bp.y}" r="${bridgeNodeR + 3}" fill="none" stroke="#ffb84d" stroke-opacity="0.35" stroke-width="1.5"/>
+        <circle cx="${bp.x}" cy="${bp.y}" r="${bridgeNodeR}" fill="#ffb84d" stroke="#04111a" stroke-width="1.5"/>
+        <text x="${labelX}" y="${labelY}" fill="#ffcf70" font-size="10" font-family="monospace" font-weight="600" text-anchor="${anchor}" dominant-baseline="middle">${escapeHtml(truncLabel(b.pivotVal))}</text>
+        <text x="${labelX}" y="${labelY + 12}" fill="#7f95a3" font-size="8" font-family="monospace" text-anchor="${anchor}" dominant-baseline="middle">${b.cat} · ${b.sources.length} shared</text>
+      `;
+    });
+
+    // Primary nodes (colored by cat)
+    let primaryNodes = "";
+    primariesArr.forEach(p => {
+      const pp = primaryPos.get(String(p.val).toLowerCase());
+      const cc = colorFor(p.cat);
+      const labelX = pp.x + Math.cos(pp.angle) * (nodeR + labelOffset);
+      const labelY = pp.y + Math.sin(pp.angle) * (nodeR + labelOffset);
+      const anchor = Math.cos(pp.angle) > 0.1 ? "start" : Math.cos(pp.angle) < -0.1 ? "end" : "middle";
+      primaryNodes += `
+        <circle cx="${pp.x}" cy="${pp.y}" r="${nodeR}" fill="${cc}" stroke="#04111a" stroke-width="1.5"/>
+        <text x="${labelX}" y="${labelY}" fill="${cc}" font-size="10" font-family="monospace" font-weight="600" text-anchor="${anchor}" dominant-baseline="middle">${escapeHtml(truncLabel(String(p.val)))}</text>
+        <text x="${labelX}" y="${labelY + 12}" fill="#7f95a3" font-size="8" font-family="monospace" text-anchor="${anchor}" dominant-baseline="middle">${p.cat}</text>
+      `;
+    });
+
+    return `
+      <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:820px;height:auto;background:rgba(10,14,20,0.5);border:1px solid rgba(120,160,180,0.15);border-radius:10px;">
+        ${edges}
+        ${primaryNodes}
+        ${bridgeNodes}
+      </svg>
+    `;
+  };
+
+  // Generate the full HTML report (styled, printable). variant: "dark" | "light"
+  const generateReportHTML = (variant = "dark") => {
     const data = buildReportData();
+    const enabledSections = reportSections.filter(s => s.enabled).map(s => s.id);
     const tlpColors = { WHITE: "#ffffff", GREEN: "#00ff9c", AMBER: "#ffb84d", RED: "#ff4d6d" };
     const tlpBgs = { WHITE: "rgba(255,255,255,0.1)", GREEN: "rgba(0,255,156,0.1)", AMBER: "rgba(255,184,77,0.1)", RED: "rgba(255,77,109,0.12)" };
     const tlpColor = tlpColors[data.tlp] || "#ffb84d";
     const tlpBg = tlpBgs[data.tlp] || "rgba(255,184,77,0.1)";
     const dateStr = data.generatedAt.toLocaleString("en-US", { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 
-    // --- Cover Page ---
-    const coverPage = `
+    // Section generators
+    const sec = {};
+
+    sec.cover = `
       <section class="page cover">
         <div class="tlp-ribbon" style="background:${tlpBg};border-color:${tlpColor};color:${tlpColor};">TLP:${data.tlp}</div>
         <div class="cover-content">
@@ -4364,8 +4602,7 @@ export default function App() {
       </section>
     `;
 
-    // --- Executive Summary ---
-    const executiveSection = `
+    sec.exec = `
       <section class="page">
         <div class="section-header">
           <div class="section-title">Executive Summary</div>
@@ -4401,23 +4638,13 @@ export default function App() {
       </section>
     `;
 
-    // --- Technical IOC Report ---
+    // Technical IOC Report
     const iocTables = data.entries.map(([cat, arr]) => {
       const rows = arr.map(v => {
-        const d = enrichCache[`${cat}::${v}`]?.data;
+        const d = data.enrichCache[`${cat}::${v}`]?.data;
         const verdict = d?._verdict || "Unknown";
         const vClass = verdict === "Malicious" ? "vmal" : verdict === "Suspicious" ? "vsusp" : verdict === "Whitelisted" ? "vclean" : "vunk";
-        const source = [
-          d?.virustotal?.malicious ? `VT ${d.virustotal.malicious}/${d.virustotal.total}` : null,
-          d?.kaspersky?.zone ? `KSN:${d.kaspersky.zone}` : null,
-          d?.abuseipdb?.abuseScore != null ? `AIPDB ${d.abuseipdb.abuseScore}%` : null,
-          d?.threatfox?.malwareName || null,
-          d?.urlhaus?.threat || null,
-          d?.malwarebazaar?.signature || null,
-          d?.otx?.pulseCount ? `OTX ${d.otx.pulseCount}` : null,
-          d?.hybridAnalysis?.family || null,
-          d?.triage?.families?.[0] || null,
-        ].filter(Boolean).slice(0, 3).join(" · ") || "—";
+        const source = buildSourcesLabel(d);
         return `<tr>
           <td class="ioc-val">${escapeHtml(v)}</td>
           <td><span class="verdict-pill ${vClass}">${verdict}</span></td>
@@ -4431,14 +4658,14 @@ export default function App() {
             <span class="type-count">${arr.length}</span>
           </div>
           <table class="ioc-table">
-            <thead><tr><th>Indicator</th><th>Verdict</th><th>Enrichment</th></tr></thead>
+            <thead><tr><th>Indicator</th><th>Verdict</th><th>Enrichment Sources</th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>
       `;
     }).join("");
 
-    const technicalSection = `
+    sec.technical = `
       <section class="page">
         <div class="section-header">
           <div class="section-title">Technical IOC Report</div>
@@ -4446,11 +4673,11 @@ export default function App() {
         </div>
         ${data.techSummary ? `<div class="prose"><h3>Technical Summary</h3><p>${escapeHtml(data.techSummary)}</p></div>` : ""}
         <div class="prose"><h3>Indicators of Compromise (${data.totalIOCs})</h3></div>
-        ${iocTables}
+        ${iocTables || `<div class="empty-state">No IOCs match current filter.</div>`}
       </section>
     `;
 
-    // --- MITRE ATT&CK Mapping ---
+    // MITRE
     const observed = new Set(data.techniques.map(t => t.split(".")[0]));
     const mitreGrid = MITRE_TACTICS.map(tac => {
       const cells = tac.techniques.map(tid => {
@@ -4472,7 +4699,7 @@ export default function App() {
       </div>
     `).join("") : `<div class="empty-state">No MITRE ATT&CK techniques identified from enrichment data.</div>`;
 
-    const mitreSection = `
+    sec.mitre = `
       <section class="page">
         <div class="section-header">
           <div class="section-title">MITRE ATT&amp;CK Mapping</div>
@@ -4489,12 +4716,13 @@ export default function App() {
       </section>
     `;
 
-    // --- Hunting Playbook ---
+    // Hunting Playbook — respects query language filter
     const huntBlocks = data.entries.filter(([cat]) => ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","FILE_NAME","FILE_PATH","EMAIL","CVE"].includes(cat)).map(([cat, arr]) => {
-      const kql = huntKQL(cat, arr);
-      const spl = huntSPL(cat, arr);
-      const aql = huntAQL(cat, arr);
-      if (!kql && !spl && !aql) return "";
+      const kql = reportQueryLangs.kql ? huntKQL(cat, arr) : null;
+      const spl = reportQueryLangs.spl ? huntSPL(cat, arr) : null;
+      const aql = reportQueryLangs.aql ? huntAQL(cat, arr) : null;
+      const cql = reportQueryLangs.cql ? huntCQL(cat, arr) : null;
+      if (!kql && !spl && !aql && !cql) return "";
       return `
         <div class="hunt-block">
           <div class="hunt-block-header">
@@ -4504,18 +4732,20 @@ export default function App() {
           ${kql ? `<div class="hunt-query"><div class="hunt-lang">Microsoft Sentinel · Defender XDR (KQL)</div><pre>${escapeHtml(kql)}</pre></div>` : ""}
           ${spl ? `<div class="hunt-query"><div class="hunt-lang">Splunk (SPL)</div><pre>${escapeHtml(spl)}</pre></div>` : ""}
           ${aql ? `<div class="hunt-query"><div class="hunt-lang">IBM QRadar (AQL)</div><pre>${escapeHtml(aql)}</pre></div>` : ""}
+          ${cql ? `<div class="hunt-query"><div class="hunt-lang">CrowdStrike Falcon (CQL)</div><pre>${escapeHtml(cql)}</pre></div>` : ""}
         </div>
       `;
     }).filter(Boolean).join("");
 
-    const huntingSection = `
+    const anyLang = reportQueryLangs.kql || reportQueryLangs.spl || reportQueryLangs.aql || reportQueryLangs.cql;
+    sec.hunting = `
       <section class="page">
         <div class="section-header">
           <div class="section-title">Hunting Playbook</div>
           <div class="section-badge">FOR THREAT HUNTERS</div>
         </div>
         <div class="prose"><p>Copy-paste hunt queries for the leading SIEM and EDR platforms. Recommended lookback: 30 days for infrastructure IOCs, 7 days for host-based artifacts.</p></div>
-        ${huntBlocks || `<div class="empty-state">No huntable IOCs in this dataset.</div>`}
+        ${!anyLang ? `<div class="empty-state">No query languages selected. Enable KQL / SPL / AQL / CQL in the Content tab.</div>` : (huntBlocks || `<div class="empty-state">No huntable IOCs in this dataset.</div>`)}
         ${data.c2Nodes.length ? `
           <div class="prose"><h3>Command &amp; Control Infrastructure</h3><p>Confirmed C2 endpoints identified by behavioral analysis. Prioritize network blocking and hunt for outbound connections to these hosts.</p></div>
           <div class="chip-row">${data.c2Nodes.slice(0, 20).map(c => `<span class="chip chip-mal">${escapeHtml(c)}</span>`).join("")}</div>
@@ -4523,8 +4753,33 @@ export default function App() {
       </section>
     `;
 
-    // --- Consolidation & Appendix ---
-    const consolSection = Object.keys(data.mergedHashes).length ? `
+    // Shared-Pivot Graph
+    const graphSVG = buildSharedPivotSVG(data);
+    sec.graph = graphSVG ? `
+      <section class="page">
+        <div class="section-header">
+          <div class="section-title">Shared-Pivot Infrastructure Graph</div>
+          <div class="section-badge">INFRASTRUCTURE</div>
+        </div>
+        <div class="prose"><p>Nodes shown are <strong>shared pivots</strong> — infrastructure elements that connect two or more primary IOCs. Gold nodes at the center are bridge points; colored nodes at the outer ring are the primary IOCs from this analysis. This view isolates the relationships that likely indicate a coordinated campaign.</p></div>
+        <div style="text-align:center;margin:20px 0;">${graphSVG}</div>
+        <div class="mitre-legend">
+          <span class="legend-item"><span class="legend-swatch" style="background:#ffb84d;border-color:#ffb84d;"></span> Shared-pivot bridge (2+ IOCs)</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:#00e5ff;border-color:#00e5ff;"></span> Primary IOC</span>
+        </div>
+      </section>
+    ` : `
+      <section class="page">
+        <div class="section-header">
+          <div class="section-title">Shared-Pivot Infrastructure Graph</div>
+          <div class="section-badge">INFRASTRUCTURE</div>
+        </div>
+        <div class="empty-state">No shared-pivot infrastructure detected. Bridge nodes require 2+ primary IOCs to connect through the same derived infrastructure element.</div>
+      </section>
+    `;
+
+    // Consolidation
+    sec.consolidation = Object.keys(data.mergedHashes).length ? `
       <section class="page">
         <div class="section-header">
           <div class="section-title">Hash Consolidation</div>
@@ -4540,15 +4795,101 @@ export default function App() {
       </section>
     ` : "";
 
-    // Choose template
-    let sections = "";
-    if (template === "exec") sections = executiveSection;
-    else if (template === "technical") sections = technicalSection;
-    else if (template === "mitre") sections = mitreSection;
-    else if (template === "hunting") sections = huntingSection;
-    else sections = coverPage + executiveSection + technicalSection + mitreSection + huntingSection + consolSection;
+    // Glossary — explains every enrichment source and shorthand
+    sec.glossary = `
+      <section class="page">
+        <div class="section-header">
+          <div class="section-title">Glossary &amp; Source Reference</div>
+          <div class="section-badge">REFERENCE</div>
+        </div>
+        <div class="prose"><p>This report aggregates verdicts and metadata from multiple threat-intelligence sources. Below is an explanation of each source and its verdict scheme.</p></div>
+        <div class="glossary-grid">
+          <div class="glossary-item">
+            <div class="glossary-name">Kaspersky Security Network (KSN)</div>
+            <div class="glossary-body">Kaspersky's cloud reputation database. Verdict zones: <strong style="color:#ff4d6d">Red</strong> = confirmed malicious, <strong style="color:#fbbf24">Yellow</strong> = suspicious / adware / PUA, <strong style="color:#00ff9c">Green</strong> = clean / whitelisted, <strong style="color:#8aa0ad">Grey</strong> = unknown.</div>
+          </div>
+          <div class="glossary-item">
+            <div class="glossary-name">VirusTotal</div>
+            <div class="glossary-body">Aggregated AV scanning. Displayed as X/Y where X is engines flagging the file/URL as malicious and Y is total engines. 10+ detections typically indicates confirmed malware.</div>
+          </div>
+          <div class="glossary-item">
+            <div class="glossary-name">AbuseIPDB</div>
+            <div class="glossary-body">Community-reported IP abuse. Confidence score 0–100%. ≥75% = confirmed abuse; 25–74% = suspicious; &lt;25% = low signal.</div>
+          </div>
+          <div class="glossary-item">
+            <div class="glossary-name">Hybrid Analysis (Falcon Sandbox)</div>
+            <div class="glossary-body">CrowdStrike-owned behavioral sandbox. Verdicts: <strong>Malicious</strong>, <strong>Suspicious</strong>, <strong>Whitelisted</strong>, <strong>No specific threat</strong>. Threat score 0–100 (higher = more malicious). Includes MITRE ATT&amp;CK mappings.</div>
+          </div>
+          <div class="glossary-item">
+            <div class="glossary-name">Tri.age (Recorded Future Sandbox)</div>
+            <div class="glossary-body">Behavioral sandbox with family attribution. Score 0–10 (10 = confirmed malicious, 5–9 = suspicious). Extracts C2 URLs from runtime analysis.</div>
+          </div>
+          <div class="glossary-item">
+            <div class="glossary-name">abuse.ch ThreatFox / URLhaus / MalwareBazaar</div>
+            <div class="glossary-body">Community-driven threat feeds. ThreatFox = IOC database, URLhaus = malicious URLs (payload delivery), MalwareBazaar = malware sample repository with family signatures.</div>
+          </div>
+          <div class="glossary-item">
+            <div class="glossary-name">AlienVault OTX</div>
+            <div class="glossary-body">Open Threat Exchange. Pulse count indicates how many threat-intel reports reference this IOC — higher = more widely observed.</div>
+          </div>
+          <div class="glossary-item">
+            <div class="glossary-name">urlscan.io</div>
+            <div class="glossary-body">Website scanner. Provides serving IP, contacted infrastructure, screenshots, and brand-impersonation detection for URLs and domains.</div>
+          </div>
+          <div class="glossary-item">
+            <div class="glossary-name">TLP (Traffic Light Protocol)</div>
+            <div class="glossary-body"><strong style="color:#ffffff">WHITE</strong> = unrestricted, <strong style="color:#00ff9c">GREEN</strong> = community, <strong style="color:#ffb84d">AMBER</strong> = need-to-know within organization, <strong style="color:#ff4d6d">RED</strong> = named recipients only.</div>
+          </div>
+          <div class="glossary-item">
+            <div class="glossary-name">Verdict Classifications</div>
+            <div class="glossary-body"><strong style="color:#ff4d6d">Malicious</strong> = confirmed threat, block/hunt immediately. <strong style="color:#fbbf24">Suspicious</strong> = warrants investigation. <strong style="color:#00ff9c">Whitelisted</strong> = confirmed benign. <strong style="color:#8aa0ad">Unknown</strong> = insufficient telemetry.</div>
+          </div>
+        </div>
+      </section>
+    `;
 
-    // The full styled HTML doc
+    // Build in section order per reportSections
+    const orderedSections = reportSections
+      .filter(s => s.enabled && sec[s.id])
+      .map(s => sec[s.id])
+      .join("");
+
+    // Styles — variant-aware. Light variant flips core color vars.
+    const isLight = variant === "light";
+    const rootVars = isLight ? `
+      --bg: #ffffff;
+      --bg-page: #ffffff;
+      --panel: #ffffff;
+      --line: #d0d7de;
+      --txt: #1a1f26;
+      --txt-strong: #05070a;
+      --txt-muted: #57636f;
+      --txt-dim: #7a8794;
+      --cyan: #0088a8;
+      --green: #008040;
+      --purple: #7c3aed;
+      --mal: #d63348;
+      --susp: #b78015;
+      --clean: #008040;
+      --unk: #6b7580;
+    ` : `
+      --bg: #05070a;
+      --bg-page: #080b12;
+      --panel: rgba(10,14,20,0.72);
+      --line: rgba(120,160,180,0.16);
+      --txt: #e6f0f3;
+      --txt-strong: #eafcff;
+      --txt-muted: #7f95a3;
+      --txt-dim: #5d7382;
+      --cyan: #00e5ff;
+      --green: #00ff9c;
+      --purple: #c084fc;
+      --mal: #ff4d6d;
+      --susp: #fbbf24;
+      --clean: #00ff9c;
+      --unk: #8aa0ad;
+    `;
+
     return `<!doctype html>
 <html lang="en">
 <head>
@@ -4556,23 +4897,7 @@ export default function App() {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Intel Extractor Report · ${escapeHtml(data.reportId)}</title>
 <style>
-  :root {
-    --bg: #05070a;
-    --bg-page: #080b12;
-    --panel: rgba(10,14,20,0.72);
-    --line: rgba(120,160,180,0.16);
-    --txt: #e6f0f3;
-    --txt-strong: #eafcff;
-    --txt-muted: #7f95a3;
-    --txt-dim: #5d7382;
-    --cyan: #00e5ff;
-    --green: #00ff9c;
-    --purple: #c084fc;
-    --mal: #ff4d6d;
-    --susp: #fbbf24;
-    --clean: #00ff9c;
-    --unk: #8aa0ad;
-  }
+  :root { ${rootVars} }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; background: var(--bg); color: var(--txt); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; line-height: 1.55; }
   body { max-width: 900px; margin: 0 auto; padding: 24px; }
@@ -4585,7 +4910,7 @@ export default function App() {
     position: relative;
     overflow: hidden;
   }
-  .page::before {
+  ${!isLight ? `.page::before {
     content: "";
     position: absolute; inset: 0;
     background:
@@ -4594,11 +4919,10 @@ export default function App() {
       linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
     background-size: auto, 36px 36px, 36px 36px;
     pointer-events: none;
-  }
+  }` : ""}
   .page > * { position: relative; z-index: 1; }
   ${data.watermark ? `.page::after { content: "${escapeHtml(data.watermark)}"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 90px; font-weight: 900; color: rgba(255,77,109,0.06); letter-spacing: 8px; pointer-events: none; z-index: 0; transform: rotate(-30deg); white-space: nowrap; }` : ""}
 
-  /* TLP Ribbon */
   .tlp-ribbon {
     position: absolute; top: 0; right: 0;
     padding: 6px 16px;
@@ -4608,41 +4932,36 @@ export default function App() {
     z-index: 2;
   }
 
-  /* Cover Page */
   .cover { min-height: 800px; display: flex; flex-direction: column; }
   .cover-content { flex: 1; display: flex; flex-direction: column; justify-content: center; }
   .cover-badge {
     display: inline-flex; align-items: center; gap: 10px;
     padding: 8px 14px;
-    background: rgba(0,229,255,0.08); border: 1px solid rgba(0,229,255,0.35);
+    background: ${isLight ? "#f6faff" : "rgba(0,229,255,0.08)"}; border: 1px solid ${isLight ? "#c0dcea" : "rgba(0,229,255,0.35)"};
     border-radius: 10px;
     font-size: 11px; font-weight: 700; letter-spacing: 3px;
     color: var(--cyan);
     width: fit-content;
     margin-bottom: 32px;
-    box-shadow: 0 0 22px rgba(0,229,255,0.15);
+    ${!isLight ? "box-shadow: 0 0 22px rgba(0,229,255,0.15);" : ""}
   }
   .cover-badge-icon { display: inline-flex; }
   .cover-title {
     font-size: 56px; font-weight: 800; letter-spacing: -1.5px; line-height: 1.05;
     color: var(--txt-strong);
-    text-shadow: 0 0 40px rgba(0,229,255,0.25);
+    ${!isLight ? "text-shadow: 0 0 40px rgba(0,229,255,0.25);" : ""}
     margin: 0 0 20px;
   }
   .cover-subtitle {
     font-size: 15px; font-weight: 500; color: var(--txt-muted);
-    padding-left: 4px;
     border-left: 3px solid var(--cyan);
     padding-left: 14px;
     margin-bottom: 40px;
     line-height: 1.5;
   }
-  .cover-stats {
-    display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;
-    margin-bottom: 40px;
-  }
+  .cover-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 40px; }
   .cover-stat {
-    background: rgba(10,14,20,0.5);
+    background: ${isLight ? "#f6f8fa" : "rgba(10,14,20,0.5)"};
     border: 1px solid var(--line);
     border-radius: 12px;
     padding: 20px 16px;
@@ -4651,12 +4970,12 @@ export default function App() {
   .stat-num { font-size: 40px; font-weight: 800; letter-spacing: -1px; line-height: 1; }
   .stat-label { font-size: 9px; font-weight: 700; letter-spacing: 2px; color: var(--txt-dim); margin-top: 8px; }
   .cover-meta {
-    background: rgba(10,14,20,0.4);
+    background: ${isLight ? "#f6f8fa" : "rgba(10,14,20,0.4)"};
     border: 1px solid var(--line);
     border-radius: 12px;
     padding: 18px 20px;
   }
-  .meta-row { display: flex; padding: 6px 0; border-bottom: 1px dashed rgba(120,160,180,0.1); font-size: 11px; }
+  .meta-row { display: flex; padding: 6px 0; border-bottom: 1px dashed ${isLight ? "#d0d7de" : "rgba(120,160,180,0.1)"}; font-size: 11px; }
   .meta-row:last-child { border-bottom: none; }
   .meta-label { width: 130px; color: var(--txt-dim); font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; }
   .meta-val { color: var(--txt); flex: 1; word-break: break-all; }
@@ -4668,28 +4987,26 @@ export default function App() {
     font-size: 10px; color: var(--txt-dim); letter-spacing: 1px;
   }
 
-  /* Section header */
   .section-header {
     display: flex; align-items: center; justify-content: space-between;
     padding-bottom: 14px; margin-bottom: 24px;
-    border-bottom: 2px solid rgba(0,229,255,0.2);
+    border-bottom: 2px solid ${isLight ? "#0088a833" : "rgba(0,229,255,0.2)"};
     position: relative;
   }
   .section-header::before {
     content: ""; position: absolute; bottom: -2px; left: 0; width: 60px; height: 2px;
     background: linear-gradient(90deg, var(--cyan), transparent);
-    box-shadow: 0 0 12px var(--cyan);
+    ${!isLight ? "box-shadow: 0 0 12px var(--cyan);" : ""}
   }
   .section-title { font-size: 22px; font-weight: 800; color: var(--txt-strong); letter-spacing: -0.5px; }
   .section-badge {
     padding: 5px 12px;
-    background: rgba(192,132,252,0.1); border: 1px solid rgba(192,132,252,0.35);
+    background: ${isLight ? "#f4efff" : "rgba(192,132,252,0.1)"}; border: 1px solid ${isLight ? "#d8c5f7" : "rgba(192,132,252,0.35)"};
     border-radius: 20px;
     font-size: 9px; font-weight: 800; letter-spacing: 2px;
     color: var(--purple);
   }
 
-  /* Prose */
   .prose { margin-bottom: 20px; }
   .prose h3 {
     font-size: 13px; text-transform: uppercase; letter-spacing: 2px;
@@ -4700,105 +5017,74 @@ export default function App() {
   .prose p { font-size: 12px; line-height: 1.65; color: var(--txt); margin: 0 0 12px; }
   .prose strong { color: var(--txt-strong); font-weight: 700; }
 
-  /* Callouts */
   .callout {
     padding: 16px 20px; margin-bottom: 20px;
     border-radius: 10px;
-    background: rgba(0,229,255,0.05);
-    border: 1px solid rgba(0,229,255,0.25);
+    background: ${isLight ? "#f0faff" : "rgba(0,229,255,0.05)"};
+    border: 1px solid ${isLight ? "#b5dfec" : "rgba(0,229,255,0.25)"};
     border-left: 4px solid var(--cyan);
   }
   .callout-label { font-size: 9px; font-weight: 800; letter-spacing: 2px; color: var(--cyan); margin-bottom: 6px; }
   .callout-body { font-size: 15px; font-weight: 700; color: var(--txt-strong); line-height: 1.4; }
 
-  /* Verdict cards */
   .verdict-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 20px 0; }
   .verdict-card {
     padding: 18px 14px;
-    background: rgba(10,14,20,0.5);
+    background: ${isLight ? "#f6f8fa" : "rgba(10,14,20,0.5)"};
     border: 1px solid var(--line);
     border-radius: 10px;
   }
   .verdict-num { font-size: 32px; font-weight: 800; letter-spacing: -1px; line-height: 1; }
   .verdict-label { font-size: 9px; font-weight: 800; letter-spacing: 2px; margin-top: 6px; }
   .verdict-desc { font-size: 10px; color: var(--txt-dim); margin-top: 8px; line-height: 1.4; }
-  .verdict-mal { border-color: rgba(255,77,109,0.4); }
-  .verdict-mal .verdict-num { color: var(--mal); }
-  .verdict-mal .verdict-label { color: var(--mal); }
-  .verdict-susp { border-color: rgba(251,191,36,0.4); }
-  .verdict-susp .verdict-num { color: var(--susp); }
-  .verdict-susp .verdict-label { color: var(--susp); }
-  .verdict-clean { border-color: rgba(0,255,156,0.4); }
-  .verdict-clean .verdict-num { color: var(--clean); }
-  .verdict-clean .verdict-label { color: var(--clean); }
-  .verdict-unk { border-color: rgba(120,160,180,0.25); }
-  .verdict-unk .verdict-num { color: var(--unk); }
-  .verdict-unk .verdict-label { color: var(--unk); }
+  .verdict-mal { border-color: ${isLight ? "#f0b5be" : "rgba(255,77,109,0.4)"}; }
+  .verdict-mal .verdict-num, .verdict-mal .verdict-label { color: var(--mal); }
+  .verdict-susp { border-color: ${isLight ? "#e5cf82" : "rgba(251,191,36,0.4)"}; }
+  .verdict-susp .verdict-num, .verdict-susp .verdict-label { color: var(--susp); }
+  .verdict-clean { border-color: ${isLight ? "#a3d9b5" : "rgba(0,255,156,0.4)"}; }
+  .verdict-clean .verdict-num, .verdict-clean .verdict-label { color: var(--clean); }
+  .verdict-unk { border-color: var(--line); }
+  .verdict-unk .verdict-num, .verdict-unk .verdict-label { color: var(--unk); }
 
-  /* Chips */
   .chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  .chip {
-    padding: 4px 10px;
-    border-radius: 20px;
-    font-size: 10px; font-weight: 600;
-    border: 1px solid;
-  }
-  .chip-mal { color: var(--mal); background: rgba(255,77,109,0.08); border-color: rgba(255,77,109,0.3); }
+  .chip { padding: 4px 10px; border-radius: 20px; font-size: 10px; font-weight: 600; border: 1px solid; }
+  .chip-mal { color: var(--mal); background: ${isLight ? "#fff0f2" : "rgba(255,77,109,0.08)"}; border-color: ${isLight ? "#f0b5be" : "rgba(255,77,109,0.3)"}; }
 
-  /* Action list */
   .action-list { padding-left: 18px; margin: 0; }
   .action-list li { font-size: 12px; line-height: 1.65; color: var(--txt); margin-bottom: 8px; }
   .action-list li::marker { color: var(--cyan); font-weight: 800; }
 
-  /* IOC tables */
   .ioc-block { margin-bottom: 24px; }
   .ioc-block-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-  .type-chip {
-    padding: 4px 10px;
-    border-radius: 6px;
-    font-size: 10px; font-weight: 800; letter-spacing: 1.5px;
-    border: 1px solid;
-  }
+  .type-chip { padding: 4px 10px; border-radius: 6px; font-size: 10px; font-weight: 800; letter-spacing: 1.5px; border: 1px solid; }
   .type-count {
     font-size: 11px; font-weight: 700; color: var(--txt-muted);
     padding: 3px 10px;
-    background: rgba(255,255,255,0.04);
+    background: ${isLight ? "#f6f8fa" : "rgba(255,255,255,0.04)"};
     border-radius: 20px;
   }
   .ioc-table { width: 100%; border-collapse: collapse; margin-top: 4px; }
   .ioc-table th {
-    text-align: left;
-    padding: 8px 10px;
+    text-align: left; padding: 8px 10px;
     font-size: 9px; font-weight: 800; letter-spacing: 1.5px; color: var(--txt-dim);
-    border-bottom: 1px solid var(--line);
-    text-transform: uppercase;
+    border-bottom: 1px solid var(--line); text-transform: uppercase;
   }
   .ioc-table td {
-    padding: 7px 10px;
-    font-size: 11px;
-    border-bottom: 1px solid rgba(120,160,180,0.06);
+    padding: 7px 10px; font-size: 11px;
+    border-bottom: 1px solid ${isLight ? "#e6ebf0" : "rgba(120,160,180,0.06)"};
     vertical-align: middle;
   }
   .ioc-val { color: var(--cyan); word-break: break-all; font-weight: 500; }
   .sources { color: var(--txt-muted); font-size: 10px; }
-  .verdict-pill {
-    padding: 2px 8px; border-radius: 12px; font-size: 9px; font-weight: 800;
-    letter-spacing: 1px;
-    border: 1px solid;
-    white-space: nowrap;
-  }
-  .vmal { color: var(--mal); background: rgba(255,77,109,0.1); border-color: rgba(255,77,109,0.35); }
-  .vsusp { color: var(--susp); background: rgba(251,191,36,0.1); border-color: rgba(251,191,36,0.35); }
-  .vclean { color: var(--clean); background: rgba(0,255,156,0.1); border-color: rgba(0,255,156,0.35); }
-  .vunk { color: var(--unk); background: rgba(120,160,180,0.08); border-color: rgba(120,160,180,0.25); }
+  .verdict-pill { padding: 2px 8px; border-radius: 12px; font-size: 9px; font-weight: 800; letter-spacing: 1px; border: 1px solid; white-space: nowrap; }
+  .vmal { color: var(--mal); background: ${isLight ? "#fff0f2" : "rgba(255,77,109,0.1)"}; border-color: ${isLight ? "#f0b5be" : "rgba(255,77,109,0.35)"}; }
+  .vsusp { color: var(--susp); background: ${isLight ? "#fff8e5" : "rgba(251,191,36,0.1)"}; border-color: ${isLight ? "#e5cf82" : "rgba(251,191,36,0.35)"}; }
+  .vclean { color: var(--clean); background: ${isLight ? "#eaf7ee" : "rgba(0,255,156,0.1)"}; border-color: ${isLight ? "#a3d9b5" : "rgba(0,255,156,0.35)"}; }
+  .vunk { color: var(--unk); background: ${isLight ? "#f6f8fa" : "rgba(120,160,180,0.08)"}; border-color: var(--line); }
 
-  /* MITRE Heatmap */
-  .mitre-heatmap {
-    display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px;
-    margin: 20px 0;
-  }
+  .mitre-heatmap { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin: 20px 0; }
   .mitre-col {
-    background: rgba(10,14,20,0.4);
+    background: ${isLight ? "#f6f8fa" : "rgba(10,14,20,0.4)"};
     border: 1px solid var(--line);
     border-radius: 8px;
     padding: 10px 6px;
@@ -4809,52 +5095,44 @@ export default function App() {
     color: var(--txt-strong);
     padding-bottom: 8px; margin-bottom: 4px;
     border-bottom: 1px solid var(--line);
-    text-align: center;
-    line-height: 1.3;
+    text-align: center; line-height: 1.3;
   }
   .mitre-tid { font-size: 8px; color: var(--txt-dim); font-weight: 500; letter-spacing: 0.5px; }
   .mitre-cell {
-    padding: 5px 4px;
-    border-radius: 4px;
-    font-size: 8.5px;
-    text-align: center;
-    background: rgba(10,14,20,0.4);
+    padding: 5px 4px; border-radius: 4px;
+    font-size: 8.5px; text-align: center;
+    background: ${isLight ? "#ffffff" : "rgba(10,14,20,0.4)"};
     color: var(--txt-dim);
-    border: 1px solid rgba(120,160,180,0.1);
+    border: 1px solid ${isLight ? "#d0d7de" : "rgba(120,160,180,0.1)"};
     font-weight: 600;
   }
   .mitre-obs {
-    background: rgba(0,229,255,0.15);
-    color: var(--cyan);
+    background: ${isLight ? "#cff5fb" : "rgba(0,229,255,0.15)"};
+    color: ${isLight ? "#005566" : "var(--cyan)"};
     border-color: var(--cyan);
-    box-shadow: 0 0 8px rgba(0,229,255,0.3);
+    ${!isLight ? "box-shadow: 0 0 8px rgba(0,229,255,0.3);" : ""}
     font-weight: 800;
   }
-  .mitre-legend {
-    display: flex; gap: 20px; margin: 12px 0 24px;
-    font-size: 10px; color: var(--txt-muted);
-  }
+  .mitre-legend { display: flex; gap: 20px; margin: 12px 0 24px; font-size: 10px; color: var(--txt-muted); }
   .legend-item { display: flex; align-items: center; gap: 8px; }
   .legend-swatch { width: 16px; height: 16px; border-radius: 3px; border: 1px solid; }
-  .legend-obs { background: rgba(0,229,255,0.15); border-color: var(--cyan); box-shadow: 0 0 6px rgba(0,229,255,0.3); }
-  .legend-none { background: rgba(10,14,20,0.4); border-color: rgba(120,160,180,0.1); }
+  .legend-obs { background: ${isLight ? "#cff5fb" : "rgba(0,229,255,0.15)"}; border-color: var(--cyan); ${!isLight ? "box-shadow: 0 0 6px rgba(0,229,255,0.3);" : ""} }
+  .legend-none { background: ${isLight ? "#ffffff" : "rgba(10,14,20,0.4)"}; border-color: ${isLight ? "#d0d7de" : "rgba(120,160,180,0.1)"}; }
 
   .tech-list { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
   .tech-row {
     display: flex; align-items: center; gap: 14px;
     padding: 8px 12px;
-    background: rgba(10,14,20,0.4);
+    background: ${isLight ? "#f6f8fa" : "rgba(10,14,20,0.4)"};
     border: 1px solid var(--line);
     border-radius: 6px;
   }
   .tech-id { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--cyan); font-weight: 700; min-width: 100px; }
   .tech-tactic { font-size: 10px; color: var(--txt-muted); text-transform: uppercase; letter-spacing: 1px; }
 
-  /* Hunting Playbook */
   .hunt-block {
-    margin-bottom: 22px;
-    padding: 14px;
-    background: rgba(10,14,20,0.4);
+    margin-bottom: 22px; padding: 14px;
+    background: ${isLight ? "#f6f8fa" : "rgba(10,14,20,0.4)"};
     border: 1px solid var(--line);
     border-radius: 10px;
   }
@@ -4863,41 +5141,49 @@ export default function App() {
   .hunt-query { margin-top: 10px; }
   .hunt-lang {
     font-size: 9px; font-weight: 800; letter-spacing: 2px; color: var(--purple);
-    margin-bottom: 4px;
-    text-transform: uppercase;
+    margin-bottom: 4px; text-transform: uppercase;
   }
   .hunt-query pre {
-    background: rgba(0,0,0,0.55);
-    border: 1px solid rgba(0,229,255,0.15);
+    background: ${isLight ? "#eef4f8" : "rgba(0,0,0,0.55)"};
+    border: 1px solid ${isLight ? "#c8d5df" : "rgba(0,229,255,0.15)"};
     border-left: 3px solid var(--cyan);
     border-radius: 6px;
-    padding: 10px 12px;
-    margin: 0;
+    padding: 10px 12px; margin: 0;
     font-size: 10.5px; line-height: 1.55;
-    color: #b8e5ee;
+    color: ${isLight ? "#0e2f3f" : "#b8e5ee"};
     white-space: pre-wrap; word-break: break-word;
     overflow-x: auto;
   }
 
-  /* Consolidation */
   .consol-block {
     padding: 12px 14px; margin-bottom: 10px;
-    background: rgba(124,156,255,0.05);
-    border: 1px solid rgba(124,156,255,0.2);
+    background: ${isLight ? "#f2f4ff" : "rgba(124,156,255,0.05)"};
+    border: 1px solid ${isLight ? "#c5d0ff" : "rgba(124,156,255,0.2)"};
     border-radius: 8px;
   }
   .consol-target { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
   .consol-source { display: flex; align-items: center; gap: 10px; margin-left: 20px; padding: 3px 0; }
   .consol-label { font-size: 9px; font-weight: 800; letter-spacing: 1.5px; color: var(--txt-dim); min-width: 60px; }
-  .consol-val { font-family: ui-monospace, Menlo, monospace; font-size: 10px; color: #c084fc; flex: 1; word-break: break-all; }
-  .consol-target .consol-val { color: #7c9cff; font-weight: 600; }
+  .consol-val { font-family: ui-monospace, Menlo, monospace; font-size: 10px; color: ${isLight ? "#7c3aed" : "#c084fc"}; flex: 1; word-break: break-all; }
+  .consol-target .consol-val { color: ${isLight ? "#3b5cb8" : "#7c9cff"}; font-weight: 600; }
   .consol-tag { font-size: 8.5px; font-weight: 700; padding: 2px 8px; border-radius: 10px; border: 1px solid; }
-  .consol-auto { color: #7c9cff; background: rgba(124,156,255,0.1); border-color: rgba(124,156,255,0.25); }
-  .consol-manual { color: var(--mal); background: rgba(255,77,109,0.1); border-color: rgba(255,77,109,0.3); }
+  .consol-auto { color: ${isLight ? "#3b5cb8" : "#7c9cff"}; background: ${isLight ? "#f0f3ff" : "rgba(124,156,255,0.1)"}; border-color: ${isLight ? "#c5d0ff" : "rgba(124,156,255,0.25)"}; }
+  .consol-manual { color: var(--mal); background: ${isLight ? "#fff0f2" : "rgba(255,77,109,0.1)"}; border-color: ${isLight ? "#f0b5be" : "rgba(255,77,109,0.3)"}; }
+
+  .glossary-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-top: 16px; }
+  .glossary-item {
+    padding: 14px 16px;
+    background: ${isLight ? "#f6f8fa" : "rgba(10,14,20,0.4)"};
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    border-left: 3px solid var(--purple);
+  }
+  .glossary-name { font-size: 12px; font-weight: 800; color: var(--txt-strong); margin-bottom: 6px; letter-spacing: -0.2px; }
+  .glossary-body { font-size: 11px; color: var(--txt-muted); line-height: 1.55; }
 
   .empty-state {
     padding: 24px;
-    background: rgba(10,14,20,0.3);
+    background: ${isLight ? "#f6f8fa" : "rgba(10,14,20,0.3)"};
     border: 1px dashed var(--line);
     border-radius: 8px;
     text-align: center;
@@ -4905,20 +5191,13 @@ export default function App() {
     font-size: 11px;
   }
 
-  /* Print styles */
   @media print {
     :root {
-      --bg: #ffffff;
-      --bg-page: #ffffff;
-      --panel: #ffffff;
+      --bg: #ffffff; --bg-page: #ffffff; --panel: #ffffff;
       --line: #d0d7de;
-      --txt: #1a1f26;
-      --txt-strong: #05070a;
-      --txt-muted: #57636f;
-      --txt-dim: #7a8794;
-      --cyan: #0088a8;
-      --green: #008040;
-      --purple: #7c3aed;
+      --txt: #1a1f26; --txt-strong: #05070a;
+      --txt-muted: #57636f; --txt-dim: #7a8794;
+      --cyan: #0088a8; --green: #008040; --purple: #7c3aed;
     }
     html, body { background: #ffffff; color: var(--txt); }
     body { padding: 0; max-width: none; }
@@ -4929,30 +5208,14 @@ export default function App() {
     }
     .page:last-child { page-break-after: auto; }
     .page::before { display: none; }
-    .page::after { color: rgba(255,77,109,0.08) !important; }
     .cover { min-height: auto; }
     .cover-title { color: #05070a; text-shadow: none; font-size: 42px; }
     .cover-stat, .cover-meta { background: #f6f8fa; }
-    .stat-label { color: #57636f; }
-    .hunt-query pre {
-      background: #f6f8fa;
-      color: #1a1f26;
-      border-color: #d0d7de;
-      border-left-color: #0088a8;
-    }
-    .mitre-col, .verdict-card, .tech-row, .consol-block, .callout {
-      background: #f6f8fa;
-    }
-    .mitre-cell {
-      background: #ffffff; color: #57636f; border-color: #d0d7de;
-    }
-    .mitre-obs {
-      background: #cff5fb; color: #005566; border-color: #0088a8; box-shadow: none;
-    }
-    .cover-footer, .section-header::before {
-      box-shadow: none;
-    }
-    /* Print footer with page number */
+    .hunt-query pre { background: #f6f8fa; color: #1a1f26; border-color: #d0d7de; border-left-color: #0088a8; }
+    .mitre-col, .verdict-card, .tech-row, .consol-block, .callout, .glossary-item { background: #f6f8fa; }
+    .mitre-cell { background: #ffffff; color: #57636f; border-color: #d0d7de; }
+    .mitre-obs { background: #cff5fb; color: #005566; border-color: #0088a8; box-shadow: none; }
+    .section-header::before { box-shadow: none; }
     @page {
       margin: 20mm 15mm 25mm 15mm;
       @bottom-center {
@@ -4964,67 +5227,102 @@ export default function App() {
 </style>
 </head>
 <body>
-  ${sections}
+  ${orderedSections}
 </body>
 </html>`;
   };
 
-  // Generate Markdown version
+  // Markdown export — respects section toggles and query filters
   const generateReportMarkdown = () => {
     const data = buildReportData();
+    const enabledSections = new Set(reportSections.filter(s => s.enabled).map(s => s.id));
     const dateStr = data.generatedAt.toISOString().split("T")[0];
     let md = "";
-    md += `# Threat Intelligence Report\n\n`;
-    md += `**TLP:${data.tlp}** · **Report ID:** ${data.reportId} · **Generated:** ${dateStr}\n\n`;
-    md += `**Analyst:** ${data.analyst} · **Organization:** ${data.org}\n\n`;
-    if (data.sourceUrl) md += `**Source:** ${data.sourceUrl}\n\n`;
-    md += `---\n\n`;
 
-    md += `## Executive Summary\n\n`;
-    if (data.articleHeadline) md += `> **${data.articleHeadline}**\n\n`;
-    if (data.execSummary) md += `${data.execSummary}\n\n`;
-    md += `### Verdict Breakdown\n\n`;
-    md += `| Verdict | Count |\n|---|---|\n`;
-    md += `| Malicious | ${data.verdictCounts.Malicious} |\n`;
-    md += `| Suspicious | ${data.verdictCounts.Suspicious} |\n`;
-    md += `| Whitelisted | ${data.verdictCounts.Whitelisted} |\n`;
-    md += `| Unknown | ${data.verdictCounts.Unknown} |\n\n`;
-    if (data.families.length) md += `### Malware Families\n\n${data.families.map(f => `- ${f}`).join("\n")}\n\n`;
-    if (data.recommendations.length) {
-      md += `### Priority Actions\n\n`;
-      data.recommendations.forEach((r, i) => { md += `${i + 1}. ${r}\n`; });
-      md += `\n`;
+    if (enabledSections.has("cover")) {
+      md += `# Threat Intelligence Report\n\n`;
+      md += `**TLP:${data.tlp}** · **Report ID:** ${data.reportId} · **Generated:** ${dateStr}\n\n`;
+      md += `**Analyst:** ${data.analyst} · **Organization:** ${data.org}\n\n`;
+      if (data.sourceUrl) md += `**Source:** ${data.sourceUrl}\n\n`;
+      md += `---\n\n`;
     }
 
-    md += `## Technical IOC Report\n\n`;
-    if (data.techSummary) md += `${data.techSummary}\n\n`;
-    data.entries.forEach(([cat, arr]) => {
-      md += `### ${cat} (${arr.length})\n\n`;
-      md += `| Indicator | Verdict |\n|---|---|\n`;
-      arr.forEach(v => {
-        const d = enrichCache[`${cat}::${v}`]?.data;
-        md += `| \`${v}\` | ${d?._verdict || "Unknown"} |\n`;
-      });
-      md += `\n`;
-    });
+    if (enabledSections.has("exec")) {
+      md += `## Executive Summary\n\n`;
+      if (data.articleHeadline) md += `> **${data.articleHeadline}**\n\n`;
+      if (data.execSummary) md += `${data.execSummary}\n\n`;
+      md += `### Verdict Breakdown\n\n`;
+      md += `| Verdict | Count |\n|---|---|\n`;
+      md += `| Malicious | ${data.verdictCounts.Malicious} |\n`;
+      md += `| Suspicious | ${data.verdictCounts.Suspicious} |\n`;
+      md += `| Whitelisted | ${data.verdictCounts.Whitelisted} |\n`;
+      md += `| Unknown | ${data.verdictCounts.Unknown} |\n\n`;
+      if (data.families.length) md += `### Malware Families\n\n${data.families.map(f => `- ${f}`).join("\n")}\n\n`;
+      if (data.recommendations.length) {
+        md += `### Priority Actions\n\n`;
+        data.recommendations.forEach((r, i) => { md += `${i + 1}. ${r}\n`; });
+        md += `\n`;
+      }
+    }
 
-    if (data.techniques.length) {
+    if (enabledSections.has("technical")) {
+      md += `## Technical IOC Report\n\n`;
+      if (data.techSummary) md += `${data.techSummary}\n\n`;
+      data.entries.forEach(([cat, arr]) => {
+        md += `### ${cat} (${arr.length})\n\n`;
+        md += `| Indicator | Verdict | Enrichment |\n|---|---|---|\n`;
+        arr.forEach(v => {
+          const d = enrichCache[`${cat}::${v}`]?.data;
+          md += `| \`${v}\` | ${d?._verdict || "Unknown"} | ${buildSourcesLabel(d)} |\n`;
+        });
+        md += `\n`;
+      });
+    }
+
+    if (enabledSections.has("mitre") && data.techniques.length) {
       md += `## MITRE ATT&CK Techniques\n\n`;
       data.techniques.forEach(t => { md += `- **${t}** — ${MITRE_TACTICS.find(tc => tc.techniques.includes(t.split(".")[0]))?.name || "—"}\n`; });
       md += `\n`;
     }
 
-    md += `## Hunting Playbook\n\n`;
-    data.entries.filter(([cat]) => ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","FILE_NAME","FILE_PATH","EMAIL","CVE"].includes(cat)).forEach(([cat, arr]) => {
-      const kql = huntKQL(cat, arr);
-      const spl = huntSPL(cat, arr);
-      const aql = huntAQL(cat, arr);
-      if (!kql && !spl && !aql) return;
-      md += `### ${cat}\n\n`;
-      if (kql) md += `**Sentinel / Defender XDR (KQL)**\n\n\`\`\`kql\n${kql}\n\`\`\`\n\n`;
-      if (spl) md += `**Splunk (SPL)**\n\n\`\`\`spl\n${spl}\n\`\`\`\n\n`;
-      if (aql) md += `**QRadar (AQL)**\n\n\`\`\`sql\n${aql}\n\`\`\`\n\n`;
-    });
+    if (enabledSections.has("hunting")) {
+      md += `## Hunting Playbook\n\n`;
+      data.entries.filter(([cat]) => ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","FILE_NAME","FILE_PATH","EMAIL","CVE"].includes(cat)).forEach(([cat, arr]) => {
+        const kql = reportQueryLangs.kql ? huntKQL(cat, arr) : null;
+        const spl = reportQueryLangs.spl ? huntSPL(cat, arr) : null;
+        const aql = reportQueryLangs.aql ? huntAQL(cat, arr) : null;
+        const cql = reportQueryLangs.cql ? huntCQL(cat, arr) : null;
+        if (!kql && !spl && !aql && !cql) return;
+        md += `### ${cat}\n\n`;
+        if (kql) md += `**Sentinel / Defender XDR (KQL)**\n\n\`\`\`kql\n${kql}\n\`\`\`\n\n`;
+        if (spl) md += `**Splunk (SPL)**\n\n\`\`\`spl\n${spl}\n\`\`\`\n\n`;
+        if (aql) md += `**QRadar (AQL)**\n\n\`\`\`sql\n${aql}\n\`\`\`\n\n`;
+        if (cql) md += `**CrowdStrike Falcon (CQL)**\n\n\`\`\`\n${cql}\n\`\`\`\n\n`;
+      });
+    }
+
+    if (enabledSections.has("consolidation") && Object.keys(data.mergedHashes).length) {
+      md += `## Hash Consolidation\n\n`;
+      Object.entries(data.mergedHashes).forEach(([sha256, m]) => {
+        md += `**SHA256:** \`${sha256}\`\n\n`;
+        m.removed.forEach(r => {
+          md += `- **${r.cat}:** \`${r.value}\` — ${r.manual ? "Manually converted" : "Auto-deduplicated"}\n`;
+        });
+        md += `\n`;
+      });
+    }
+
+    if (enabledSections.has("glossary")) {
+      md += `## Glossary & Source Reference\n\n`;
+      md += `- **Kaspersky KSN:** Red = malicious, Yellow = suspicious, Green = clean, Grey = unknown\n`;
+      md += `- **VirusTotal:** X/Y detections (engines flagging / total engines)\n`;
+      md += `- **AbuseIPDB:** 0–100% confidence score\n`;
+      md += `- **Hybrid Analysis:** Falcon Sandbox verdict + threat score 0–100\n`;
+      md += `- **Tri.age:** Behavioral score 0–10\n`;
+      md += `- **abuse.ch:** ThreatFox / URLhaus / MalwareBazaar community feeds\n`;
+      md += `- **OTX:** Pulse count from AlienVault Open Threat Exchange\n`;
+      md += `- **TLP:** WHITE = unrestricted, GREEN = community, AMBER = internal, RED = named recipients\n\n`;
+    }
 
     md += `---\n\n_Generated with Intel Extractor ${APP_VERSION} · https://aamir-muhammad.github.io/Intel-Extractor_\n`;
     return md;
@@ -5034,8 +5332,9 @@ export default function App() {
     localStorage.setItem("ie_analyst", reportAnalyst);
     localStorage.setItem("ie_org", reportOrg);
     if (fmt === "html") {
-      const html = generateReportHTML(reportTemplate);
-      downloadBlob(new Blob([html], { type: "text/html;charset=utf-8" }), `intel-extractor-report_${reportId}.html`);
+      const html = generateReportHTML(reportVariant);
+      const suffix = reportVariant === "light" ? "_light" : "";
+      downloadBlob(new Blob([html], { type: "text/html;charset=utf-8" }), `intel-extractor-report_${reportId}${suffix}.html`);
     } else if (fmt === "md") {
       const md = generateReportMarkdown();
       downloadBlob(new Blob([md], { type: "text/markdown;charset=utf-8" }), `intel-extractor-report_${reportId}.md`);
@@ -5043,13 +5342,15 @@ export default function App() {
       const md = generateReportMarkdown();
       copyText(md, "report-md");
     } else if (fmt === "print") {
-      const html = generateReportHTML(reportTemplate);
+      // Force light for print regardless — the browser print dialog respects it
+      const html = generateReportHTML("light");
       const w = window.open("", "_blank");
       w.document.write(html);
       w.document.close();
       setTimeout(() => w.print(), 500);
     }
   };
+
 
   const exportTypeCSV = (cat, arr) => {
     const shown = proc(arr, cat);
@@ -5085,7 +5386,7 @@ export default function App() {
         }} onClick={(e) => { if (e.target === e.currentTarget) setReportOpen(false); }}>
           <div style={{
             background: "#080b12", border: "1px solid rgba(0,229,255,0.3)", borderRadius: 16,
-            width: "100%", maxWidth: 1200, maxHeight: "90vh",
+            width: "100%", maxWidth: 1280, maxHeight: "92vh",
             display: "flex", flexDirection: "column",
             boxShadow: "0 0 60px rgba(0,229,255,0.15)",
             overflow: "hidden",
@@ -5120,41 +5421,84 @@ export default function App() {
               </button>
             </div>
 
-            {/* Modal Body */}
-            <div style={{ display: "grid", gridTemplateColumns: "260px 1fr 300px", flex: 1, overflow: "hidden" }}>
+            {/* Variant Toggle — prominent, at top so analysts see it */}
+            <div style={{
+              padding: "14px 24px", borderBottom: "1px solid rgba(120,160,180,0.15)",
+              display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap",
+              background: "rgba(10,14,20,0.5)",
+            }}>
+              <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: 2, color: "#7f95a3" }}>REPORT VARIANT</span>
+              <div style={{ display: "flex", gap: 6, background: "rgba(0,0,0,0.4)", padding: 4, borderRadius: 10, border: "1px solid rgba(120,160,180,0.15)" }}>
+                <button onClick={() => setReportVariant("dark")}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 8, padding: "8px 16px",
+                    background: reportVariant === "dark" ? "linear-gradient(135deg, #00e5ff, #0088a8)" : "transparent",
+                    color: reportVariant === "dark" ? "#04111a" : "#8aa0ad",
+                    border: "none", borderRadius: 6,
+                    fontSize: 12, fontWeight: 700, cursor: "pointer",
+                    boxShadow: reportVariant === "dark" ? "0 0 14px rgba(0,229,255,0.3)" : "none",
+                  }}>
+                  🌙 DARK <span style={{ opacity: 0.7, fontSize: 10, marginLeft: 4 }}>for sharing</span>
+                </button>
+                <button onClick={() => setReportVariant("light")}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 8, padding: "8px 16px",
+                    background: reportVariant === "light" ? "linear-gradient(135deg, #ffb84d, #f59e0b)" : "transparent",
+                    color: reportVariant === "light" ? "#04111a" : "#8aa0ad",
+                    border: "none", borderRadius: 6,
+                    fontSize: 12, fontWeight: 700, cursor: "pointer",
+                    boxShadow: reportVariant === "light" ? "0 0 14px rgba(255,184,77,0.3)" : "none",
+                  }}>
+                  ☀️ LIGHT <span style={{ opacity: 0.7, fontSize: 10, marginLeft: 4 }}>for printing</span>
+                </button>
+              </div>
+              <span style={{ fontSize: 10, color: "#5d7382", flex: 1, textAlign: "right" }}>
+                {reportVariant === "dark" ? "Dark theme — cyber aesthetic, best for viewing on screen or Slack" : "Light theme — clean white background, best for printing or attachment to formal reports"}
+              </span>
+            </div>
 
-              {/* Left: Template Picker */}
-              <div style={{ padding: 20, borderRight: "1px solid rgba(120,160,180,0.15)", overflowY: "auto" }}>
-                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 2, color: "#5d7382", marginBottom: 12 }}>TEMPLATE</div>
+            {/* Modal Body */}
+            <div style={{ display: "grid", gridTemplateColumns: "240px 1fr 320px", flex: 1, overflow: "hidden" }}>
+
+              {/* Left: Template Presets */}
+              <div style={{ padding: 18, borderRight: "1px solid rgba(120,160,180,0.15)", overflowY: "auto" }}>
+                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 2, color: "#5d7382", marginBottom: 12 }}>PRESETS</div>
                 {[
-                  { id: "full", name: "Full Investigation Report", desc: "Cover + all sections + appendix", audience: "COMPREHENSIVE", icon: "📊" },
-                  { id: "exec", name: "Executive Summary", desc: "Business impact, verdicts, actions", audience: "LEADERSHIP", icon: "📋" },
-                  { id: "technical", name: "Technical IOC Report", desc: "Full IOC tables with enrichment", audience: "SOC", icon: "🔍" },
-                  { id: "mitre", name: "MITRE ATT&CK Mapping", desc: "Techniques heatmap + tactics", audience: "ANALYSTS", icon: "🎯" },
-                  { id: "hunting", name: "Hunting Playbook", desc: "KQL / SPL / AQL queries", audience: "HUNTERS", icon: "🎣" },
+                  { id: "full", name: "Full Investigation", desc: "Everything included", audience: "COMPREHENSIVE", icon: "📊" },
+                  { id: "exec", name: "Executive Summary", desc: "Cover + Executive + Glossary", audience: "LEADERSHIP", icon: "📋" },
+                  { id: "technical", name: "Technical IOC", desc: "IOC tables + Consolidation", audience: "SOC", icon: "🔍" },
+                  { id: "mitre", name: "MITRE ATT&CK", desc: "Techniques heatmap", audience: "ANALYSTS", icon: "🎯" },
+                  { id: "hunting", name: "Hunting Playbook", desc: "SIEM/EDR queries", audience: "HUNTERS", icon: "🎣" },
                 ].map(t => (
-                  <button key={t.id} onClick={() => setReportTemplate(t.id)}
+                  <button key={t.id} onClick={() => applyTemplate(t.id)}
                     style={{
                       display: "block", width: "100%", textAlign: "left",
-                      padding: "12px 14px", marginBottom: 8,
+                      padding: "10px 12px", marginBottom: 6,
                       background: reportTemplate === t.id ? "rgba(192,132,252,0.1)" : "rgba(10,14,20,0.4)",
                       border: `1px solid ${reportTemplate === t.id ? "rgba(192,132,252,0.5)" : "rgba(120,160,180,0.15)"}`,
                       borderRadius: 8,
                       cursor: "pointer",
                       boxShadow: reportTemplate === t.id ? "0 0 12px rgba(192,132,252,0.2)" : "none",
                     }}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-                      <span style={{ fontSize: 16 }}>{t.icon}</span>
-                      <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1.5, color: reportTemplate === t.id ? "#c084fc" : "#5d7382" }}>{t.audience}</span>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 3 }}>
+                      <span style={{ fontSize: 14 }}>{t.icon}</span>
+                      <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1.2, color: reportTemplate === t.id ? "#c084fc" : "#5d7382" }}>{t.audience}</span>
                     </div>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: reportTemplate === t.id ? "#eafcff" : "#c8d6dd", marginBottom: 3 }}>{t.name}</div>
-                    <div style={{ fontSize: 10, color: "#7f95a3", lineHeight: 1.4 }}>{t.desc}</div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: reportTemplate === t.id ? "#eafcff" : "#c8d6dd", marginBottom: 2 }}>{t.name}</div>
+                    <div style={{ fontSize: 9, color: "#7f95a3", lineHeight: 1.4 }}>{t.desc}</div>
                   </button>
                 ))}
+                <div style={{
+                  marginTop: 14, padding: "10px 12px",
+                  background: "rgba(10,14,20,0.5)", border: "1px dashed rgba(120,160,180,0.2)",
+                  borderRadius: 6, fontSize: 9, color: "#7f95a3", lineHeight: 1.5,
+                }}>
+                  💡 Presets pre-configure sections. Fine-tune in <strong style={{ color: "#c8d6dd" }}>Sections</strong> &amp; <strong style={{ color: "#c8d6dd" }}>Content</strong> tabs.
+                </div>
               </div>
 
               {/* Center: Preview */}
-              <div style={{ padding: 0, overflow: "hidden", display: "flex", flexDirection: "column", background: "#05070a" }}>
+              <div style={{ padding: 0, overflow: "hidden", display: "flex", flexDirection: "column", background: reportVariant === "light" ? "#ffffff" : "#05070a" }}>
                 <div style={{
                   padding: "10px 16px", borderBottom: "1px solid rgba(120,160,180,0.15)",
                   fontSize: 10, fontWeight: 800, letterSpacing: 2, color: "#7f95a3",
@@ -5162,135 +5506,250 @@ export default function App() {
                   background: "rgba(10,14,20,0.4)",
                 }}>
                   <span>LIVE PREVIEW</span>
-                  <span style={{ color: "#c084fc" }}>{reportTemplate.toUpperCase()}</span>
+                  <span style={{ color: reportVariant === "dark" ? "#00e5ff" : "#f59e0b" }}>
+                    {reportVariant === "dark" ? "🌙 DARK VARIANT" : "☀️ LIGHT VARIANT"}
+                  </span>
                 </div>
                 <iframe
                   ref={reportPreviewRef}
-                  srcDoc={generateReportHTML(reportTemplate)}
-                  style={{ flex: 1, border: "none", background: "#05070a" }}
+                  srcDoc={generateReportHTML(reportVariant)}
+                  style={{ flex: 1, border: "none", background: reportVariant === "light" ? "#ffffff" : "#05070a" }}
                   title="Report Preview"
                 />
               </div>
 
-              {/* Right: Options */}
-              <div style={{ padding: 20, borderLeft: "1px solid rgba(120,160,180,0.15)", overflowY: "auto" }}>
-                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 2, color: "#5d7382", marginBottom: 12 }}>METADATA</div>
+              {/* Right: Tabbed configuration */}
+              <div style={{ borderLeft: "1px solid rgba(120,160,180,0.15)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+                {/* Tab bar */}
+                <div style={{ display: "flex", borderBottom: "1px solid rgba(120,160,180,0.15)" }}>
+                  {[
+                    { id: "metadata", label: "Metadata" },
+                    { id: "sections", label: "Sections" },
+                    { id: "content", label: "Content" },
+                  ].map(t => (
+                    <button key={t.id} onClick={() => setReportTab(t.id)}
+                      style={{
+                        flex: 1, padding: "10px 8px",
+                        background: reportTab === t.id ? "rgba(0,229,255,0.08)" : "transparent",
+                        color: reportTab === t.id ? "#00e5ff" : "#7f95a3",
+                        border: "none",
+                        borderBottom: `2px solid ${reportTab === t.id ? "#00e5ff" : "transparent"}`,
+                        fontSize: 10, fontWeight: 800, letterSpacing: 1.5,
+                        cursor: "pointer",
+                      }}>
+                      {t.label.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
 
-                <div style={{ marginBottom: 14 }}>
-                  <label style={{ fontSize: 10, color: "#8aa0ad", display: "block", marginBottom: 4, letterSpacing: 1 }}>ANALYST NAME</label>
-                  <input value={reportAnalyst} onChange={(e) => setReportAnalyst(e.target.value)} placeholder="Your name"
+                <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+
+                  {reportTab === "metadata" && (
+                    <>
+                      <div style={{ marginBottom: 14 }}>
+                        <label style={{ fontSize: 10, color: "#8aa0ad", display: "block", marginBottom: 4, letterSpacing: 1 }}>ANALYST NAME</label>
+                        <input value={reportAnalyst} onChange={(e) => setReportAnalyst(e.target.value)} placeholder="Your name"
+                          style={{
+                            width: "100%", padding: "8px 10px", fontSize: 12,
+                            background: "rgba(0,0,0,0.4)", border: "1px solid rgba(120,160,180,0.25)",
+                            borderRadius: 6, color: "#e6f0f3", fontFamily: "inherit",
+                          }} />
+                      </div>
+
+                      <div style={{ marginBottom: 14 }}>
+                        <label style={{ fontSize: 10, color: "#8aa0ad", display: "block", marginBottom: 4, letterSpacing: 1 }}>ORGANIZATION</label>
+                        <input value={reportOrg} onChange={(e) => setReportOrg(e.target.value)} placeholder="Company or team"
+                          style={{
+                            width: "100%", padding: "8px 10px", fontSize: 12,
+                            background: "rgba(0,0,0,0.4)", border: "1px solid rgba(120,160,180,0.25)",
+                            borderRadius: 6, color: "#e6f0f3", fontFamily: "inherit",
+                          }} />
+                      </div>
+
+                      <div style={{ marginBottom: 14 }}>
+                        <label style={{ fontSize: 10, color: "#8aa0ad", display: "block", marginBottom: 4, letterSpacing: 1 }}>REFERENCE NUMBER (OPTIONAL)</label>
+                        <input value={reportRefNum} onChange={(e) => setReportRefNum(e.target.value)} placeholder={`Auto: ${reportId}`}
+                          style={{
+                            width: "100%", padding: "8px 10px", fontSize: 12,
+                            background: "rgba(0,0,0,0.4)", border: "1px solid rgba(120,160,180,0.25)",
+                            borderRadius: 6, color: "#e6f0f3", fontFamily: "inherit",
+                          }} />
+                      </div>
+
+                      <div style={{ marginBottom: 14 }}>
+                        <label style={{ fontSize: 10, color: "#8aa0ad", display: "block", marginBottom: 6, letterSpacing: 1 }}>TLP MARKING</label>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 4 }}>
+                          {[
+                            { v: "WHITE", c: "#ffffff", bg: "rgba(255,255,255,0.08)" },
+                            { v: "GREEN", c: "#00ff9c", bg: "rgba(0,255,156,0.1)" },
+                            { v: "AMBER", c: "#ffb84d", bg: "rgba(255,184,77,0.1)" },
+                            { v: "RED", c: "#ff4d6d", bg: "rgba(255,77,109,0.12)" },
+                          ].map(t => (
+                            <button key={t.v} onClick={() => setReportTLP(t.v)}
+                              style={{
+                                padding: "6px 4px", fontSize: 9, fontWeight: 800, letterSpacing: 1,
+                                background: reportTLP === t.v ? t.bg : "rgba(10,14,20,0.4)",
+                                border: `1px solid ${reportTLP === t.v ? t.c : "rgba(120,160,180,0.2)"}`,
+                                borderRadius: 5,
+                                color: reportTLP === t.v ? t.c : "#7f95a3",
+                                cursor: "pointer",
+                              }}>{t.v}</button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div style={{ marginBottom: 14 }}>
+                        <label style={{ fontSize: 10, color: "#8aa0ad", display: "block", marginBottom: 4, letterSpacing: 1 }}>WATERMARK (OPTIONAL)</label>
+                        <input value={reportWatermark} onChange={(e) => setReportWatermark(e.target.value)} placeholder="e.g. DRAFT, INTERNAL"
+                          style={{
+                            width: "100%", padding: "8px 10px", fontSize: 12,
+                            background: "rgba(0,0,0,0.4)", border: "1px solid rgba(120,160,180,0.25)",
+                            borderRadius: 6, color: "#e6f0f3", fontFamily: "inherit",
+                          }} />
+                      </div>
+                    </>
+                  )}
+
+                  {reportTab === "sections" && (
+                    <>
+                      <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 2, color: "#5d7382", marginBottom: 8 }}>REPORT SECTIONS</div>
+                      <div style={{ fontSize: 9, color: "#7f95a3", marginBottom: 14, lineHeight: 1.5 }}>
+                        Toggle sections on/off. Use arrows to reorder. Order below matches report output.
+                      </div>
+                      {reportSections.map((s, idx) => (
+                        <div key={s.id} style={{
+                          display: "flex", alignItems: "center", gap: 6,
+                          padding: "8px 10px", marginBottom: 6,
+                          background: s.enabled ? "rgba(0,229,255,0.05)" : "rgba(10,14,20,0.3)",
+                          border: `1px solid ${s.enabled ? "rgba(0,229,255,0.2)" : "rgba(120,160,180,0.1)"}`,
+                          borderRadius: 6,
+                        }}>
+                          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, cursor: "pointer" }}>
+                            <input type="checkbox" checked={s.enabled} onChange={() => toggleSection(s.id)}
+                              style={{ accentColor: "#00e5ff", cursor: "pointer" }} />
+                            <span style={{ fontSize: 11, color: s.enabled ? "#e6f0f3" : "#7f95a3", fontWeight: 600 }}>{s.name}</span>
+                          </label>
+                          <button onClick={() => moveSection(idx, -1)} disabled={idx === 0}
+                            title="Move up"
+                            style={{
+                              padding: 3, background: "rgba(120,160,180,0.08)", border: "1px solid rgba(120,160,180,0.2)",
+                              borderRadius: 4, color: idx === 0 ? "#3a4a54" : "#8aa0ad",
+                              cursor: idx === 0 ? "not-allowed" : "pointer", fontSize: 10,
+                            }}>▲</button>
+                          <button onClick={() => moveSection(idx, 1)} disabled={idx === reportSections.length - 1}
+                            title="Move down"
+                            style={{
+                              padding: 3, background: "rgba(120,160,180,0.08)", border: "1px solid rgba(120,160,180,0.2)",
+                              borderRadius: 4, color: idx === reportSections.length - 1 ? "#3a4a54" : "#8aa0ad",
+                              cursor: idx === reportSections.length - 1 ? "not-allowed" : "pointer", fontSize: 10,
+                            }}>▼</button>
+                        </div>
+                      ))}
+                    </>
+                  )}
+
+                  {reportTab === "content" && (
+                    <>
+                      <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 2, color: "#5d7382", marginBottom: 8 }}>IOC TYPES TO INCLUDE</div>
+                      <div style={{ fontSize: 9, color: "#7f95a3", marginBottom: 12, lineHeight: 1.5 }}>
+                        Applies globally — filters IOCs in Technical Report and Hunting Playbook.
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, marginBottom: 20 }}>
+                        {entries.map(([cat, arr]) => {
+                          const on = reportIocTypes[cat] !== false;
+                          const cc = colorFor(cat);
+                          return (
+                            <label key={cat} style={{
+                              display: "flex", alignItems: "center", gap: 6,
+                              padding: "5px 8px",
+                              background: on ? `${cc}18` : "rgba(10,14,20,0.4)",
+                              border: `1px solid ${on ? `${cc}55` : "rgba(120,160,180,0.15)"}`,
+                              borderRadius: 5, cursor: "pointer",
+                            }}>
+                              <input type="checkbox" checked={on} onChange={() => toggleReportIocType(cat)}
+                                style={{ accentColor: cc, cursor: "pointer" }} />
+                              <span style={{ fontSize: 10, color: on ? cc : "#7f95a3", fontWeight: 700, letterSpacing: 0.5 }}>{cat}</span>
+                              <span style={{ fontSize: 9, color: "#5d7382", marginLeft: "auto" }}>{arr.length}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+
+                      <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 2, color: "#5d7382", marginBottom: 8 }}>HUNTING QUERY LANGUAGES</div>
+                      <div style={{ fontSize: 9, color: "#7f95a3", marginBottom: 12, lineHeight: 1.5 }}>
+                        Which SIEM/EDR queries appear in the Hunting Playbook.
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 20 }}>
+                        {[
+                          { k: "kql", name: "Sentinel / Defender XDR (KQL)" },
+                          { k: "spl", name: "Splunk (SPL)" },
+                          { k: "aql", name: "IBM QRadar (AQL)" },
+                          { k: "cql", name: "CrowdStrike Falcon (CQL)" },
+                        ].map(q => (
+                          <label key={q.k} style={{
+                            display: "flex", alignItems: "center", gap: 8,
+                            padding: "7px 10px",
+                            background: reportQueryLangs[q.k] ? "rgba(192,132,252,0.08)" : "rgba(10,14,20,0.4)",
+                            border: `1px solid ${reportQueryLangs[q.k] ? "rgba(192,132,252,0.35)" : "rgba(120,160,180,0.15)"}`,
+                            borderRadius: 6, cursor: "pointer",
+                          }}>
+                            <input type="checkbox" checked={reportQueryLangs[q.k]} onChange={() => toggleReportQueryLang(q.k)}
+                              style={{ accentColor: "#c084fc", cursor: "pointer" }} />
+                            <span style={{ fontSize: 11, color: reportQueryLangs[q.k] ? "#e6f0f3" : "#7f95a3", fontWeight: 600 }}>{q.name}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* Export buttons — always visible at bottom */}
+                <div style={{ padding: 14, borderTop: "1px solid rgba(120,160,180,0.15)", background: "rgba(10,14,20,0.5)" }}>
+                  <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 2, color: "#5d7382", marginBottom: 8 }}>EXPORT</div>
+
+                  <button onClick={() => downloadReport("print")}
                     style={{
-                      width: "100%", padding: "8px 10px", fontSize: 12,
-                      background: "rgba(0,0,0,0.4)", border: "1px solid rgba(120,160,180,0.25)",
-                      borderRadius: 6, color: "#e6f0f3", fontFamily: "inherit",
-                    }} />
-                </div>
+                      display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                      width: "100%", padding: "10px 14px", marginBottom: 6,
+                      background: "#00e5ff", border: "none", borderRadius: 8,
+                      color: "#04111a", fontWeight: 700, fontSize: 12,
+                      cursor: "pointer", boxShadow: "0 0 18px rgba(0,229,255,0.35)",
+                    }}>
+                    <FileText size={14} /> Print / Save as PDF
+                  </button>
 
-                <div style={{ marginBottom: 14 }}>
-                  <label style={{ fontSize: 10, color: "#8aa0ad", display: "block", marginBottom: 4, letterSpacing: 1 }}>ORGANIZATION</label>
-                  <input value={reportOrg} onChange={(e) => setReportOrg(e.target.value)} placeholder="Company or team"
+                  <button onClick={() => downloadReport("html")}
                     style={{
-                      width: "100%", padding: "8px 10px", fontSize: 12,
-                      background: "rgba(0,0,0,0.4)", border: "1px solid rgba(120,160,180,0.25)",
-                      borderRadius: 6, color: "#e6f0f3", fontFamily: "inherit",
-                    }} />
-                </div>
+                      display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                      width: "100%", padding: "9px 14px", marginBottom: 6,
+                      background: "rgba(192,132,252,0.1)", border: "1px solid rgba(192,132,252,0.4)",
+                      borderRadius: 8, color: "#c084fc", fontWeight: 700, fontSize: 11,
+                      cursor: "pointer",
+                    }}>
+                    <Download size={13} /> Download HTML ({reportVariant})
+                  </button>
 
-                <div style={{ marginBottom: 14 }}>
-                  <label style={{ fontSize: 10, color: "#8aa0ad", display: "block", marginBottom: 4, letterSpacing: 1 }}>REFERENCE NUMBER (OPTIONAL)</label>
-                  <input value={reportRefNum} onChange={(e) => setReportRefNum(e.target.value)} placeholder={`Auto: ${reportId}`}
+                  <button onClick={() => downloadReport("md")}
                     style={{
-                      width: "100%", padding: "8px 10px", fontSize: 12,
-                      background: "rgba(0,0,0,0.4)", border: "1px solid rgba(120,160,180,0.25)",
-                      borderRadius: 6, color: "#e6f0f3", fontFamily: "inherit",
-                    }} />
-                </div>
+                      display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                      width: "100%", padding: "9px 14px", marginBottom: 6,
+                      background: "rgba(0,255,156,0.08)", border: "1px solid rgba(0,255,156,0.4)",
+                      borderRadius: 8, color: "#00ff9c", fontWeight: 700, fontSize: 11,
+                      cursor: "pointer",
+                    }}>
+                    <Download size={13} /> Download Markdown
+                  </button>
 
-                <div style={{ marginBottom: 14 }}>
-                  <label style={{ fontSize: 10, color: "#8aa0ad", display: "block", marginBottom: 6, letterSpacing: 1 }}>TLP MARKING</label>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 4 }}>
-                    {[
-                      { v: "WHITE", c: "#ffffff", bg: "rgba(255,255,255,0.08)" },
-                      { v: "GREEN", c: "#00ff9c", bg: "rgba(0,255,156,0.1)" },
-                      { v: "AMBER", c: "#ffb84d", bg: "rgba(255,184,77,0.1)" },
-                      { v: "RED", c: "#ff4d6d", bg: "rgba(255,77,109,0.12)" },
-                    ].map(t => (
-                      <button key={t.v} onClick={() => setReportTLP(t.v)}
-                        style={{
-                          padding: "6px 4px", fontSize: 9, fontWeight: 800, letterSpacing: 1,
-                          background: reportTLP === t.v ? t.bg : "rgba(10,14,20,0.4)",
-                          border: `1px solid ${reportTLP === t.v ? t.c : "rgba(120,160,180,0.2)"}`,
-                          borderRadius: 5,
-                          color: reportTLP === t.v ? t.c : "#7f95a3",
-                          cursor: "pointer",
-                        }}>{t.v}</button>
-                    ))}
-                  </div>
-                </div>
-
-                <div style={{ marginBottom: 20 }}>
-                  <label style={{ fontSize: 10, color: "#8aa0ad", display: "block", marginBottom: 4, letterSpacing: 1 }}>WATERMARK (OPTIONAL)</label>
-                  <input value={reportWatermark} onChange={(e) => setReportWatermark(e.target.value)} placeholder="e.g. DRAFT, INTERNAL"
+                  <button onClick={() => downloadReport("copy-md")}
                     style={{
-                      width: "100%", padding: "8px 10px", fontSize: 12,
-                      background: "rgba(0,0,0,0.4)", border: "1px solid rgba(120,160,180,0.25)",
-                      borderRadius: 6, color: "#e6f0f3", fontFamily: "inherit",
-                    }} />
-                </div>
-
-                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 2, color: "#5d7382", marginBottom: 12 }}>EXPORT</div>
-
-                <button onClick={() => downloadReport("print")}
-                  style={{
-                    display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-                    width: "100%", padding: "10px 14px", marginBottom: 8,
-                    background: "#00e5ff", border: "none", borderRadius: 8,
-                    color: "#04111a", fontWeight: 700, fontSize: 12,
-                    cursor: "pointer",
-                    boxShadow: "0 0 18px rgba(0,229,255,0.35)",
-                  }}>
-                  <FileText size={14} /> Print / Save as PDF
-                </button>
-
-                <button onClick={() => downloadReport("html")}
-                  style={{
-                    display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-                    width: "100%", padding: "10px 14px", marginBottom: 8,
-                    background: "rgba(192,132,252,0.1)", border: "1px solid rgba(192,132,252,0.4)",
-                    borderRadius: 8, color: "#c084fc", fontWeight: 700, fontSize: 12,
-                    cursor: "pointer",
-                  }}>
-                  <Download size={14} /> Download HTML
-                </button>
-
-                <button onClick={() => downloadReport("md")}
-                  style={{
-                    display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-                    width: "100%", padding: "10px 14px", marginBottom: 8,
-                    background: "rgba(0,255,156,0.08)", border: "1px solid rgba(0,255,156,0.4)",
-                    borderRadius: 8, color: "#00ff9c", fontWeight: 700, fontSize: 12,
-                    cursor: "pointer",
-                  }}>
-                  <Download size={14} /> Download Markdown
-                </button>
-
-                <button onClick={() => downloadReport("copy-md")}
-                  style={{
-                    display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-                    width: "100%", padding: "10px 14px",
-                    background: "rgba(120,160,180,0.06)", border: "1px solid rgba(120,160,180,0.25)",
-                    borderRadius: 8, color: "#8aa0ad", fontWeight: 600, fontSize: 11,
-                    cursor: "pointer",
-                  }}>
-                  <Copy size={12} /> {copied === "report-md" ? "Copied!" : "Copy Markdown"}
-                </button>
-
-                <div style={{
-                  marginTop: 20, padding: "12px 14px",
-                  background: "rgba(10,14,20,0.5)", border: "1px dashed rgba(120,160,180,0.2)",
-                  borderRadius: 8, fontSize: 10, color: "#7f95a3", lineHeight: 1.5,
-                }}>
-                  💡 <strong style={{ color: "#c8d6dd" }}>Tip:</strong> For best PDF quality, use "Print / Save as PDF" and select "Save as PDF" in your browser's print dialog. Print styles will apply light theme for readability.
+                      display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                      width: "100%", padding: "8px 14px",
+                      background: "rgba(120,160,180,0.06)", border: "1px solid rgba(120,160,180,0.25)",
+                      borderRadius: 8, color: "#8aa0ad", fontWeight: 600, fontSize: 10,
+                      cursor: "pointer",
+                    }}>
+                    <Copy size={11} /> {copied === "report-md" ? "Copied!" : "Copy Markdown"}
+                  </button>
                 </div>
               </div>
             </div>
@@ -6023,6 +6482,47 @@ export default function App() {
                       style={{ backgroundColor: `${c}22`, color: c, border: `1px solid ${c}66`, textShadow: `0 0 10px ${c}66` }}>
                       {arr.length}
                     </span>
+                    {/* Inline remove-card confirmation: click X → shows Confirm/Cancel */}
+                    {confirmRemoveCat === cat ? (
+                      <div className="flex items-center gap-1 rounded-md px-1.5 py-1"
+                        style={{ background: "rgba(255,77,109,0.08)", border: "1px solid rgba(255,77,109,0.4)" }}>
+                        <span className="text-[10px] font-semibold" style={{ color: "#ff8a9b" }}>Remove {arr.length}?</span>
+                        <button onClick={(e) => {
+                            e.stopPropagation();
+                            // Wipe entire cat + its enrichCache entries + associated pivots
+                            setIocData(prev => {
+                              if (!prev) return prev;
+                              const next = { ...prev };
+                              delete next[cat];
+                              return next;
+                            });
+                            setEnrichCache(prev => {
+                              const next = { ...prev };
+                              arr.forEach(v => { delete next[`${cat}::${v}`]; });
+                              return next;
+                            });
+                            setConfirmRemoveCat(null);
+                          }}
+                          title="Confirm removal"
+                          className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-bold"
+                          style={{ color: "#04111a", background: "#ff4d6d", border: "none", cursor: "pointer" }}>
+                          <Check size={10} /> Yes
+                        </button>
+                        <button onClick={(e) => { e.stopPropagation(); setConfirmRemoveCat(null); }}
+                          title="Cancel"
+                          className="rounded px-1.5 py-0.5 text-[10px] font-bold"
+                          style={{ color: "#8aa0ad", background: "rgba(120,160,180,0.1)", border: "1px solid rgba(120,160,180,0.25)", cursor: "pointer" }}>
+                          No
+                        </button>
+                      </div>
+                    ) : (
+                      <button onClick={(e) => { e.stopPropagation(); setConfirmRemoveCat(cat); }}
+                        title={`Remove all ${arr.length} ${cat} IOC${arr.length !== 1 ? "s" : ""} and delete this card`}
+                        className="rounded-md p-1"
+                        style={{ color: "#8aa0ad", background: "transparent", border: "1px solid rgba(120,160,180,0.2)", cursor: "pointer" }}>
+                        <X size={12} />
+                      </button>
+                    )}
                   </div>
                 </div>
 
