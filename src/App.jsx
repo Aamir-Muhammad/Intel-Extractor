@@ -44,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v99";
+const APP_VERSION = "v100";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -1582,6 +1582,210 @@ const huntAQL = (cat, arr) => {
   }
 };
 
+// Sigma — generic, SIEM-agnostic detection format (SigmaHQ taxonomy).
+// Only covers categories with a well-established, unambiguous Sigma logsource
+// category. EMAIL and CVE are deliberately omitted: Sigma has no single
+// universally-standard mail logsource category, and Sigma is a log-matching
+// format (not applicable to CVE/vulnerability-database matching) — returning
+// null here (same as CQL already does for CVE) beats fabricating a
+// non-standard mapping.
+const huntSigma = (cat, arr) => {
+  const yamlList = (items, indent = "        ") =>
+    items.map((v) => `${indent}- '${String(v).replace(/'/g, "''")}'`).join("\n");
+
+  switch (cat) {
+    case "IPV4": case "IPV6":
+      return `title: Network Connection to Known-Malicious IP
+status: experimental
+description: Detects network connections to IP(s) sourced from threat intelligence enrichment
+references:
+    - Intel Extractor enrichment
+logsource:
+    category: network_connection
+detection:
+    selection:
+        DestinationIp:
+${yamlList(arr)}
+    condition: selection
+falsepositives:
+    - Legitimate connections to shared/CDN/cloud infrastructure
+level: high`;
+
+    case "DOMAIN":
+      return `title: DNS Query for Known-Malicious Domain
+status: experimental
+description: Detects DNS resolution of domain(s) sourced from threat intelligence enrichment
+references:
+    - Intel Extractor enrichment
+logsource:
+    category: dns_query
+detection:
+    selection:
+        query|contains:
+${yamlList(arr)}
+    condition: selection
+falsepositives:
+    - Unknown
+level: high`;
+
+    case "URL": {
+      const hosts = [...new Set(arr.map((u) => { try { return u.replace(/^https?:\/\//i, "").split("/")[0].split(":")[0]; } catch { return u; } }))];
+      return `title: Proxy Request to Known-Malicious URL
+status: experimental
+description: Detects HTTP(S) requests matching URL(s) sourced from threat intelligence enrichment
+references:
+    - Intel Extractor enrichment
+logsource:
+    category: proxy
+detection:
+    selection_url:
+        c-uri|contains:
+${yamlList(arr)}
+    selection_host:
+        cs-host:
+${yamlList(hosts)}
+    condition: 1 of selection_*
+falsepositives:
+    - Unknown
+level: high`;
+    }
+
+    case "MD5": case "SHA1": case "SHA256": {
+      return `title: Process Creation Matching Known-Malicious ${cat} Hash
+status: experimental
+description: Detects process creation events where the file hash matches (a) known-malicious ${cat}(s) sourced from threat intelligence enrichment
+references:
+    - Intel Extractor enrichment
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        Hashes|contains:
+${yamlList(arr)}
+    condition: selection
+falsepositives:
+    - Unknown
+level: high`;
+    }
+
+    case "FILE_NAME":
+      return `title: Process Creation Matching Known-Malicious File Name
+status: experimental
+description: Detects process creation events where the image file name matches (a) known-malicious file name(s) sourced from threat intelligence enrichment
+references:
+    - Intel Extractor enrichment
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        Image|endswith:
+${yamlList(arr.map((f) => `\\${f}`))}
+    condition: selection
+falsepositives:
+    - Legitimate file sharing the same name in a different location
+level: high`;
+
+    case "FILE_PATH":
+      return `title: File Event Matching Known-Malicious File Path
+status: experimental
+description: Detects file creation/write events matching (a) known-malicious file path(s) sourced from threat intelligence enrichment
+references:
+    - Intel Extractor enrichment
+logsource:
+    category: file_event
+    product: windows
+detection:
+    selection:
+        TargetFilename|contains:
+${yamlList(arr)}
+    condition: selection
+falsepositives:
+    - Unknown
+level: high`;
+
+    case "SCHEDULED_TASK": {
+      const names = arr.map((v) => v.split(" → ")[0].trim());
+      return `title: Scheduled Task Creation/Modification Matching Known-Malicious Task Name
+status: experimental
+description: Detects scheduled task creation/modification via schtasks.exe/at.exe/PowerShell matching task name(s) sourced from threat intelligence enrichment
+references:
+    - Intel Extractor enrichment
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection_tools:
+        Image|endswith:
+            - '\\schtasks.exe'
+            - '\\at.exe'
+            - '\\powershell.exe'
+            - '\\pwsh.exe'
+    selection_name:
+        CommandLine|contains:
+${yamlList(names)}
+    condition: all of selection_*
+falsepositives:
+    - Legitimate scheduled task administration
+level: high`;
+    }
+
+    case "SERVICE": {
+      const names = arr.map((v) => v.split(" → ")[0].trim());
+      return `title: Service Creation/Modification Matching Known-Malicious Service Name
+status: experimental
+description: Detects service creation/modification via sc.exe/PowerShell matching service name(s) sourced from threat intelligence enrichment
+references:
+    - Intel Extractor enrichment
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection_tools:
+        Image|endswith:
+            - '\\sc.exe'
+            - '\\powershell.exe'
+            - '\\pwsh.exe'
+    selection_name:
+        CommandLine|contains:
+${yamlList(names)}
+    condition: all of selection_*
+falsepositives:
+    - Legitimate service administration
+level: high`;
+    }
+
+    case "COMMAND_LINE": {
+      const tokens = new Set();
+      arr.forEach((cl) => {
+        (String(cl).match(/"[^"]{4,80}"/g) || []).forEach((m) => tokens.add(m.slice(1, -1)));
+        (String(cl).match(/[A-Za-z]:\\[^\s"']{3,150}/g) || []).forEach((m) => tokens.add(m));
+      });
+      const distinctive = [...tokens].filter((t) => t.length > 3).slice(0, 15);
+      const patterns = distinctive.length ? distinctive : arr.slice(0, 10);
+      return `title: Process Creation Matching Known-Malicious Command Line
+status: experimental
+description: Detects process creation events where the command line matches pattern(s) sourced from threat intelligence enrichment
+references:
+    - Intel Extractor enrichment
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        CommandLine|contains:
+${yamlList(patterns)}
+    condition: selection
+falsepositives:
+    - Unknown
+level: high`;
+    }
+
+    default: return null;
+  }
+};
+
 // Categories that support hunt queries
 const HUNT_CATS = new Set(["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","FILE_NAME","FILE_PATH","EMAIL","CVE","SCHEDULED_TASK","SERVICE","COMMAND_LINE"]);
 
@@ -2090,6 +2294,55 @@ export default function App() {
         throw new Error(text.slice(0, 100));
       }
     };
+
+    // ═══════════════════════════════════════════════════════════════
+    // CVE: CISA KEV (confirmed active exploitation), EPSS (predicted
+    // 30-day exploitation probability), NVD (CVSS severity + description).
+    // ═══════════════════════════════════════════════════════════════
+    if (cat === "CVE") {
+      try {
+        const kevj = await callEnrich("cisa_kev");
+        if (kevj && !kevj.error) {
+          results.cisaKev = {
+            listed: !!kevj.listed,
+            dateAdded: kevj.dateAdded || null,
+            dueDate: kevj.dueDate || null,
+            ransomwareUse: kevj.ransomwareUse && kevj.ransomwareUse !== "Unknown" ? kevj.ransomwareUse : null,
+          };
+        }
+      } catch (e) { console.warn("Enrich CISA KEV failed:", e.message); }
+      setPartial();
+
+      try {
+        const epssj = await callEnrich("epss");
+        const row = epssj?.data?.[0];
+        if (row) {
+          results.epss = {
+            score: Math.round(parseFloat(row.epss) * 1000) / 10,       // percentage, 1 decimal
+            percentile: Math.round(parseFloat(row.percentile) * 1000) / 10,
+          };
+        }
+      } catch (e) { console.warn("Enrich EPSS failed:", e.message); }
+      setPartial();
+
+      try {
+        const nvdj = await callEnrich("nvd");
+        const vuln = nvdj?.vulnerabilities?.[0]?.cve;
+        if (vuln) {
+          const metrics = vuln.metrics || {};
+          const cvssEntry = (metrics.cvssMetricV31 || metrics.cvssMetricV30 || metrics.cvssMetricV2 || [])[0];
+          const cvssData = cvssEntry?.cvssData;
+          const desc = (vuln.descriptions || []).find(d => d.lang === "en")?.value || null;
+          results.nvd = {
+            cvss: cvssData?.baseScore ?? null,
+            severity: cvssData?.baseSeverity || cvssEntry?.baseSeverity || null,
+            description: desc,
+            published: vuln.published ? vuln.published.split("T")[0] : null,
+          };
+        }
+      } catch (e) { console.warn("Enrich NVD failed:", e.message); }
+      setPartial();
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // PRE-FLIGHT: For MD5/SHA1, run Tri.age then Kaspersky first.
@@ -2871,6 +3124,25 @@ export default function App() {
           // 404 = no data on this IP (not an error, just quiet)
         } catch (e) { console.warn("Enrich Shodan InternetDB failed:", e.message); }
         setPartial();
+
+        // SANS ISC / DShield — crowd-sourced firewall log submissions.
+        // "attacks" = distinct targets that reported this IP, not a normalized
+        // score, so it's treated as a soft signal (Suspicious ceiling only,
+        // same restraint as AbuseIPDB's own Suspicious tier).
+        try {
+          const sj = await callEnrich("sans_isc");
+          const ipInfo = sj?.ip;
+          if (ipInfo && (ipInfo.count || ipInfo.attacks)) {
+            results.sansIsc = {
+              attacks: parseInt(ipInfo.attacks, 10) || 0,
+              count: parseInt(ipInfo.count, 10) || 0,
+              minDate: ipInfo.mindate || null,
+              maxDate: ipInfo.maxdate || null,
+              threatFeeds: ipInfo.threatfeeds ? Object.keys(ipInfo.threatfeeds) : [],
+            };
+          }
+        } catch (e) { console.warn("Enrich SANS ISC failed:", e.message); }
+        setPartial();
       }
 
       // Kaspersky OpenTIP — hash / IP / domain / URL enrichment.
@@ -3347,9 +3619,17 @@ export default function App() {
       // Individual vendor verdicts (NO_THREAT, LIKELY_MALICIOUS) are ignored.
       let verdict = "Unknown";
       const _isHashCat = ["MD5", "SHA1", "SHA256", "SHA512"].includes(cat);
+      // CVE verdict: CISA KEV listing = confirmed active exploitation in the
+      // wild, treated the same as any other confirmed-malicious signal. High
+      // EPSS (≥50%) without a KEV listing is a prediction, not a confirmation
+      // — Suspicious, not Malicious. CVSS severity alone (no KEV, no high
+      // EPSS) doesn't drive verdict at all — it's shown as context only,
+      // same principle as Kaspersky green not being auto-trusted for non-hashes.
+      if (cat === "CVE" && results.cisaKev?.listed) verdict = "Malicious";
+      else if (cat === "CVE" && (results.epss?.score || 0) >= 50) verdict = "Suspicious";
       // Kaspersky Zone=Red is a strong signal from a first-party AV vendor —
       // check it first alongside the explicit threat feeds.
-      if (results.kaspersky?.zone === "red") verdict = "Malicious";
+      else if (results.kaspersky?.zone === "red") verdict = "Malicious";
       else if (results.threatfox) verdict = "Malicious";
       else if (results.urlhaus?.status === "online") verdict = "Malicious";
       else if (results.malwarebazaar) verdict = "Malicious";
@@ -3379,6 +3659,10 @@ export default function App() {
       else if ((results.otx?.pulses || 0) >= 9) verdict = "Malicious";
       else if ((results.abuseipdb?.score || 0) >= 80) verdict = "Malicious";
       else if ((results.abuseipdb?.score || 0) >= 25) verdict = "Suspicious";
+      // SANS ISC "attacks" is a raw count of distinct reporters, not a
+      // normalized score — kept to a Suspicious ceiling, same restraint as
+      // AbuseIPDB's own mid-range tier.
+      else if ((results.sansIsc?.attacks || 0) >= 5) verdict = "Suspicious";
       else if (results.kaspersky?.zone === "yellow") verdict = "Suspicious";
       // EPP hold / withheld status = registry/registrar intervention → suspicious.
       // Catches withheld impersonation domains that engines haven't classified yet.
@@ -3610,7 +3894,7 @@ export default function App() {
   // IOC types to include (global filter)
   const [reportIocTypes, setReportIocTypes] = useState({}); // { CAT: true }
   // Query languages to include in Hunting Playbook
-  const [reportQueryLangs, setReportQueryLangs] = useState({ kql: true, spl: true, aql: true, cql: true });
+  const [reportQueryLangs, setReportQueryLangs] = useState({ kql: true, spl: true, aql: true, cql: true, sigma: true });
   // Right-panel tab: metadata | sections | content
   const [reportTab, setReportTab] = useState("metadata");
   const reportPreviewRef = useRef(null);
@@ -4238,6 +4522,14 @@ export default function App() {
       domain_age:        e.domainReg?.ageDays != null ? smartAge(e.domainReg.ageDays) : "",
       domain_registered: e.domainReg?.registered || "",
       domain_status:     e.domainReg?.status || "",
+      // SANS ISC / DShield
+      sansisc_attacks:   e.sansIsc?.attacks ?? "",
+      sansisc_feeds:     e.sansIsc?.threatFeeds?.join(", ") || "",
+      // CVE — CISA KEV / EPSS / NVD
+      cisa_kev:          e.cisaKev ? (e.cisaKev.listed ? `Actively Exploited${e.cisaKev.dateAdded ? ` (added ${e.cisaKev.dateAdded})` : ""}` : "Not listed") : "",
+      epss_score:        e.epss?.score != null ? `${e.epss.score}%` : "",
+      nvd_cvss:          e.nvd?.cvss != null ? `${e.nvd.cvss}${e.nvd.severity ? ` (${e.nvd.severity})` : ""}` : "",
+      nvd_description:   e.nvd?.description || "",
       // Timeline
       first_seen:        e._timeline?.firstSeen || "",
       last_seen:         e._timeline?.lastSeen || "",
@@ -4272,6 +4564,10 @@ export default function App() {
     "HA Verdict","HA Score","HA Family","HA AV","HA Tags","HA MITRE","HA URL","HA Downloaded From",
     // Domain
     "Domain Age","Domain Registered","Domain Status",
+    // SANS ISC / DShield
+    "SANS ISC Attacks","SANS ISC Threat Feeds",
+    // CVE — CISA KEV / EPSS / NVD
+    "CISA KEV","EPSS Score","NVD CVSS","NVD Description",
     // Timeline
     "First Seen","Last Seen",
   ];
@@ -4300,6 +4596,9 @@ export default function App() {
       "HA AV": r.ha_av, "HA Tags": r.ha_tags, "HA MITRE": r.ha_mitre, "HA URL": r.ha_url, "HA Downloaded From": r.ha_downloaded,
       "Domain Age": r.domain_age, "Domain Registered": r.domain_registered,
       "Domain Status": r.domain_status,
+      "SANS ISC Attacks": r.sansisc_attacks, "SANS ISC Threat Feeds": r.sansisc_feeds,
+      "CISA KEV": r.cisa_kev, "EPSS Score": r.epss_score,
+      "NVD CVSS": r.nvd_cvss, "NVD Description": r.nvd_description,
       "First Seen": r.first_seen, "Last Seen": r.last_seen,
     };
     return keyMap[h] ?? "";
@@ -4332,6 +4631,7 @@ export default function App() {
   // v98: section reordering, IOC/query filters, CQL, glossary, graph SVG,
   //      dark/light variant, expanded enrichment labels
   // v99: click-to-scroll section navigation, print respects dark/light variant
+  // v100: Sigma hunt-query format; CVE enrichment (CISA KEV/EPSS/NVD); SANS ISC/DShield for IPV4/IPV6
   // ============================================================
   const genReportId = () => {
     const d = new Date();
@@ -4431,9 +4731,13 @@ export default function App() {
   };
   const buildSourcesLabel = (d) => {
     const parts = [];
+    if (d?.cisaKev?.listed) parts.push(`CISA KEV: Actively Exploited${d.cisaKev.dateAdded ? ` (added ${d.cisaKev.dateAdded})` : ""}`);
+    if (d?.epss?.score != null) parts.push(`EPSS: ${d.epss.score}% (30-day exploitation probability)`);
+    if (d?.nvd?.cvss != null) parts.push(`NVD: CVSS ${d.nvd.cvss}${d.nvd.severity ? ` ${d.nvd.severity}` : ""}`);
     if (d?.virustotal?.malicious != null) parts.push(`VirusTotal: ${d.virustotal.malicious}/${d.virustotal.total || "—"} detections`);
     if (d?.kaspersky?.zone) parts.push(kaspZoneLabel(d.kaspersky.zone));
     if (d?.abuseipdb?.abuseScore != null) parts.push(`AbuseIPDB: ${d.abuseipdb.abuseScore}% abuse score`);
+    if (d?.sansIsc?.attacks) parts.push(`SANS ISC: ${d.sansIsc.attacks} attack${d.sansIsc.attacks !== 1 ? "s" : ""} reported`);
     if (d?.threatfox?.malwareName) parts.push(`ThreatFox: ${d.threatfox.malwareName}`);
     if (d?.urlhaus?.threat) parts.push(`URLhaus: ${d.urlhaus.threat}`);
     if (d?.malwarebazaar?.signature) parts.push(`MalwareBazaar: ${d.malwarebazaar.signature}`);
@@ -4753,7 +5057,8 @@ export default function App() {
       const spl = reportQueryLangs.spl ? huntSPL(cat, arr) : null;
       const aql = reportQueryLangs.aql ? huntAQL(cat, arr) : null;
       const cql = reportQueryLangs.cql ? huntCQL(cat, arr) : null;
-      if (!kql && !spl && !aql && !cql) return "";
+      const sigma = reportQueryLangs.sigma ? huntSigma(cat, arr) : null;
+      if (!kql && !spl && !aql && !cql && !sigma) return "";
       return `
         <div class="hunt-block">
           <div class="hunt-block-header">
@@ -4764,11 +5069,12 @@ export default function App() {
           ${spl ? `<div class="hunt-query"><div class="hunt-lang">Splunk (SPL)</div><pre>${escapeHtml(spl)}</pre></div>` : ""}
           ${aql ? `<div class="hunt-query"><div class="hunt-lang">IBM QRadar (AQL)</div><pre>${escapeHtml(aql)}</pre></div>` : ""}
           ${cql ? `<div class="hunt-query"><div class="hunt-lang">CrowdStrike Falcon (CQL)</div><pre>${escapeHtml(cql)}</pre></div>` : ""}
+          ${sigma ? `<div class="hunt-query"><div class="hunt-lang">Sigma (Generic / SIEM-agnostic)</div><pre>${escapeHtml(sigma)}</pre></div>` : ""}
         </div>
       `;
     }).filter(Boolean).join("");
 
-    const anyLang = reportQueryLangs.kql || reportQueryLangs.spl || reportQueryLangs.aql || reportQueryLangs.cql;
+    const anyLang = reportQueryLangs.kql || reportQueryLangs.spl || reportQueryLangs.aql || reportQueryLangs.cql || reportQueryLangs.sigma;
     sec.hunting = `
       <section class="page">
         <div class="section-header">
@@ -4776,7 +5082,7 @@ export default function App() {
           <div class="section-badge">FOR THREAT HUNTERS</div>
         </div>
         <div class="prose"><p>Copy-paste hunt queries for the leading SIEM and EDR platforms. Recommended lookback: 30 days for infrastructure IOCs, 7 days for host-based artifacts.</p></div>
-        ${!anyLang ? `<div class="empty-state">No query languages selected. Enable KQL / SPL / AQL / CQL in the Content tab.</div>` : (huntBlocks || `<div class="empty-state">No huntable IOCs in this dataset.</div>`)}
+        ${!anyLang ? `<div class="empty-state">No query languages selected. Enable KQL / SPL / AQL / CQL / Sigma in the Content tab.</div>` : (huntBlocks || `<div class="empty-state">No huntable IOCs in this dataset.</div>`)}
         ${data.c2Nodes.length ? `
           <div class="prose"><h3>Command &amp; Control Infrastructure</h3><p>Confirmed C2 endpoints identified by behavioral analysis. Prioritize network blocking and hunt for outbound connections to these hosts.</p></div>
           <div class="chip-row">${data.c2Nodes.slice(0, 20).map(c => `<span class="chip chip-mal">${escapeHtml(c)}</span>`).join("")}</div>
@@ -4866,6 +5172,22 @@ export default function App() {
           <div class="glossary-item">
             <div class="glossary-name">urlscan.io</div>
             <div class="glossary-body">Website scanner. Provides serving IP, contacted infrastructure, screenshots, and brand-impersonation detection for URLs and domains.</div>
+          </div>
+          <div class="glossary-item">
+            <div class="glossary-name">CISA KEV (Known Exploited Vulnerabilities)</div>
+            <div class="glossary-body">U.S. government catalog of CVEs with <strong>confirmed</strong> active exploitation in the wild. A KEV listing is treated as a Malicious verdict — this is the strongest exploitation signal available for a CVE.</div>
+          </div>
+          <div class="glossary-item">
+            <div class="glossary-name">EPSS (Exploit Prediction Scoring System)</div>
+            <div class="glossary-body">FIRST.org's probability (0–100%) that a CVE will be exploited in the next 30 days. A prediction, not a confirmation — scores ≥50% are treated as Suspicious.</div>
+          </div>
+          <div class="glossary-item">
+            <div class="glossary-name">NVD (National Vulnerability Database)</div>
+            <div class="glossary-body">NIST's CVSS severity score and vulnerability description. Shown as context only — severity alone (without a KEV listing or high EPSS score) does not drive the verdict, since a severe CVE with no exploitation signal isn't yet a confirmed or predicted threat.</div>
+          </div>
+          <div class="glossary-item">
+            <div class="glossary-name">SANS ISC / DShield</div>
+            <div class="glossary-body">Crowd-sourced firewall/IDS log submissions aggregated by the SANS Internet Storm Center. "Attacks" is a raw count of distinct reporters, not a normalized score — kept to a Suspicious ceiling in verdicts, same restraint as AbuseIPDB's mid-range tier.</div>
           </div>
           <div class="glossary-item">
             <div class="glossary-name">TLP (Traffic Light Protocol)</div>
@@ -5332,12 +5654,14 @@ export default function App() {
         const spl = reportQueryLangs.spl ? huntSPL(cat, arr) : null;
         const aql = reportQueryLangs.aql ? huntAQL(cat, arr) : null;
         const cql = reportQueryLangs.cql ? huntCQL(cat, arr) : null;
-        if (!kql && !spl && !aql && !cql) return;
+        const sigma = reportQueryLangs.sigma ? huntSigma(cat, arr) : null;
+        if (!kql && !spl && !aql && !cql && !sigma) return;
         md += `### ${cat}\n\n`;
         if (kql) md += `**Sentinel / Defender XDR (KQL)**\n\n\`\`\`kql\n${kql}\n\`\`\`\n\n`;
         if (spl) md += `**Splunk (SPL)**\n\n\`\`\`spl\n${spl}\n\`\`\`\n\n`;
         if (aql) md += `**QRadar (AQL)**\n\n\`\`\`sql\n${aql}\n\`\`\`\n\n`;
         if (cql) md += `**CrowdStrike Falcon (CQL)**\n\n\`\`\`\n${cql}\n\`\`\`\n\n`;
+        if (sigma) md += `**Sigma (Generic / SIEM-agnostic)**\n\n\`\`\`yaml\n${sigma}\n\`\`\`\n\n`;
       });
     }
 
@@ -5361,6 +5685,10 @@ export default function App() {
       md += `- **Tri.age:** Behavioral score 0–10\n`;
       md += `- **abuse.ch:** ThreatFox / URLhaus / MalwareBazaar community feeds\n`;
       md += `- **OTX:** Pulse count from AlienVault Open Threat Exchange\n`;
+      md += `- **CISA KEV:** Confirmed active exploitation in the wild — treated as Malicious\n`;
+      md += `- **EPSS:** 0–100% predicted probability of exploitation in the next 30 days\n`;
+      md += `- **NVD:** CVSS severity score + description — context only, doesn't drive verdict\n`;
+      md += `- **SANS ISC / DShield:** Crowd-sourced attack report count — capped at Suspicious\n`;
       md += `- **TLP:** WHITE = unrestricted, GREEN = community, AMBER = internal, RED = named recipients\n\n`;
     }
 
@@ -5737,6 +6065,7 @@ export default function App() {
                           { k: "spl", name: "Splunk (SPL)" },
                           { k: "aql", name: "IBM QRadar (AQL)" },
                           { k: "cql", name: "CrowdStrike Falcon (CQL)" },
+                          { k: "sigma", name: "Sigma (Generic / SIEM-agnostic)" },
                         ].map(q => (
                           <label key={q.k} style={{
                             display: "flex", alignItems: "center", gap: 8,
@@ -6795,6 +7124,10 @@ export default function App() {
                             && d.domainReg?.state !== "deleted" && d.urlscan?.apexAgeDays != null;
                           const hasWhois = !!d.whois;
                           const hasShodan = !!d.shodan;
+                          const hasSansIsc = !!d.sansIsc;
+                          const hasCisaKev = !!d.cisaKev;
+                          const hasEpss = !!d.epss;
+                          const hasNvd = !!d.nvd;
                           const hasCircl = !!d.circl;
                           const hasKaspersky = !!d.kaspersky;
                           const hasPivotIP = hasUrlscan && d.urlscan.servingIP && d.urlscan.servingIP !== arr[i];
@@ -6821,6 +7154,46 @@ export default function App() {
                               </div>
                             )}
                             {/* ── VERDICT & IDENTITY ── */}
+                            {!isCondensed && cat === "CVE" && (hasCisaKev || hasEpss || hasNvd) && secRow("Vulnerability Intel", (
+                              <>
+                                  {hasCisaKev && d.cisaKev.listed && (
+                                    <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.15)", border: "1px solid rgba(255,77,109,0.4)" }}
+                                      title="CISA Known Exploited Vulnerabilities catalog — confirmed active exploitation in the wild">
+                                      🔴 CISA KEV · Actively Exploited{d.cisaKev.dateAdded ? ` · Added ${d.cisaKev.dateAdded}` : ""}{d.cisaKev.dueDate ? ` · Remediate by ${d.cisaKev.dueDate}` : ""}{d.cisaKev.ransomwareUse ? ` · 🔒 Ransomware use: ${d.cisaKev.ransomwareUse}` : ""}
+                                    </span>
+                                  )}
+                                  {hasCisaKev && !d.cisaKev.listed && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#8aa0ad", backgroundColor: "rgba(138,160,173,0.08)", border: "1px solid rgba(138,160,173,0.25)" }}>
+                                      ⚪ CISA KEV · Not listed
+                                    </span>
+                                  )}
+                                  {hasEpss && (
+                                    <span className="rounded-full px-2 py-0.5" style={{
+                                      color: d.epss.score >= 50 ? "#fbbf24" : "#8aa0ad",
+                                      backgroundColor: d.epss.score >= 50 ? "rgba(251,191,36,0.10)" : "rgba(138,160,173,0.08)",
+                                      border: `1px solid ${d.epss.score >= 50 ? "rgba(251,191,36,0.35)" : "rgba(138,160,173,0.25)"}`,
+                                    }} title="EPSS — Exploit Prediction Scoring System (first.org): probability of exploitation in the next 30 days">
+                                      {d.epss.score >= 50 ? "🟡" : "⚪"} EPSS · {d.epss.score}% (30-day exploitation probability, {d.epss.percentile}th percentile)
+                                    </span>
+                                  )}
+                                  {hasNvd && (
+                                    <span className="flex flex-col gap-0.5">
+                                      <span className="rounded-full px-2 py-0.5" style={{
+                                        color: (d.nvd.cvss || 0) >= 9 ? "#ff4d6d" : (d.nvd.cvss || 0) >= 7 ? "#fbbf24" : "#4ade80",
+                                        backgroundColor: (d.nvd.cvss || 0) >= 9 ? "rgba(255,77,109,0.10)" : (d.nvd.cvss || 0) >= 7 ? "rgba(251,191,36,0.10)" : "rgba(74,222,128,0.08)",
+                                        border: `1px solid ${(d.nvd.cvss || 0) >= 9 ? "rgba(255,77,109,0.3)" : (d.nvd.cvss || 0) >= 7 ? "rgba(251,191,36,0.3)" : "rgba(74,222,128,0.3)"}`,
+                                      }} title="NVD (National Vulnerability Database) — severity is shown as context only and does not by itself drive the verdict">
+                                        NVD · CVSS {d.nvd.cvss ?? "—"}{d.nvd.severity ? ` (${d.nvd.severity})` : ""}{d.nvd.published ? ` · Published ${d.nvd.published}` : ""}
+                                      </span>
+                                      {d.nvd.description && (
+                                        <span className="rounded-full px-2 py-0.5 text-[10px]" style={{ color: "#7f95a3", backgroundColor: "rgba(148,163,184,0.04)", border: "1px solid rgba(148,163,184,0.15)" }}>
+                                          {d.nvd.description.length > 220 ? d.nvd.description.slice(0, 220) + "…" : d.nvd.description}
+                                        </span>
+                                      )}
+                                    </span>
+                                  )}
+                              </>
+                            ))}
                             {!isCondensed && (hasVerdict || hasThreatfox || hasMalBaz || hasUrlhaus || hasCircl || (hasKaspersky && isHash)) && secRow("Verdict & Identity", (
                               <>
                                   {hasVerdict && (
@@ -7055,7 +7428,7 @@ export default function App() {
                             ))}
 
                             {/* ── INFRASTRUCTURE (skip for hashes) ── */}
-                            {!isCondensed && !isHash && (hasGeo || hasUrlscan || hasWhois || hasShodan) && secRow("Infrastructure", (
+                            {!isCondensed && !isHash && (hasGeo || hasUrlscan || hasWhois || hasShodan || hasSansIsc) && secRow("Infrastructure", (
                               <>
                                   {hasGeo && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#a78bfa", backgroundColor: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)" }}>
@@ -7131,6 +7504,15 @@ export default function App() {
                                       </span>
                                     );
                                   })()}
+                                  {hasSansIsc && (
+                                    <span className="rounded-full px-2 py-0.5" style={{
+                                      color: d.sansIsc.attacks >= 5 ? "#fbbf24" : "#8aa0ad",
+                                      backgroundColor: d.sansIsc.attacks >= 5 ? "rgba(251,191,36,0.10)" : "rgba(138,160,173,0.08)",
+                                      border: `1px solid ${d.sansIsc.attacks >= 5 ? "rgba(251,191,36,0.35)" : "rgba(138,160,173,0.25)"}`,
+                                    }} title="SANS ISC / DShield — crowd-sourced firewall log submissions">
+                                      🛡️ SANS ISC · {d.sansIsc.attacks} attack{d.sansIsc.attacks !== 1 ? "s" : ""} reported{d.sansIsc.count ? ` (${d.sansIsc.count} total reports)` : ""}{d.sansIsc.threatFeeds.length ? ` · Listed: ${d.sansIsc.threatFeeds.slice(0, 3).join(", ")}` : ""}
+                                    </span>
+                                  )}
                                 {hasPivotIP && !dismissedPivots.has(`ip::${d.urlscan.servingIP}::${arr[i]}`) && (
                                     <span className="rounded-full px-2 py-0.5 flex items-center gap-1.5 flex-wrap" style={{ color: "#22d3ee", backgroundColor: "rgba(34,211,238,0.08)", border: "1px solid rgba(34,211,238,0.25)" }}>
                                       <span>Serving IP: {d.urlscan.servingIP}{d.urlscan.servingASN ? ` · ${d.urlscan.servingASN}` : ""}{d.urlscan.servingASNName ? ` · ${d.urlscan.servingASNName}` : ""}</span>
@@ -7486,6 +7868,7 @@ export default function App() {
                     {huntCQL(cat, arr) && <CopyBtn label="CrowdStrike CQL" copied={copied === `${cat}-hunt-cql`} onClick={() => copyText(huntCQL(cat, arr), `${cat}-hunt-cql`)} color={c} />}
                     {huntSPL(cat, arr) && <CopyBtn label="Splunk SPL" copied={copied === `${cat}-hunt-spl`} onClick={() => copyText(huntSPL(cat, arr), `${cat}-hunt-spl`)} color={c} />}
                     {huntAQL(cat, arr) && <CopyBtn label="QRadar AQL" copied={copied === `${cat}-hunt-aql`} onClick={() => copyText(huntAQL(cat, arr), `${cat}-hunt-aql`)} color={c} />}
+                    {huntSigma(cat, arr) && <CopyBtn label="Sigma Rule" copied={copied === `${cat}-hunt-sigma`} onClick={() => copyText(huntSigma(cat, arr), `${cat}-hunt-sigma`)} color={c} />}
                   </div>
                 )}
 
