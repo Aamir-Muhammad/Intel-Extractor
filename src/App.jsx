@@ -44,7 +44,7 @@ const logEvent = (payload) => {
     }).catch(() => {});
   } catch { /* analytics must never break the app */ }
 };
-const APP_VERSION = "v98";
+const APP_VERSION = "v99";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -3614,6 +3614,35 @@ export default function App() {
   // Right-panel tab: metadata | sections | content
   const [reportTab, setReportTab] = useState("metadata");
   const reportPreviewRef = useRef(null);
+  // Holds a section id the user asked to jump to while the preview iframe is
+  // mid-reload (srcDoc reassignment reloads the iframe asynchronously) —
+  // consumed by handleReportPreviewLoad once the new document is ready.
+  const reportScrollPendingRef = useRef(null);
+  // Scroll the live preview iframe to a given report section. Tries immediately
+  // (covers the common case where the preview content hasn't changed) and also
+  // arms the pending ref so a reload in flight (e.g. from a template switch)
+  // re-applies the scroll once the fresh document finishes loading.
+  const scrollToReportSection = (id) => {
+    reportScrollPendingRef.current = id;
+    try {
+      const doc = reportPreviewRef.current?.contentWindow?.document;
+      const el = doc?.getElementById(`section-${id}`);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch { /* cross-doc access can throw during a mid-reload */ }
+  };
+  const handleReportPreviewLoad = () => {
+    const id = reportScrollPendingRef.current;
+    if (!id) return;
+    reportScrollPendingRef.current = null;
+    try {
+      const doc = reportPreviewRef.current?.contentWindow?.document;
+      const el = doc?.getElementById(`section-${id}`);
+      if (el) el.scrollIntoView({ behavior: "auto", block: "start" });
+    } catch { /* ignore */ }
+  };
+  // First section each preset should scroll the preview to, so picking a
+  // template also jumps you to the section it's built around.
+  const TEMPLATE_FOCUS_SECTION = { full: "cover", exec: "exec", technical: "technical", mitre: "mitre", hunting: "hunting" };
   // Auto-initialize IOC-type filter — moved below entries definition to avoid TDZ error
   // Apply template preset: reset section toggles per template selection
   const applyTemplate = (t) => {
@@ -3626,6 +3655,7 @@ export default function App() {
       if (t === "hunting") return { ...s, enabled: ["cover", "hunting", "glossary"].includes(s.id) };
       return s;
     }));
+    scrollToReportSection(TEMPLATE_FOCUS_SECTION[t] || "cover");
   };
   const moveSection = (idx, dir) => {
     setReportSections(prev => {
@@ -4301,6 +4331,7 @@ export default function App() {
   // Presets: Full, Executive, Technical IOC, MITRE ATT&CK, Hunting Playbook
   // v98: section reordering, IOC/query filters, CQL, glossary, graph SVG,
   //      dark/light variant, expanded enrichment labels
+  // v99: click-to-scroll section navigation, print respects dark/light variant
   // ============================================================
   const genReportId = () => {
     const d = new Date();
@@ -4848,10 +4879,11 @@ export default function App() {
       </section>
     `;
 
-    // Build in section order per reportSections
+    // Build in section order per reportSections — wrapped with an id anchor
+    // so the builder UI can scroll the live preview to a specific section.
     const orderedSections = reportSections
       .filter(s => s.enabled && sec[s.id])
-      .map(s => sec[s.id])
+      .map(s => `<div id="section-${s.id}">${sec[s.id]}</div>`)
       .join("");
 
     // Styles — variant-aware. Light variant flips core color vars.
@@ -5192,29 +5224,37 @@ export default function App() {
   }
 
   @media print {
+    /* Force the browser to actually print background colors — otherwise
+       both variants (and especially dark) print with backgrounds stripped. */
+    * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; color-adjust: exact !important; }
+    ${isLight ? `
     :root {
       --bg: #ffffff; --bg-page: #ffffff; --panel: #ffffff;
       --line: #d0d7de;
       --txt: #1a1f26; --txt-strong: #05070a;
       --txt-muted: #57636f; --txt-dim: #7a8794;
       --cyan: #0088a8; --green: #008040; --purple: #7c3aed;
-    }
-    html, body { background: #ffffff; color: var(--txt); }
+    }` : ""}
+    html, body { background: var(--bg); color: var(--txt); }
     body { padding: 0; max-width: none; }
     .page {
-      background: #ffffff; border: none; border-radius: 0;
+      background: var(--bg-page);
+      border: ${isLight ? "none" : "1px solid var(--line)"};
+      border-radius: 0;
       padding: 24px 32px; margin-bottom: 0;
       page-break-after: always;
     }
     .page:last-child { page-break-after: auto; }
-    .page::before { display: none; }
+    ${isLight ? `.page::before { display: none; }` : ""}
     .cover { min-height: auto; }
-    .cover-title { color: #05070a; text-shadow: none; font-size: 42px; }
+    .cover-title { ${isLight ? "color: #05070a; text-shadow: none;" : ""} font-size: 42px; }
+    ${isLight ? `
     .cover-stat, .cover-meta { background: #f6f8fa; }
     .hunt-query pre { background: #f6f8fa; color: #1a1f26; border-color: #d0d7de; border-left-color: #0088a8; }
     .mitre-col, .verdict-card, .tech-row, .consol-block, .callout, .glossary-item { background: #f6f8fa; }
     .mitre-cell { background: #ffffff; color: #57636f; border-color: #d0d7de; }
     .mitre-obs { background: #cff5fb; color: #005566; border-color: #0088a8; box-shadow: none; }
+    ` : ""}
     .section-header::before { box-shadow: none; }
     @page {
       margin: 20mm 15mm 25mm 15mm;
@@ -5342,8 +5382,8 @@ export default function App() {
       const md = generateReportMarkdown();
       copyText(md, "report-md");
     } else if (fmt === "print") {
-      // Force light for print regardless — the browser print dialog respects it
-      const html = generateReportHTML("light");
+      // Print respects the selected variant (dark/light) like the other exports
+      const html = generateReportHTML(reportVariant);
       const w = window.open("", "_blank");
       w.document.write(html);
       w.document.close();
@@ -5513,6 +5553,7 @@ export default function App() {
                 <iframe
                   ref={reportPreviewRef}
                   srcDoc={generateReportHTML(reportVariant)}
+                  onLoad={handleReportPreviewLoad}
                   style={{ flex: 1, border: "none", background: reportVariant === "light" ? "#ffffff" : "#05070a" }}
                   title="Report Preview"
                 />
@@ -5614,29 +5655,40 @@ export default function App() {
                     <>
                       <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 2, color: "#5d7382", marginBottom: 8 }}>REPORT SECTIONS</div>
                       <div style={{ fontSize: 9, color: "#7f95a3", marginBottom: 14, lineHeight: 1.5 }}>
-                        Toggle sections on/off. Use arrows to reorder. Order below matches report output.
+                        Toggle sections on/off. Use arrows to reorder. Click a section name to jump the preview to it.
                       </div>
                       {reportSections.map((s, idx) => (
-                        <div key={s.id} style={{
+                        <div key={s.id}
+                          onClick={() => scrollToReportSection(s.id)}
+                          title="Jump to this section in the preview"
+                          style={{
                           display: "flex", alignItems: "center", gap: 6,
                           padding: "8px 10px", marginBottom: 6,
                           background: s.enabled ? "rgba(0,229,255,0.05)" : "rgba(10,14,20,0.3)",
                           border: `1px solid ${s.enabled ? "rgba(0,229,255,0.2)" : "rgba(120,160,180,0.1)"}`,
-                          borderRadius: 6,
+                          borderRadius: 6, cursor: "pointer",
                         }}>
-                          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, cursor: "pointer" }}>
-                            <input type="checkbox" checked={s.enabled} onChange={() => toggleSection(s.id)}
-                              style={{ accentColor: "#00e5ff", cursor: "pointer" }} />
+                          <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, cursor: "pointer" }}
+                            onClick={(e) => e.stopPropagation()}>
+                            <span role="checkbox" aria-checked={s.enabled} onClick={() => toggleSection(s.id)}
+                              style={{
+                                width: 14, height: 14, borderRadius: 3, flexShrink: 0, cursor: "pointer",
+                                display: "flex", alignItems: "center", justifyContent: "center",
+                                background: s.enabled ? "#00e5ff" : "transparent",
+                                border: `1px solid ${s.enabled ? "#00e5ff" : "rgba(120,160,180,0.5)"}`,
+                              }}>
+                              {s.enabled && <Check size={10} strokeWidth={3} style={{ color: "#04111a" }} />}
+                            </span>
                             <span style={{ fontSize: 11, color: s.enabled ? "#e6f0f3" : "#7f95a3", fontWeight: 600 }}>{s.name}</span>
                           </label>
-                          <button onClick={() => moveSection(idx, -1)} disabled={idx === 0}
+                          <button onClick={(e) => { e.stopPropagation(); moveSection(idx, -1); }} disabled={idx === 0}
                             title="Move up"
                             style={{
                               padding: 3, background: "rgba(120,160,180,0.08)", border: "1px solid rgba(120,160,180,0.2)",
                               borderRadius: 4, color: idx === 0 ? "#3a4a54" : "#8aa0ad",
                               cursor: idx === 0 ? "not-allowed" : "pointer", fontSize: 10,
                             }}>▲</button>
-                          <button onClick={() => moveSection(idx, 1)} disabled={idx === reportSections.length - 1}
+                          <button onClick={(e) => { e.stopPropagation(); moveSection(idx, 1); }} disabled={idx === reportSections.length - 1}
                             title="Move down"
                             style={{
                               padding: 3, background: "rgba(120,160,180,0.08)", border: "1px solid rgba(120,160,180,0.2)",
