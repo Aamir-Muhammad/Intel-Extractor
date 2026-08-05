@@ -36,7 +36,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v102";
+const APP_VERSION = "v103";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -9298,15 +9298,43 @@ const wireTimeAgo = (dateStr) => {
   return `${days}d ago`;
 };
 
-function ThreatWireRow({ item, index, onHunt }) {
-  const [shown, setShown] = useState(false);
-  const [imgFailed, setImgFailed] = useState(false);
-  useEffect(() => {
-    const t = setTimeout(() => setShown(true), 60 + index * 45);
-    return () => clearTimeout(t);
-  }, [index]);
+// Editorial text (real headlines, real company names) reads poorly in the
+// app's monospace system font at small sizes — this is the one place in the
+// app that intentionally switches to a normal UI sans-serif, matching how
+// any news/RSS reader sets headline text.
+const WIRE_SANS_FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
 
+function ThreatWireThumb({ item }) {
+  // 0 = try the article's own image, 1 = try the source favicon, 2 = monogram
+  const [stage, setStage] = useState(() => (item.image ? 0 : 1));
   const monogram = (item.name || "?").replace(/[^A-Za-z0-9]/g, "").slice(0, 3).toUpperCase() || "?";
+
+  if (stage === 0 && item.image) {
+    return (
+      <div className="shrink-0 rounded-md overflow-hidden" style={{ width: 100, height: 72 }}>
+        <img src={item.image} alt="" onError={() => setStage(1)}
+          style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+      </div>
+    );
+  }
+  if (stage === 1 && item.favicon) {
+    return (
+      <div className="shrink-0 rounded-md overflow-hidden relative flex items-center justify-center" style={{ width: 100, height: 72, backgroundColor: `${item.color}1f` }}>
+        <div className="absolute inset-0" style={{ opacity: 0.14, backgroundImage: "repeating-linear-gradient(135deg, currentColor 0 2px, transparent 2px 9px)", color: item.color }} />
+        <img src={item.favicon} alt="" onError={() => setStage(2)}
+          style={{ width: 30, height: 30, objectFit: "contain", position: "relative", borderRadius: 6 }} />
+      </div>
+    );
+  }
+  return (
+    <div className="shrink-0 rounded-md overflow-hidden relative flex items-center justify-center" style={{ width: 100, height: 72, backgroundColor: `${item.color}1f`, color: item.color }}>
+      <div className="absolute inset-0" style={{ opacity: 0.16, backgroundImage: "repeating-linear-gradient(135deg, currentColor 0 2px, transparent 2px 9px)" }} />
+      <span className="relative text-[14px] font-bold tracking-wide">{monogram}</span>
+    </div>
+  );
+}
+
+function ThreatWireRow({ item, onHunt }) {
   const freshMs = item.pubDate ? Date.now() - new Date(item.pubDate).getTime() : Infinity;
   const isFresh = freshMs < 3 * 3600000; // under 3h — matches the live-dot treatment in the design pitch
 
@@ -9315,80 +9343,117 @@ function ThreatWireRow({ item, index, onHunt }) {
       role="button" tabIndex={0}
       onClick={() => onHunt(item.link)}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onHunt(item.link); } }}
-      className="flex gap-3 rounded-lg p-2.5 cursor-pointer"
+      className="flex gap-3 rounded-lg p-3 cursor-pointer"
       style={{
         backgroundColor: "rgba(10,14,20,0.55)",
         border: "1px solid rgba(120,160,180,0.14)",
-        opacity: shown ? 1 : 0,
-        transform: shown ? "translateY(0)" : "translateY(8px)",
-        transition: "opacity 0.45s cubic-bezier(.2,.8,.2,1), transform 0.45s cubic-bezier(.2,.8,.2,1), border-color 0.15s, background-color 0.15s",
+        transition: "border-color 0.15s, background-color 0.15s",
       }}
       onMouseEnter={(e) => { e.currentTarget.style.borderColor = "rgba(120,160,180,0.32)"; e.currentTarget.style.backgroundColor = "rgba(14,19,26,0.85)"; }}
       onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(120,160,180,0.14)"; e.currentTarget.style.backgroundColor = "rgba(10,14,20,0.55)"; }}
     >
-      <div className="shrink-0 rounded-md overflow-hidden relative" style={{ width: 88, height: 62 }}>
-        {item.image && !imgFailed ? (
-          <img src={item.image} alt="" onError={() => setImgFailed(true)}
-            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center relative"
-            style={{ backgroundColor: `${item.color}1f`, color: item.color }}>
-            <div className="absolute inset-0" style={{
-              opacity: 0.16,
-              backgroundImage: `repeating-linear-gradient(135deg, currentColor 0 2px, transparent 2px 9px)`,
-            }} />
-            <span className="relative text-[13px] font-bold tracking-wide">{monogram}</span>
-          </div>
-        )}
-      </div>
-      <div className="min-w-0 flex-1 flex flex-col justify-center gap-1">
+      <ThreatWireThumb item={item} />
+      <div className="min-w-0 flex-1 flex flex-col justify-center gap-1.5">
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[9.5px] font-bold uppercase truncate" style={{ letterSpacing: "1.5px", color: item.color }}>{item.name}</span>
+          <span className="uppercase truncate" style={{ fontFamily: WIRE_SANS_FONT, fontSize: 11.5, fontWeight: 700, letterSpacing: "1px", color: item.color }}>{item.name}</span>
           {item.pubDate && (
-            <span className="text-[10px] shrink-0 flex items-center gap-1" style={{ color: "#5d7382" }}>
-              {isFresh && <span className="w-1 h-1 rounded-full animate-pulse" style={{ backgroundColor: "#00ff9c" }} />}
+            <span className="shrink-0 flex items-center gap-1.5" style={{ fontFamily: WIRE_SANS_FONT, fontSize: 11.5, color: "#8aa0ad" }}>
+              {isFresh && <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ backgroundColor: "#00ff9c" }} />}
               {wireTimeAgo(item.pubDate)}
             </span>
           )}
         </div>
-        <div className="text-[13px] font-semibold leading-snug" style={{ color: "#eafcff" }}>{item.title}</div>
+        <div style={{ fontFamily: WIRE_SANS_FONT, fontSize: 15.5, fontWeight: 600, lineHeight: 1.4, color: "#eafcff" }}>{item.title}</div>
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[10px] truncate" style={{ color: "#5d7382" }}>{item.domain}</span>
-          <span className="text-[9.5px] font-bold shrink-0" style={{ color: "#00e5ff", letterSpacing: "0.5px" }}>HUNT THIS →</span>
+          <span className="truncate" style={{ fontFamily: WIRE_SANS_FONT, fontSize: 11.5, color: "#7f95a3" }}>{item.domain}</span>
+          <span className="shrink-0" style={{ fontFamily: WIRE_SANS_FONT, fontSize: 11, fontWeight: 700, color: "#00e5ff", letterSpacing: "0.4px" }}>HUNT THIS →</span>
         </div>
       </div>
     </div>
   );
 }
 
+// Continuously auto-scrolls upward like a ticker wheel. Hovering pauses it
+// (native wheel-scroll then works normally, revealing older items further
+// down); moving the mouse away resumes rolling from wherever it was left.
+// The item list is rendered twice back-to-back and scrollTop wraps at the
+// halfway point, so the loop is seamless with no visible jump.
+function ThreatWireTicker({ items, onHunt }) {
+  const containerRef = useRef(null);
+  const pausedRef = useRef(false);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || items.length < 2) return;
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+    let lastTs = null;
+    let rafId;
+    const SPEED_PX_PER_SEC = 16;
+    const tick = (ts) => {
+      if (lastTs == null) lastTs = ts;
+      const dt = (ts - lastTs) / 1000;
+      lastTs = ts;
+      if (!pausedRef.current) {
+        const half = el.scrollHeight / 2;
+        if (half > 0) {
+          let next = el.scrollTop + SPEED_PX_PER_SEC * dt;
+          if (next >= half) next -= half;
+          el.scrollTop = next;
+        }
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [items.length]);
+
+  return (
+    <div
+      ref={containerRef}
+      onMouseEnter={() => { pausedRef.current = true; }}
+      onMouseLeave={() => { pausedRef.current = false; }}
+      className="flex flex-col gap-2"
+      style={{ maxHeight: 460, overflowY: "auto" }}
+    >
+      {items.map((it) => <ThreatWireRow key={`a-${it.id}`} item={it} onHunt={onHunt} />)}
+      {items.length > 1 && items.map((it) => <ThreatWireRow key={`b-${it.id}`} item={it} onHunt={onHunt} />)}
+    </div>
+  );
+}
+
 function ThreatWire({ onHunt }) {
-  const [blogs, setBlogs] = useState(null); // null = loading, [] = loaded (possibly empty)
+  const [items, setItems] = useState(null); // null = loading, [] = loaded (possibly empty)
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     fetch(`${WORKER_BASE}/blogs`)
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-      .then((j) => { if (!cancelled) setBlogs(Array.isArray(j.blogs) ? j.blogs.filter((b) => !b.error) : []); })
+      .then((j) => { if (!cancelled) setItems(Array.isArray(j.items) ? j.items.filter((b) => !b.error) : []); })
       .catch(() => { if (!cancelled) setFailed(true); });
     return () => { cancelled = true; };
   }, []);
 
-  if (failed || (blogs && blogs.length === 0)) return null;
+  if (failed || (items && items.length === 0)) return null;
 
   return (
     <div className="rounded-xl p-4 mb-5" style={{ backgroundColor: "rgba(10,14,20,0.5)", border: "1px solid rgba(120,160,180,0.14)" }}>
       <div className="flex items-center gap-2 mb-1">
         <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ backgroundColor: "#00e5ff", boxShadow: "0 0 8px #00e5ff" }} />
         <span className="text-[10px] font-bold uppercase" style={{ letterSpacing: "2.5px", color: "#00e5ff" }}>Live threat intel wire</span>
-        <span className="text-[10px]" style={{ color: "#5d7382" }}>· click any headline to auto-hunt it</span>
+        <span className="text-[10px]" style={{ color: "#5d7382" }}>· click any headline to auto-hunt it · hover to pause, scroll for older</span>
       </div>
-      <div className="flex flex-col gap-2 mt-3">
-        {blogs === null
-          ? Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className="rounded-lg animate-pulse" style={{ height: 62, backgroundColor: "rgba(120,160,180,0.06)" }} />
-            ))
-          : blogs.map((b, i) => <ThreatWireRow key={b.id} item={b} index={i} onHunt={onHunt} />)}
+      <div className="mt-3">
+        {items === null
+          ? (
+            <div className="flex flex-col gap-2">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className="rounded-lg animate-pulse" style={{ height: 72, backgroundColor: "rgba(120,160,180,0.06)" }} />
+              ))}
+            </div>
+          )
+          : <ThreatWireTicker items={items} onHunt={onHunt} />}
       </div>
     </div>
   );
