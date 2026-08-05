@@ -36,7 +36,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v105";
+const APP_VERSION = "v106";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -9380,15 +9380,8 @@ function ThreatWireRow({ item, onHunt }) {
 // halfway point, so the loop is seamless with no visible jump.
 function ThreatWireTicker({ items, onHunt }) {
   const containerRef = useRef(null);
-  // Tracks the last time the mouse actively MOVED inside the ticker — not
-  // just whether it's present. A stationary cursor that happens to be
-  // resting over the (fairly wide) ticker area — very common on desktop,
-  // never an issue on touch devices with no cursor at all — must not pause
-  // it indefinitely. Only genuine, recent movement pauses it; it resumes on
-  // its own a moment after the mouse stops moving, and instantly on mouse-leave.
-  const lastMoveRef = useRef(0);
+  const pausedRef = useRef(false);
   const posRef = useRef(0);
-  const HOVER_GRACE_MS = 500;
 
   useEffect(() => {
     const el = containerRef.current;
@@ -9402,8 +9395,7 @@ function ThreatWireTicker({ items, onHunt }) {
       if (lastTs == null) lastTs = ts;
       const dt = (ts - lastTs) / 1000;
       lastTs = ts;
-      const activelyHovering = Date.now() - lastMoveRef.current < HOVER_GRACE_MS;
-      if (!activelyHovering) {
+      if (!pausedRef.current) {
         const half = el.scrollHeight / 2;
         if (half > 0) {
           posRef.current += SPEED_PX_PER_SEC * dt;
@@ -9420,8 +9412,9 @@ function ThreatWireTicker({ items, onHunt }) {
   return (
     <div
       ref={containerRef}
-      onMouseMove={() => { lastMoveRef.current = Date.now(); }}
-      onMouseLeave={() => { lastMoveRef.current = 0; }}
+      onMouseEnter={() => { pausedRef.current = true; }}
+      onMouseLeave={() => { pausedRef.current = false; }}
+      onScroll={(e) => { posRef.current = e.currentTarget.scrollTop; }}
       className="flex flex-col gap-2"
       style={{ maxHeight: 460, overflowY: "auto" }}
     >
