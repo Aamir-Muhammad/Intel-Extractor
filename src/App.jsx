@@ -36,7 +36,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v104";
+const APP_VERSION = "v105";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -9387,6 +9387,7 @@ function ThreatWireTicker({ items, onHunt }) {
   // it indefinitely. Only genuine, recent movement pauses it; it resumes on
   // its own a moment after the mouse stops moving, and instantly on mouse-leave.
   const lastMoveRef = useRef(0);
+  const posRef = useRef(0);
   const HOVER_GRACE_MS = 500;
 
   useEffect(() => {
@@ -9405,9 +9406,9 @@ function ThreatWireTicker({ items, onHunt }) {
       if (!activelyHovering) {
         const half = el.scrollHeight / 2;
         if (half > 0) {
-          let next = el.scrollTop + SPEED_PX_PER_SEC * dt;
-          if (next >= half) next -= half;
-          el.scrollTop = next;
+          posRef.current += SPEED_PX_PER_SEC * dt;
+          if (posRef.current >= half) posRef.current -= half;
+          el.scrollTop = posRef.current;
         }
       }
       rafId = requestAnimationFrame(tick);
