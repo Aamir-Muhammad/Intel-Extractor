@@ -32,19 +32,11 @@ const getSessionId = () => {
   } catch { return "s-nostorage"; }
 };
 const SESSION_ID = getSessionId();
-
-// Fire-and-forget analytics beacon. Never blocks, never throws into the UI.
-const logEvent = (payload) => {
-  try {
-    fetch(`${WORKER_BASE}/log`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...payload, session_id: SESSION_ID }),
-      keepalive: true, // allows the request to outlive the page if needed
-    }).catch(() => {});
-  } catch { /* analytics must never break the app */ }
-};
-const APP_VERSION = "v100";
+// NOTE: analytics are logged entirely server-side (in worker.js), piggybacked
+// onto the /fetch, /parse, and /enrich requests the app already makes for
+// functional reasons — SESSION_ID is attached to those, but there is no
+// dedicated client-initiated logging call. Invisible to browser DevTools.
+const APP_VERSION = "v101";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -2278,7 +2270,7 @@ export default function App() {
       setEnrichCache((c) => ({ ...c, [key]: { loading: true, data: Object.keys(results).length > 0 ? { ...results } : null } }));
     };
     const callEnrich = async (api, otxType, otxSection, overrideValue, extra) => {
-      const body = { api, value: overrideValue || value, cat }; // cat for server-side D1 logging
+      const body = { api, value: overrideValue || value, cat, session_id: SESSION_ID }; // cat + session_id for server-side D1 logging
       if (otxType) body.otx_type = otxType;
       if (otxSection) body.otx_section = otxSection;
       if (extra && typeof extra === "object") Object.assign(body, extra);
@@ -4178,11 +4170,11 @@ export default function App() {
     const apiP = fetch(`${WORKER_BASE}/parse`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: fetchUrl }),
+      body: JSON.stringify({ url: fetchUrl, session_id: SESSION_ID }),
     })
       .then((r) => { if (!r.ok) throw new Error(`API HTTP ${r.status}`); return r.json(); });
 
-    const pageP = fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}`)
+    const pageP = fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&session_id=${encodeURIComponent(SESSION_ID)}`)
       .then((r) => { if (!r.ok) throw new Error(`page HTTP ${r.status}`); return r.text(); });
 
     const [aRes, pRes] = await Promise.allSettled([apiP, pageP]);
@@ -4203,7 +4195,7 @@ export default function App() {
         // that ASCII scraping cannot see.
         let pdfText = null;
         try {
-          const binRes = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&raw=1`);
+          const binRes = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&raw=1&session_id=${encodeURIComponent(SESSION_ID)}`);
           if (binRes.ok) {
             const buf = await binRes.arrayBuffer();
             pdfText = await extractPdfText(buf);
@@ -4246,14 +4238,14 @@ export default function App() {
       // Some sites (gov, enterprise WAFs) block the initial fetch. Retry with
       // realistic browser headers + Referer. Auto-detect PDF vs HTML and parse.
       try {
-        const retryRes = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&retry=1`);
+        const retryRes = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&retry=1&session_id=${encodeURIComponent(SESSION_ID)}`);
         if (retryRes.ok) {
           const ct = (retryRes.headers.get("Content-Type") || "").toLowerCase();
           const isPdfRetry = ct.includes("pdf") || /\.pdf(\?|#|$)/i.test(fetchUrl);
 
           if (isPdfRetry) {
             // Retry as binary for PDF
-            const binRetry = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&raw=1&retry=1`);
+            const binRetry = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&raw=1&retry=1&session_id=${encodeURIComponent(SESSION_ID)}`);
             if (binRetry.ok) {
               const buf = await binRetry.arrayBuffer();
               const pdfText = await extractPdfText(buf);
@@ -4632,6 +4624,8 @@ export default function App() {
   //      dark/light variant, expanded enrichment labels
   // v99: click-to-scroll section navigation, print respects dark/light variant
   // v100: Sigma hunt-query format; CVE enrichment (CISA KEV/EPSS/NVD); SANS ISC/DShield for IPV4/IPV6
+  // v101: analytics moved fully server-side (session_id piggybacked on existing /fetch,/parse,/enrich
+  //       requests; removed the one client-initiated /log call) — see worker.js for the dashboard side
   // ============================================================
   const genReportId = () => {
     const d = new Date();
@@ -6700,7 +6694,7 @@ export default function App() {
             )}
             <GraphErrorBoundary>
               <ThreatGraph iocData={iocData} enrichCache={enrichCache} colorFor={colorFor}
-                enrichIOC={enrichIOC} logEvent={logEvent} copyText={copyText}
+                enrichIOC={enrichIOC} copyText={copyText}
                 addPivotIOC={addPivotIOC} isPivotAdded={isPivotAdded}
                 removeIoc={removeIoc}
                 anyEnriched={iocData ? Object.entries(iocData).some(([cat, arr]) =>
@@ -7962,7 +7956,7 @@ class GraphErrorBoundary extends Component {
   }
 }
 
-function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copyText, addPivotIOC, isPivotAdded, removeIoc, anyEnriched, hashCollapseAnims = [] }) {
+function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addPivotIOC, isPivotAdded, removeIoc, anyEnriched, hashCollapseAnims = [] }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const stateRef = useRef({ nodes: [], edges: [], t: 0 });
@@ -8877,7 +8871,6 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, logEvent, copy
     const catMap = { IPV4: "IPV4", IPV6: "IPV6", DOMAIN: "DOMAIN", URL: "URL", SHA256: "SHA256", SHA1: "SHA1", MD5: "MD5", EMAIL: "EMAIL" };
     const cat = catMap[n.cat] || n.cat;
     addPivotIOC(cat, n.id, "graph");
-    if (logEvent) logEvent({ event_type: "graph_add_ioc", ioc_type: cat, ioc_value: n.id, verdict: n.verdict || "Unknown" });
     setNodeActionState((s) => ({ ...s, [n.id]: "added" }));
     setTimeout(() => setNodeActionState((s) => ({ ...s, [n.id]: undefined })), 1500);
   };
