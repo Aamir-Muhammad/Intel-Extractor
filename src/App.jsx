@@ -36,7 +36,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v101";
+const APP_VERSION = "v102";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -4157,11 +4157,16 @@ export default function App() {
   // contributes the types the API can't return (registry+values, file paths,
   // sha512, ssdeep, asn, mac, btc/xmr/eth). If the API fails, the engine runs in
   // full as a fallback.
-  const runFetch = async () => {
+  // overrideUrl lets callers (e.g. the Threat Wire) trigger a fetch with an
+  // explicit URL instead of relying on `url` state, which would otherwise be
+  // stale if read in the same tick as a just-fired setUrl(). Guarded with a
+  // strict string check so this can never accidentally receive a DOM event
+  // object from a bare `onClick={runFetch}` handler.
+  const runFetch = async (overrideUrl) => {
     resetResults();
     setLoading(true);
     // Auto-prepend https:// if scheme missing
-    let fetchUrl = url.trim();
+    let fetchUrl = (typeof overrideUrl === "string" ? overrideUrl : url).trim();
     if (fetchUrl && !/^https?:\/\//i.test(fetchUrl)) {
       fetchUrl = "https://" + fetchUrl;
       setUrl(fetchUrl);
@@ -4316,11 +4321,21 @@ export default function App() {
     { const { data: wd, refs: wr } = applyWhitelistAndRefs(data); setIocData(wd); setReferences(wr); }
     setOriginData(origin);
     setMeta(apiMeta);
-    setSourceUrl(url);
+    setSourceUrl(fetchUrl);
     if (articleText) setRawArticle(articleText);
     if (articleBody) setArticleClean(articleBody);
     setLoading(false);
     const _iocCount = Object.values(data || {}).reduce((s, arr) => s + (Array.isArray(arr) ? arr.length : 0), 0);
+  };
+
+  // Triggered by the Threat Wire — jumps to the Fetch URL tab, mirrors the
+  // clicked article's link into the input box for visibility, and runs the
+  // fetch with that link passed explicitly (see runFetch's overrideUrl).
+  const huntArticle = (link) => {
+    if (typeof link !== "string" || !link) return;
+    setMode("url");
+    setUrl(link);
+    runFetch(link);
   };
 
   // ---- On-demand AI summary: fires only when the user opens the dropdown,
@@ -6331,7 +6346,7 @@ export default function App() {
                     style={{ backgroundColor: "rgba(0,0,0,0.45)", border: "1px solid rgba(120,160,180,0.22)", color: "#dff" }}
                   />
                 </div>
-                <GButton onClick={runFetch} disabled={!url || loading} color="#00e5ff" solid icon={loading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}>
+                <GButton onClick={() => runFetch()} disabled={!url || loading} color="#00e5ff" solid icon={loading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}>
                   {loading ? "Fetching…" : "Fetch & Extract"}
                 </GButton>
               </div>
@@ -6414,6 +6429,8 @@ export default function App() {
             </div>
           )}
         </div>
+
+        {!total && <ThreatWire onHunt={huntArticle} />}
 
         {meta && (meta.title || meta.description) && (
           <div className="flex items-start gap-3 mb-3 py-3" style={{ borderBottom: "1px solid rgba(120,160,180,0.06)" }}>
@@ -9261,6 +9278,119 @@ function Tab({ children, active, onClick, icon }) {
       style={{ color: active ? "#04111a" : "#8aa0ad", backgroundColor: active ? "#00e5ff" : "transparent", boxShadow: active ? "0 0 14px rgba(0,229,255,0.4)" : "none" }}>
       {icon} {children}
     </button>
+  );
+}
+
+// Relative "time ago" for a feed item's pubDate (RFC 822 or ISO 8601 — the
+// native Date constructor parses both).
+const wireTimeAgo = (dateStr) => {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  if (isNaN(d)) return null;
+  const diffMs = Date.now() - d.getTime();
+  if (diffMs < 0) return "just now";
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+};
+
+function ThreatWireRow({ item, index, onHunt }) {
+  const [shown, setShown] = useState(false);
+  const [imgFailed, setImgFailed] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setShown(true), 60 + index * 45);
+    return () => clearTimeout(t);
+  }, [index]);
+
+  const monogram = (item.name || "?").replace(/[^A-Za-z0-9]/g, "").slice(0, 3).toUpperCase() || "?";
+  const freshMs = item.pubDate ? Date.now() - new Date(item.pubDate).getTime() : Infinity;
+  const isFresh = freshMs < 3 * 3600000; // under 3h — matches the live-dot treatment in the design pitch
+
+  return (
+    <div
+      role="button" tabIndex={0}
+      onClick={() => onHunt(item.link)}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onHunt(item.link); } }}
+      className="flex gap-3 rounded-lg p-2.5 cursor-pointer"
+      style={{
+        backgroundColor: "rgba(10,14,20,0.55)",
+        border: "1px solid rgba(120,160,180,0.14)",
+        opacity: shown ? 1 : 0,
+        transform: shown ? "translateY(0)" : "translateY(8px)",
+        transition: "opacity 0.45s cubic-bezier(.2,.8,.2,1), transform 0.45s cubic-bezier(.2,.8,.2,1), border-color 0.15s, background-color 0.15s",
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.borderColor = "rgba(120,160,180,0.32)"; e.currentTarget.style.backgroundColor = "rgba(14,19,26,0.85)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(120,160,180,0.14)"; e.currentTarget.style.backgroundColor = "rgba(10,14,20,0.55)"; }}
+    >
+      <div className="shrink-0 rounded-md overflow-hidden relative" style={{ width: 88, height: 62 }}>
+        {item.image && !imgFailed ? (
+          <img src={item.image} alt="" onError={() => setImgFailed(true)}
+            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center relative"
+            style={{ backgroundColor: `${item.color}1f`, color: item.color }}>
+            <div className="absolute inset-0" style={{
+              opacity: 0.16,
+              backgroundImage: `repeating-linear-gradient(135deg, currentColor 0 2px, transparent 2px 9px)`,
+            }} />
+            <span className="relative text-[13px] font-bold tracking-wide">{monogram}</span>
+          </div>
+        )}
+      </div>
+      <div className="min-w-0 flex-1 flex flex-col justify-center gap-1">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[9.5px] font-bold uppercase truncate" style={{ letterSpacing: "1.5px", color: item.color }}>{item.name}</span>
+          {item.pubDate && (
+            <span className="text-[10px] shrink-0 flex items-center gap-1" style={{ color: "#5d7382" }}>
+              {isFresh && <span className="w-1 h-1 rounded-full animate-pulse" style={{ backgroundColor: "#00ff9c" }} />}
+              {wireTimeAgo(item.pubDate)}
+            </span>
+          )}
+        </div>
+        <div className="text-[13px] font-semibold leading-snug" style={{ color: "#eafcff" }}>{item.title}</div>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[10px] truncate" style={{ color: "#5d7382" }}>{item.domain}</span>
+          <span className="text-[9.5px] font-bold shrink-0" style={{ color: "#00e5ff", letterSpacing: "0.5px" }}>HUNT THIS →</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ThreatWire({ onHunt }) {
+  const [blogs, setBlogs] = useState(null); // null = loading, [] = loaded (possibly empty)
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${WORKER_BASE}/blogs`)
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((j) => { if (!cancelled) setBlogs(Array.isArray(j.blogs) ? j.blogs.filter((b) => !b.error) : []); })
+      .catch(() => { if (!cancelled) setFailed(true); });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (failed || (blogs && blogs.length === 0)) return null;
+
+  return (
+    <div className="rounded-xl p-4 mb-5" style={{ backgroundColor: "rgba(10,14,20,0.5)", border: "1px solid rgba(120,160,180,0.14)" }}>
+      <div className="flex items-center gap-2 mb-1">
+        <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ backgroundColor: "#00e5ff", boxShadow: "0 0 8px #00e5ff" }} />
+        <span className="text-[10px] font-bold uppercase" style={{ letterSpacing: "2.5px", color: "#00e5ff" }}>Live threat intel wire</span>
+        <span className="text-[10px]" style={{ color: "#5d7382" }}>· click any headline to auto-hunt it</span>
+      </div>
+      <div className="flex flex-col gap-2 mt-3">
+        {blogs === null
+          ? Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="rounded-lg animate-pulse" style={{ height: 62, backgroundColor: "rgba(120,160,180,0.06)" }} />
+            ))
+          : blogs.map((b, i) => <ThreatWireRow key={b.id} item={b} index={i} onHunt={onHunt} />)}
+      </div>
+    </div>
   );
 }
 
