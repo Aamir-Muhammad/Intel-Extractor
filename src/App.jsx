@@ -36,7 +36,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v107";
+const APP_VERSION = "v108";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -2271,7 +2271,7 @@ export default function App() {
   // ---- IOC Enrichment: ThreatFox + URLhaus + MalwareBazaar via Worker proxy ----
   const enrichIOC = async (cat, value) => {
     const key = `${cat}::${value}`;
-    if (enrichCache[key]) return;
+    if (enrichCache[key] && !enrichCache[key].error) return;
     setEnrichCache((c) => ({ ...c, [key]: { loading: true } }));
     const results = {};
     const _t0 = Date.now();
@@ -3834,7 +3834,7 @@ export default function App() {
     setIocData(prev => {
       if (!prev) return prev;
       const next = { ...prev };
-      values.forEach(value => {
+      values.forEach((value, idx) => {
         const k = `${cat}::${String(value).toLowerCase()}`;
         const canonical = enrichCache[k]?.data?._canonicalSHA256;
         if (!canonical) return;
@@ -3857,8 +3857,9 @@ export default function App() {
         setBlastNodes(s => new Set([...s, value]));
         setTimeout(() => setBlastNodes(s => { const n = new Set(s); n.delete(value); return n; }), 950);
         fireDedupToast(cat, value, canonical);
-        // Auto-trigger enrichment of the new SHA256
-        setTimeout(() => enrichIOC("SHA256", canonical), 1500);
+        // Auto-trigger enrichment of the new SHA256 — staggered so a multi-hash
+        // consolidation doesn't fire a burst of simultaneous enrichments.
+        setTimeout(() => enrichIOC("SHA256", canonical), 1500 + idx * 1500);
       });
       return next;
     });
@@ -4385,6 +4386,13 @@ export default function App() {
     if (opening && aiState === "idle") summarizeNow();
   };
 
+  // Report Builder shouldn't look incomplete just because the analyst never
+  // expanded the AI Summary panel — generate one silently the first time the
+  // report is opened, same on-demand cost model, just a different trigger.
+  useEffect(() => {
+    if (reportOpen && aiState === "idle" && (articleClean || rawArticle)) summarizeNow();
+  }, [reportOpen]);
+
   // Retry limiter: first 3 retries are free; from the 3rd press onward each
   // press starts a cooldown of 20s + 5s per extra press (20, 25, 30, …).
   const retryAi = () => {
@@ -4710,6 +4718,7 @@ export default function App() {
       execSummary: aiSummary?.executive_summary || null,
       techSummary: aiSummary?.summary || null,
       recommendations: aiSummary?.recommendations || [],
+      aiSummaryPending: aiState === "loading" && !aiSummary,
       totalIOCs: filteredEntries.reduce((s, [, arr]) => s + arr.length, 0),
       typeCounts,
       verdictCounts,
@@ -4968,6 +4977,7 @@ export default function App() {
         </div>
         ${data.articleHeadline ? `<div class="callout callout-primary"><div class="callout-label">THREAT HEADLINE</div><div class="callout-body">${escapeHtml(data.articleHeadline)}</div></div>` : ""}
         ${data.execSummary ? `<div class="prose"><h3>Business Impact</h3><p>${escapeHtml(data.execSummary)}</p></div>` : ""}
+        ${data.aiSummaryPending ? `<div class="prose"><p><em>Generating AI summary…</em></p></div>` : ""}
         <div class="verdict-grid">
           <div class="verdict-card verdict-mal">
             <div class="verdict-num">${data.verdictCounts.Malicious}</div>
@@ -5636,6 +5646,7 @@ export default function App() {
       md += `## Executive Summary\n\n`;
       if (data.articleHeadline) md += `> **${data.articleHeadline}**\n\n`;
       if (data.execSummary) md += `${data.execSummary}\n\n`;
+      if (data.aiSummaryPending) md += `*Generating AI summary…*\n\n`;
       md += `### Verdict Breakdown\n\n`;
       md += `| Verdict | Count |\n|---|---|\n`;
       md += `| Malicious | ${data.verdictCounts.Malicious} |\n`;
@@ -6476,6 +6487,63 @@ export default function App() {
         )}
 
         {(articleClean || rawArticle) && sourceUrl && (
+          <div className="rounded-xl mb-4 overflow-hidden" style={{ ...panel, borderColor: "rgba(253,224,71,0.35)" }}>
+            <div className="flex items-center justify-between px-4 py-3 gap-3 flex-wrap">
+              <span className="flex items-center gap-2.5 min-w-0">
+                <span className="shrink-0 flex h-7 w-7 items-center justify-center rounded-lg"
+                  style={{ backgroundColor: "rgba(253,224,71,0.08)", border: "1px solid rgba(253,224,71,0.35)" }}>
+                  <span style={{ fontSize: 14 }}>🧠</span>
+                </span>
+                <span className="text-sm font-bold tracking-wide" style={{ color: "#fde047" }}>AI Scan Threat Hunting Artifacts</span>
+                {aiScanState === "loading" && (
+                  <span className="text-[10px] uppercase tracking-widest flex items-center gap-1" style={{ color: "#8aa0ad" }}>
+                    <Loader2 size={11} className="animate-spin" /> scanning
+                  </span>
+                )}
+                {aiScanState === "done" && aiScanCounts && (
+                  <span className="text-[10px] uppercase tracking-widest rounded-full px-2 py-0.5"
+                    style={{ color: "#00ff9c", border: "1px solid rgba(0,255,156,0.35)", backgroundColor: "rgba(0,255,156,0.06)" }}>
+                    +{aiScanCounts.scheduled_tasks + aiScanCounts.services + aiScanCounts.registry_ops + aiScanCounts.command_lines + aiScanCounts.file_paths} artifacts merged
+                  </span>
+                )}
+              </span>
+              {aiScanState === "done" ? (
+                <button onClick={() => { setAiScanState("idle"); setAiScanCounts(null); }}
+                  className="text-[11px] underline shrink-0" style={{ color: "#8aa0ad", cursor: "pointer", background: "none", border: "none" }}>
+                  re-scan
+                </button>
+              ) : (
+                <button onClick={runAIScan}
+                  disabled={aiScanState === "loading"}
+                  title="Deep artifact extraction — scheduled tasks, services, registry ops, command lines, file paths"
+                  className="flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-semibold shrink-0"
+                  style={{
+                    color: "#04111a",
+                    backgroundColor: "#fde047",
+                    border: "1px solid rgba(253,224,71,0.6)",
+                    cursor: aiScanState === "loading" ? "not-allowed" : "pointer",
+                  }}>
+                  {aiScanState === "loading" ? <Loader2 size={12} className="animate-spin" /> : <span style={{ fontSize: 11 }}>🧠</span>}
+                  {aiScanState === "loading" ? "Scanning…" : "AI Scan Artifacts"}
+                </button>
+              )}
+            </div>
+            {aiScanState === "error" && (
+              <div className="px-4 pb-3 pt-1 text-xs" style={{ color: "#ffb4b4", borderTop: "1px solid rgba(255,77,77,0.2)" }}>
+                {aiScanError || "AI scan failed. Please retry."}
+                <button onClick={() => { setAiScanState("idle"); setAiScanError(""); }}
+                  className="ml-2 underline" style={{ color: "#fde047" }}>reset</button>
+              </div>
+            )}
+            {aiScanState === "done" && aiScanCounts && (aiScanCounts.scheduled_tasks + aiScanCounts.services + aiScanCounts.registry_ops + aiScanCounts.command_lines + aiScanCounts.file_paths) === 0 && (
+              <div className="px-4 pb-3 pt-1 text-xs" style={{ color: "#8aa0ad", borderTop: "1px solid rgba(253,224,71,0.15)" }}>
+                No additional artifacts found beyond what regex already captured.
+              </div>
+            )}
+          </div>
+        )}
+
+        {(articleClean || rawArticle) && sourceUrl && (
           <div className="rounded-xl mb-4 overflow-hidden" style={{ ...panel, borderColor: "rgba(192,132,252,0.35)", boxShadow: aiOpen ? "0 0 24px rgba(192,132,252,0.10)" : "none" }}>
             <button onClick={toggleAiPanel}
               className="w-full flex items-center justify-between px-4 py-3 text-left"
@@ -6492,19 +6560,6 @@ export default function App() {
                     click to generate
                   </span>
                 )}
-                <button onClick={(e) => { e.stopPropagation(); runAIScan(); }}
-                  disabled={aiScanState === "loading" || aiScanState === "done"}
-                  title="Deep artifact extraction — scheduled tasks, services, registry ops, command lines, file paths"
-                  className="flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-semibold shrink-0"
-                  style={{
-                    color: aiScanState === "done" ? "#5d7382" : "#04111a",
-                    backgroundColor: aiScanState === "done" ? "rgba(120,160,180,0.06)" : "#fde047",
-                    border: `1px solid ${aiScanState === "done" ? "rgba(120,160,180,0.25)" : "rgba(253,224,71,0.6)"}`,
-                    cursor: (aiScanState === "loading" || aiScanState === "done") ? "not-allowed" : "pointer",
-                  }}>
-                  {aiScanState === "loading" ? <Loader2 size={12} className="animate-spin" /> : aiScanState === "done" ? <Check size={12} /> : <span style={{ fontSize: 11 }}>🧠</span>}
-                  {aiScanState === "loading" ? "Scanning…" : aiScanState === "done" ? "Scanned" : "AI Scan Artifacts"}
-                </button>
               </span>
               <ChevronDown size={18} className="shrink-0 transition-transform"
                 style={{ color: "#c084fc", transform: aiOpen ? "rotate(180deg)" : "rotate(0deg)" }} />
@@ -6566,49 +6621,6 @@ export default function App() {
                     Initializing…
                   </p>
                 )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {(articleClean || rawArticle) && sourceUrl && aiScanState !== "idle" && (
-          <div className="rounded-xl mb-4 overflow-hidden" style={{ ...panel, borderColor: "rgba(253,224,71,0.35)" }}>
-            <div className="flex items-center justify-between px-4 py-3 gap-3 flex-wrap">
-              <span className="flex items-center gap-2.5 min-w-0">
-                <span className="shrink-0 flex h-7 w-7 items-center justify-center rounded-lg"
-                  style={{ backgroundColor: "rgba(253,224,71,0.08)", border: "1px solid rgba(253,224,71,0.35)" }}>
-                  <span style={{ fontSize: 14 }}>🧠</span>
-                </span>
-                <span className="text-sm font-bold tracking-wide" style={{ color: "#fde047" }}>AI Scan Threat Hunting Artifacts</span>
-                {aiScanState === "loading" && (
-                  <span className="text-[10px] uppercase tracking-widest flex items-center gap-1" style={{ color: "#8aa0ad" }}>
-                    <Loader2 size={11} className="animate-spin" /> scanning
-                  </span>
-                )}
-                {aiScanState === "done" && aiScanCounts && (
-                  <span className="text-[10px] uppercase tracking-widest rounded-full px-2 py-0.5"
-                    style={{ color: "#00ff9c", border: "1px solid rgba(0,255,156,0.35)", backgroundColor: "rgba(0,255,156,0.06)" }}>
-                    +{aiScanCounts.scheduled_tasks + aiScanCounts.services + aiScanCounts.registry_ops + aiScanCounts.command_lines + aiScanCounts.file_paths} artifacts merged
-                  </span>
-                )}
-              </span>
-              {aiScanState === "done" && (
-                <button onClick={() => { setAiScanState("idle"); setAiScanCounts(null); }}
-                  className="text-[11px] underline shrink-0" style={{ color: "#8aa0ad", cursor: "pointer", background: "none", border: "none" }}>
-                  re-scan
-                </button>
-              )}
-            </div>
-            {aiScanState === "error" && (
-              <div className="px-4 pb-3 pt-1 text-xs" style={{ color: "#ffb4b4", borderTop: "1px solid rgba(255,77,77,0.2)" }}>
-                {aiScanError || "AI scan failed. Please retry."}
-                <button onClick={() => { setAiScanState("idle"); setAiScanError(""); }}
-                  className="ml-2 underline" style={{ color: "#fde047" }}>reset</button>
-              </div>
-            )}
-            {aiScanState === "done" && aiScanCounts && (aiScanCounts.scheduled_tasks + aiScanCounts.services + aiScanCounts.registry_ops + aiScanCounts.command_lines + aiScanCounts.file_paths) === 0 && (
-              <div className="px-4 pb-3 pt-1 text-xs" style={{ color: "#8aa0ad", borderTop: "1px solid rgba(253,224,71,0.15)" }}>
-                No additional artifacts found beyond what regex already captured.
               </div>
             )}
           </div>
@@ -6825,7 +6837,7 @@ export default function App() {
                       </button>
                     )}
                     {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","EMAIL","CVE"].includes(cat) && (
-                      <button onClick={() => { const pending = arr.filter((v) => !enrichCache[`${cat}::${v}`]); pending.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 1500)); setEnrichAllDone((p) => ({ ...p, [cat]: true })); setTimeout(() => setEnrichAllDone((p) => { const n = { ...p }; delete n[cat]; return n; }), 5000); }}
+                      <button onClick={() => { const pending = arr.filter((v) => { const e = enrichCache[`${cat}::${v}`]; return !e || e.error; }); pending.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 1500)); setEnrichAllDone((p) => ({ ...p, [cat]: true })); setTimeout(() => setEnrichAllDone((p) => { const n = { ...p }; delete n[cat]; return n; }), 5000); }}
                         disabled={!!enrichAllDone[cat]}
                         className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
                         style={{ color: enrichAllDone[cat] ? "#5d7382" : "#2dd4bf", backgroundColor: enrichAllDone[cat] ? "rgba(120,160,180,0.06)" : "rgba(45,212,191,0.10)", border: `1px solid ${enrichAllDone[cat] ? "rgba(120,160,180,0.2)" : "rgba(45,212,191,0.4)"}`, cursor: enrichAllDone[cat] ? "not-allowed" : "pointer" }}>
@@ -8070,8 +8082,11 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
           addEdge(val, d.urlscan.servingIP, "serves", "rgba(0,229,255,0.5)");
         }
 
-        // Passive DNS (strong: historical resolution)
+        // Passive DNS — current resolutions only. Historical ones can point at
+        // infrastructure long since reassigned to an unrelated party; auto-pivoting
+        // on them risks a false bridge. Still visible for manual pivot in the card.
         (d.otxPDNS?.records || []).forEach((r) => {
+          if (!r.current) return;
           const target = cat === "DOMAIN" ? r.address : r.hostname;
           if (!target) return;
           const tcat = cat === "DOMAIN" ? ipCat(target) : "DOMAIN";
