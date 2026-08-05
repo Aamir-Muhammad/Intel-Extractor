@@ -36,7 +36,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v103";
+const APP_VERSION = "v104";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -9380,7 +9380,14 @@ function ThreatWireRow({ item, onHunt }) {
 // halfway point, so the loop is seamless with no visible jump.
 function ThreatWireTicker({ items, onHunt }) {
   const containerRef = useRef(null);
-  const pausedRef = useRef(false);
+  // Tracks the last time the mouse actively MOVED inside the ticker — not
+  // just whether it's present. A stationary cursor that happens to be
+  // resting over the (fairly wide) ticker area — very common on desktop,
+  // never an issue on touch devices with no cursor at all — must not pause
+  // it indefinitely. Only genuine, recent movement pauses it; it resumes on
+  // its own a moment after the mouse stops moving, and instantly on mouse-leave.
+  const lastMoveRef = useRef(0);
+  const HOVER_GRACE_MS = 500;
 
   useEffect(() => {
     const el = containerRef.current;
@@ -9389,12 +9396,13 @@ function ThreatWireTicker({ items, onHunt }) {
 
     let lastTs = null;
     let rafId;
-    const SPEED_PX_PER_SEC = 16;
+    const SPEED_PX_PER_SEC = 26;
     const tick = (ts) => {
       if (lastTs == null) lastTs = ts;
       const dt = (ts - lastTs) / 1000;
       lastTs = ts;
-      if (!pausedRef.current) {
+      const activelyHovering = Date.now() - lastMoveRef.current < HOVER_GRACE_MS;
+      if (!activelyHovering) {
         const half = el.scrollHeight / 2;
         if (half > 0) {
           let next = el.scrollTop + SPEED_PX_PER_SEC * dt;
@@ -9411,8 +9419,8 @@ function ThreatWireTicker({ items, onHunt }) {
   return (
     <div
       ref={containerRef}
-      onMouseEnter={() => { pausedRef.current = true; }}
-      onMouseLeave={() => { pausedRef.current = false; }}
+      onMouseMove={() => { lastMoveRef.current = Date.now(); }}
+      onMouseLeave={() => { lastMoveRef.current = 0; }}
       className="flex flex-col gap-2"
       style={{ maxHeight: 460, overflowY: "auto" }}
     >
@@ -9442,7 +9450,6 @@ function ThreatWire({ onHunt }) {
       <div className="flex items-center gap-2 mb-1">
         <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ backgroundColor: "#00e5ff", boxShadow: "0 0 8px #00e5ff" }} />
         <span className="text-[10px] font-bold uppercase" style={{ letterSpacing: "2.5px", color: "#00e5ff" }}>Live threat intel wire</span>
-        <span className="text-[10px]" style={{ color: "#5d7382" }}>· click any headline to auto-hunt it · hover to pause, scroll for older</span>
       </div>
       <div className="mt-3">
         {items === null
