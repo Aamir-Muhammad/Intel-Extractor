@@ -36,7 +36,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v106";
+const APP_VERSION = "v107";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -655,6 +655,8 @@ const isIPv4 = (t) => {
   const m = t.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   return m && m.slice(1).every((o) => +o >= 0 && +o <= 255);
 };
+
+const ipCat = (t) => (t.includes(":") ? "IPV6" : "IPV4");
 
 // Strip port suffix from an IP — "1.2.3.4:8080" → "1.2.3.4"
 const stripPort = (t) => t.replace(/:\d{1,5}$/, "");
@@ -1581,17 +1583,20 @@ const huntAQL = (cat, arr) => {
 // format (not applicable to CVE/vulnerability-database matching) — returning
 // null here (same as CQL already does for CVE) beats fabricating a
 // non-standard mapping.
-const huntSigma = (cat, arr) => {
+const huntSigma = (cat, arr, sourceUrl) => {
   const yamlList = (items, indent = "        ") =>
     items.map((v) => `${indent}- '${String(v).replace(/'/g, "''")}'`).join("\n");
+  const sourceLabel = (sourceUrl && sourceUrl !== "(pasted JSON)" && sourceUrl !== "(raw paste)")
+    ? defang(stripScheme(sourceUrl)) : "threat intelligence enrichment";
 
   switch (cat) {
     case "IPV4": case "IPV6":
       return `title: Network Connection to Known-Malicious IP
 status: experimental
-description: Detects network connections to IP(s) sourced from threat intelligence enrichment
+description: Detects network connections to IP(s) sourced from ${sourceLabel}
 references:
-    - Intel Extractor enrichment
+    - Intel Extractor enrichment via hxxps[://]aamir-muhammad[.]github[.]io/Intel-Extractor
+author: Aamir Muhammad
 logsource:
     category: network_connection
 detection:
@@ -1606,9 +1611,10 @@ level: high`;
     case "DOMAIN":
       return `title: DNS Query for Known-Malicious Domain
 status: experimental
-description: Detects DNS resolution of domain(s) sourced from threat intelligence enrichment
+description: Detects DNS resolution of domain(s) sourced from ${sourceLabel}
 references:
-    - Intel Extractor enrichment
+    - Intel Extractor enrichment via hxxps[://]aamir-muhammad[.]github[.]io/Intel-Extractor
+author: Aamir Muhammad
 logsource:
     category: dns_query
 detection:
@@ -1624,9 +1630,10 @@ level: high`;
       const hosts = [...new Set(arr.map((u) => { try { return u.replace(/^https?:\/\//i, "").split("/")[0].split(":")[0]; } catch { return u; } }))];
       return `title: Proxy Request to Known-Malicious URL
 status: experimental
-description: Detects HTTP(S) requests matching URL(s) sourced from threat intelligence enrichment
+description: Detects HTTP(S) requests matching URL(s) sourced from ${sourceLabel}
 references:
-    - Intel Extractor enrichment
+    - Intel Extractor enrichment via hxxps[://]aamir-muhammad[.]github[.]io/Intel-Extractor
+author: Aamir Muhammad
 logsource:
     category: proxy
 detection:
@@ -1645,9 +1652,10 @@ level: high`;
     case "MD5": case "SHA1": case "SHA256": {
       return `title: Process Creation Matching Known-Malicious ${cat} Hash
 status: experimental
-description: Detects process creation events where the file hash matches (a) known-malicious ${cat}(s) sourced from threat intelligence enrichment
+description: Detects process creation events where the file hash matches (a) known-malicious ${cat}(s) sourced from ${sourceLabel}
 references:
-    - Intel Extractor enrichment
+    - Intel Extractor enrichment via hxxps[://]aamir-muhammad[.]github[.]io/Intel-Extractor
+author: Aamir Muhammad
 logsource:
     category: process_creation
     product: windows
@@ -1664,9 +1672,10 @@ level: high`;
     case "FILE_NAME":
       return `title: Process Creation Matching Known-Malicious File Name
 status: experimental
-description: Detects process creation events where the image file name matches (a) known-malicious file name(s) sourced from threat intelligence enrichment
+description: Detects process creation events where the image file name matches (a) known-malicious file name(s) sourced from ${sourceLabel}
 references:
-    - Intel Extractor enrichment
+    - Intel Extractor enrichment via hxxps[://]aamir-muhammad[.]github[.]io/Intel-Extractor
+author: Aamir Muhammad
 logsource:
     category: process_creation
     product: windows
@@ -1682,9 +1691,10 @@ level: high`;
     case "FILE_PATH":
       return `title: File Event Matching Known-Malicious File Path
 status: experimental
-description: Detects file creation/write events matching (a) known-malicious file path(s) sourced from threat intelligence enrichment
+description: Detects file creation/write events matching (a) known-malicious file path(s) sourced from ${sourceLabel}
 references:
-    - Intel Extractor enrichment
+    - Intel Extractor enrichment via hxxps[://]aamir-muhammad[.]github[.]io/Intel-Extractor
+author: Aamir Muhammad
 logsource:
     category: file_event
     product: windows
@@ -1701,9 +1711,10 @@ level: high`;
       const names = arr.map((v) => v.split(" → ")[0].trim());
       return `title: Scheduled Task Creation/Modification Matching Known-Malicious Task Name
 status: experimental
-description: Detects scheduled task creation/modification via schtasks.exe/at.exe/PowerShell matching task name(s) sourced from threat intelligence enrichment
+description: Detects scheduled task creation/modification via schtasks.exe/at.exe/PowerShell matching task name(s) sourced from ${sourceLabel}
 references:
-    - Intel Extractor enrichment
+    - Intel Extractor enrichment via hxxps[://]aamir-muhammad[.]github[.]io/Intel-Extractor
+author: Aamir Muhammad
 logsource:
     category: process_creation
     product: windows
@@ -1727,9 +1738,10 @@ level: high`;
       const names = arr.map((v) => v.split(" → ")[0].trim());
       return `title: Service Creation/Modification Matching Known-Malicious Service Name
 status: experimental
-description: Detects service creation/modification via sc.exe/PowerShell matching service name(s) sourced from threat intelligence enrichment
+description: Detects service creation/modification via sc.exe/PowerShell matching service name(s) sourced from ${sourceLabel}
 references:
-    - Intel Extractor enrichment
+    - Intel Extractor enrichment via hxxps[://]aamir-muhammad[.]github[.]io/Intel-Extractor
+author: Aamir Muhammad
 logsource:
     category: process_creation
     product: windows
@@ -1758,9 +1770,10 @@ level: high`;
       const patterns = distinctive.length ? distinctive : arr.slice(0, 10);
       return `title: Process Creation Matching Known-Malicious Command Line
 status: experimental
-description: Detects process creation events where the command line matches pattern(s) sourced from threat intelligence enrichment
+description: Detects process creation events where the command line matches pattern(s) sourced from ${sourceLabel}
 references:
-    - Intel Extractor enrichment
+    - Intel Extractor enrichment via hxxps[://]aamir-muhammad[.]github[.]io/Intel-Extractor
+author: Aamir Muhammad
 logsource:
     category: process_creation
     product: windows
@@ -4651,11 +4664,12 @@ export default function App() {
     return `IE-${yy}${mm}${dd}-${rand}`;
   };
   const [reportId] = useState(() => genReportId());
+  const [reportGeneratedAt] = useState(() => new Date());
 
   // Aggregate report data from current on-screen state (respects IOC-type filter)
   const buildReportData = () => {
     const rid = reportRefNum || reportId;
-    const generatedAt = new Date();
+    const generatedAt = reportGeneratedAt;
     const verdictCounts = { Malicious: 0, Suspicious: 0, Whitelisted: 0, Unknown: 0 };
     const typeCounts = {};
     const allTechniques = new Set();
@@ -4791,22 +4805,22 @@ export default function App() {
           bridgeCount.get(key).add(String(v).toLowerCase());
           if (!pivotCat.has(key)) pivotCat.set(key, pc);
         };
-        if (d.urlscan?.servingIP) trackPivot(d.urlscan.servingIP, "IPV4");
-        (d.urlscan?.contactedIPs || []).forEach(ip => trackPivot(ip, "IPV4"));
+        if (d.urlscan?.servingIP) trackPivot(d.urlscan.servingIP, ipCat(d.urlscan.servingIP));
+        (d.urlscan?.contactedIPs || []).forEach(ip => trackPivot(ip, ipCat(ip)));
         (d.urlscan?.contactedDomains || []).forEach(dm => trackPivot(dm, "DOMAIN"));
         (d.urlscan?.files || []).forEach(f => { if (f.sha256) trackPivot(f.sha256, "SHA256"); });
-        (d.hybridAnalysis?.hosts || []).forEach(h => trackPivot(h, "IPV4"));
+        (d.hybridAnalysis?.hosts || []).forEach(h => trackPivot(h, ipCat(h)));
         (d.hybridAnalysis?.domains || []).forEach(dm => trackPivot(dm, "DOMAIN"));
         (d.hybridAnalysis?.compromised || []).forEach(h => {
-          const isIP = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
-          trackPivot(h, isIP ? "IPV4" : "DOMAIN");
+          const isIP = isIPv4(h) || h.includes(":");
+          trackPivot(h, isIP ? ipCat(h) : "DOMAIN");
         });
         (d.hybridAnalysis?.submitContext || []).forEach(sc => trackPivot(sc, "URL"));
         (d.hybridAnalysis?.relatedSHA256s || []).forEach(sh => trackPivot(sh, "SHA256"));
         (d.triage?.c2Urls || []).forEach(c2 => {
           if (typeof c2 !== "string") return;
           if (c2.startsWith("domain:")) trackPivot(c2.slice(7), "DOMAIN");
-          else if (c2.startsWith("ip:")) trackPivot(c2.slice(3), "IPV4");
+          else if (c2.startsWith("ip:")) trackPivot(c2.slice(3), ipCat(c2.slice(3)));
           else trackPivot(c2, "URL");
         });
       });
@@ -5066,7 +5080,7 @@ export default function App() {
       const spl = reportQueryLangs.spl ? huntSPL(cat, arr) : null;
       const aql = reportQueryLangs.aql ? huntAQL(cat, arr) : null;
       const cql = reportQueryLangs.cql ? huntCQL(cat, arr) : null;
-      const sigma = reportQueryLangs.sigma ? huntSigma(cat, arr) : null;
+      const sigma = reportQueryLangs.sigma ? huntSigma(cat, arr, data.sourceUrl) : null;
       if (!kql && !spl && !aql && !cql && !sigma) return "";
       return `
         <div class="hunt-block">
@@ -5663,7 +5677,7 @@ export default function App() {
         const spl = reportQueryLangs.spl ? huntSPL(cat, arr) : null;
         const aql = reportQueryLangs.aql ? huntAQL(cat, arr) : null;
         const cql = reportQueryLangs.cql ? huntCQL(cat, arr) : null;
-        const sigma = reportQueryLangs.sigma ? huntSigma(cat, arr) : null;
+        const sigma = reportQueryLangs.sigma ? huntSigma(cat, arr, data.sourceUrl) : null;
         if (!kql && !spl && !aql && !cql && !sigma) return;
         md += `### ${cat}\n\n`;
         if (kql) md += `**Sentinel / Defender XDR (KQL)**\n\n\`\`\`kql\n${kql}\n\`\`\`\n\n`;
@@ -6709,16 +6723,18 @@ export default function App() {
                 ))}
               </div>
             )}
-            <GraphErrorBoundary>
-              <ThreatGraph iocData={iocData} enrichCache={enrichCache} colorFor={colorFor}
-                enrichIOC={enrichIOC} copyText={copyText}
-                addPivotIOC={addPivotIOC} isPivotAdded={isPivotAdded}
-                removeIoc={removeIoc}
-                anyEnriched={iocData ? Object.entries(iocData).some(([cat, arr]) =>
-                  Array.isArray(arr) && arr.some(v => enrichCache[`${cat}::${v}`]?.data)
-                ) : false}
-                hashCollapseAnims={hashCollapseAnims} />
-            </GraphErrorBoundary>
+            <div style={{ width: "100vw", marginLeft: "calc(50% - 50vw)", marginRight: "calc(50% - 50vw)" }}>
+              <GraphErrorBoundary>
+                <ThreatGraph iocData={iocData} enrichCache={enrichCache} colorFor={colorFor}
+                  enrichIOC={enrichIOC} copyText={copyText}
+                  addPivotIOC={addPivotIOC} isPivotAdded={isPivotAdded}
+                  removeIoc={removeIoc}
+                  anyEnriched={iocData ? Object.entries(iocData).some(([cat, arr]) =>
+                    Array.isArray(arr) && arr.some(v => enrichCache[`${cat}::${v}`]?.data)
+                  ) : false}
+                  hashCollapseAnims={hashCollapseAnims} />
+              </GraphErrorBoundary>
+            </div>
           </div>
         )}
 
@@ -6809,7 +6825,7 @@ export default function App() {
                       </button>
                     )}
                     {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","EMAIL","CVE"].includes(cat) && (
-                      <button onClick={() => { arr.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 1500)); setEnrichAllDone((p) => ({ ...p, [cat]: true })); setTimeout(() => setEnrichAllDone((p) => { const n = { ...p }; delete n[cat]; return n; }), 5000); }}
+                      <button onClick={() => { const pending = arr.filter((v) => !enrichCache[`${cat}::${v}`]); pending.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 1500)); setEnrichAllDone((p) => ({ ...p, [cat]: true })); setTimeout(() => setEnrichAllDone((p) => { const n = { ...p }; delete n[cat]; return n; }), 5000); }}
                         disabled={!!enrichAllDone[cat]}
                         className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
                         style={{ color: enrichAllDone[cat] ? "#5d7382" : "#2dd4bf", backgroundColor: enrichAllDone[cat] ? "rgba(120,160,180,0.06)" : "rgba(45,212,191,0.10)", border: `1px solid ${enrichAllDone[cat] ? "rgba(120,160,180,0.2)" : "rgba(45,212,191,0.4)"}`, cursor: enrichAllDone[cat] ? "not-allowed" : "pointer" }}>
@@ -7527,13 +7543,13 @@ export default function App() {
                                 {hasPivotIP && !dismissedPivots.has(`ip::${d.urlscan.servingIP}::${arr[i]}`) && (
                                     <span className="rounded-full px-2 py-0.5 flex items-center gap-1.5 flex-wrap" style={{ color: "#22d3ee", backgroundColor: "rgba(34,211,238,0.08)", border: "1px solid rgba(34,211,238,0.25)" }}>
                                       <span>Serving IP: {d.urlscan.servingIP}{d.urlscan.servingASN ? ` · ${d.urlscan.servingASN}` : ""}{d.urlscan.servingASNName ? ` · ${d.urlscan.servingASNName}` : ""}</span>
-                                      {isPivotAdded("IPV4", d.urlscan.servingIP) ? (
+                                      {isPivotAdded(ipCat(d.urlscan.servingIP), d.urlscan.servingIP) ? (
                                         <>
-                                          <span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>Added to IPV4</span>
-                                          <button onClick={() => removePivotIOC("IPV4", d.urlscan.servingIP)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove</button>
+                                          <span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: "9px", lineHeight: 1 }}>Added to {ipCat(d.urlscan.servingIP)}</span>
+                                          <button onClick={() => removePivotIOC(ipCat(d.urlscan.servingIP), d.urlscan.servingIP)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove</button>
                                         </>
                                       ) : (
-                                        <button onClick={() => addPivotIOC("IPV4", d.urlscan.servingIP, `Serving IP of ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#22d3ee", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>+ Add as IOC</button>
+                                        <button onClick={() => addPivotIOC(ipCat(d.urlscan.servingIP), d.urlscan.servingIP, `Serving IP of ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#22d3ee", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>+ Add as IOC</button>
                                       )}
                                       <button onClick={() => dismissPivot(`ip::${d.urlscan.servingIP}::${arr[i]}`)} className="rounded p-0.5" style={{ color: "#5d7382", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
                                     </span>
@@ -7630,7 +7646,7 @@ export default function App() {
                                 if (dismissedPivots.has(`pdns::${t}::${arr[i]}`)) return false;
                                 // Filter out ones already in cards (unless previously added as pivot)
                                 if (cat === "DOMAIN") {
-                                  if (!isPivotAdded("IPV4", t) && existingIPs.has(t)) return false;
+                                  if (!isPivotAdded(ipCat(t), t) && existingIPs.has(t)) return false;
                                 } else {
                                   if (!isPivotAdded("DOMAIN", t) && existingDomains.has(t)) return false;
                                 }
@@ -7719,7 +7735,7 @@ export default function App() {
                                     {pdnsRecords.map((r, pi) => {
                                       // For DOMAIN queries, pivot the IP addresses. For IP queries, pivot the hostnames.
                                       const target = cat === "DOMAIN" ? r.address : r.hostname;
-                                      const targetCat = cat === "DOMAIN" ? "IPV4" : "DOMAIN";
+                                      const targetCat = cat === "DOMAIN" ? ipCat(r.address) : "DOMAIN";
                                       const added = isPivotAdded(targetCat, target);
                                       const rowKey = `${eKey}::${String(target).toLowerCase()}`;
                                       const multiObs = (r.obs || 1) > 1;
@@ -7789,7 +7805,7 @@ export default function App() {
                                         const n = ip.toLowerCase();
                                         if (n === iocNorm) return false;
                                         if (dismissedPivots.has(`contact::${n}::${arr[i]}`)) return false;
-                                        if (!isPivotAdded("IPV4", n) && existingIPs.has(n)) return false;
+                                        if (!isPivotAdded(ipCat(n), n) && existingIPs.has(n)) return false;
                                         return true;
                                       });
                                       const cDoms = (d.urlscan?.contactedDomains || []).filter((dom) => {
@@ -7800,7 +7816,7 @@ export default function App() {
                                         return true;
                                       });
                                       if (!cIPs.length && !cDoms.length) return null;
-                                      const rows = [...cIPs.map((v) => ({ v, cat: "IPV4" })), ...cDoms.map((v) => ({ v, cat: "DOMAIN" }))];
+                                      const rows = [...cIPs.map((v) => ({ v, cat: ipCat(v) })), ...cDoms.map((v) => ({ v, cat: "DOMAIN" }))];
                                       return (
                                         <>
                                           <div className="flex items-center gap-1.5 mt-1 mb-0.5">
@@ -7879,7 +7895,7 @@ export default function App() {
                     {huntCQL(cat, arr) && <CopyBtn label="CrowdStrike CQL" copied={copied === `${cat}-hunt-cql`} onClick={() => copyText(huntCQL(cat, arr), `${cat}-hunt-cql`)} color={c} />}
                     {huntSPL(cat, arr) && <CopyBtn label="Splunk SPL" copied={copied === `${cat}-hunt-spl`} onClick={() => copyText(huntSPL(cat, arr), `${cat}-hunt-spl`)} color={c} />}
                     {huntAQL(cat, arr) && <CopyBtn label="QRadar AQL" copied={copied === `${cat}-hunt-aql`} onClick={() => copyText(huntAQL(cat, arr), `${cat}-hunt-aql`)} color={c} />}
-                    {huntSigma(cat, arr) && <CopyBtn label="Sigma Rule" copied={copied === `${cat}-hunt-sigma`} onClick={() => copyText(huntSigma(cat, arr), `${cat}-hunt-sigma`)} color={c} />}
+                    {huntSigma(cat, arr, sourceUrl) && <CopyBtn label="Sigma Rule" copied={copied === `${cat}-hunt-sigma`} onClick={() => copyText(huntSigma(cat, arr, sourceUrl), `${cat}-hunt-sigma`)} color={c} />}
                   </div>
                 )}
 
@@ -8049,7 +8065,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
 
         // Serving IP (strong: same box)
         if (d.urlscan?.servingIP && norm(d.urlscan.servingIP) !== srcId) {
-          const ipNode = addNode(d.urlscan.servingIP, d.urlscan.servingIP, "IPV4", true, null);
+          const ipNode = addNode(d.urlscan.servingIP, d.urlscan.servingIP, ipCat(d.urlscan.servingIP), true, null);
           if (d.urlscan.servingASNName) ipNode.asn = d.urlscan.servingASNName;
           addEdge(val, d.urlscan.servingIP, "serves", "rgba(0,229,255,0.5)");
         }
@@ -8058,7 +8074,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
         (d.otxPDNS?.records || []).forEach((r) => {
           const target = cat === "DOMAIN" ? r.address : r.hostname;
           if (!target) return;
-          const tcat = cat === "DOMAIN" ? "IPV4" : "DOMAIN";
+          const tcat = cat === "DOMAIN" ? ipCat(target) : "DOMAIN";
           addNode(target, target, tcat, true, null);
           addEdge(val, target, "resolved", "rgba(45,212,191,0.4)");
         });
@@ -8085,7 +8101,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
         // Contacted IPs (urlscan result detail — infra the page talked to)
         (d.urlscan?.contactedIPs || []).forEach((ip) => {
           if (norm(ip) === srcId) return;
-          const n = addNode(ip, ip, "IPV4", true, null);
+          const n = addNode(ip, ip, ipCat(ip), true, null);
           if (n) n.contacted = true;
           addEdge(val, ip, "contacted", "rgba(251,146,60,0.4)");
         });
@@ -8120,7 +8136,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
           } else if (raw.startsWith("ip:")) {
             const ip = raw.slice(3);
             if (!ip) return;
-            const n = addNode(ip, ip, "IPV4", true, "Malicious");
+            const n = addNode(ip, ip, ipCat(ip), true, "Malicious");
             if (n) n.c2 = true;
             addEdge(val, ip, "c2", "rgba(255,77,109,0.6)");
           } else {
@@ -8149,8 +8165,8 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
             addEdge(val, sc, "downloaded_from", "rgba(255,77,109,0.55)");
             // Auto-derive host node (URL → IP/DOMAIN) so it can bridge with other IOCs.
             // Classify by whether hostname is IPv4 or a domain.
-            const isIP = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
-            const hostCat = isIP ? "IPV4" : "DOMAIN";
+            const isIP = isIPv4(host) || host.includes(":");
+            const hostCat = isIP ? ipCat(host) : "DOMAIN";
             if (norm(host) !== norm(sc)) {
               addNode(host, host, hostCat, true, null);
               addEdge(sc, host, "hosted_on", "rgba(0,229,255,0.4)");
@@ -8161,7 +8177,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
         (d.hybridAnalysis?.hosts || []).forEach((ip) => {
           if (!ip || typeof ip !== "string") return;
           if (norm(ip) === srcId) return;
-          const n = addNode(ip, ip, "IPV4", true, null);
+          const n = addNode(ip, ip, ipCat(ip), true, null);
           if (n) n.contacted = true;
           addEdge(val, ip, "contacted", "rgba(251,146,60,0.4)");
         });
@@ -8177,8 +8193,8 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
         (d.hybridAnalysis?.compromised || []).forEach((host) => {
           if (!host || typeof host !== "string") return;
           if (norm(host) === srcId) return;
-          const isIP = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
-          const hcat = isIP ? "IPV4" : "DOMAIN";
+          const isIP = isIPv4(host) || host.includes(":");
+          const hcat = isIP ? ipCat(host) : "DOMAIN";
           const n = addNode(host, host, hcat, true, "Malicious");
           if (n) n.c2 = true;
           addEdge(val, host, "c2", "rgba(255,77,109,0.6)");
@@ -8384,7 +8400,14 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const CORE_MAX_W = 1280; // matches the app's max-w-7xl content width
     const onWheelNative = (e) => {
+      if (!fullscreen) {
+        const rect = canvas.getBoundingClientRect();
+        const margin = Math.max(0, (rect.width - CORE_MAX_W) / 2);
+        const localX = e.clientX - rect.left;
+        if (localX < margin || localX > rect.width - margin) return; // edge strip: let the page scroll
+      }
       e.preventDefault();
       e.stopPropagation();
       const cam = camRef.current;
@@ -8393,7 +8416,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
     };
     canvas.addEventListener("wheel", onWheelNative, { passive: false });
     return () => canvas.removeEventListener("wheel", onWheelNative);
-  }, []);
+  }, [fullscreen]);
 
   // Touch: pinch-to-zoom and one-finger pan (mobile). Native non-passive so the
   // page doesn't scroll/zoom while interacting with the graph.
