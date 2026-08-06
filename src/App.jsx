@@ -36,7 +36,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v108";
+const APP_VERSION = "v109";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -633,9 +633,11 @@ const refangSoft = (s) =>
     .replace(/\[\/\]/g, "/")
     .replace(/[\u200B\u200C\u200D\uFEFF]/g, "");
 
-const trimTok = (s) =>
-  s.replace(/^[.,;:!?'"`(){}<>\u201c\u201d\u2018\u2019]+/, "")
+const trimTok = (s) => {
+  if (isIPv6(s)) return s; // don't strip the leading/trailing "::" of "::1", "fe80::", etc.
+  return s.replace(/^[.,;:!?'"`(){}<>\u201c\u201d\u2018\u2019]+/, "")
    .replace(/[.,;:!?'"`(){}<>\u201c\u201d\u2018\u2019]+$/, "");
+};
 
 // Drop leading scheme from URLs (http:// https:// ftp://) for display/copy/export.
 // Defanged variants are refanged first so hxxp[://] forms are handled too.
@@ -654,6 +656,25 @@ const FILE_EXT = /\.(exe|dll|sys|scr|pif|cpl|msi|msp|ps1|psm1|psd1|bat|cmd|vbs|v
 const isIPv4 = (t) => {
   const m = t.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   return m && m.slice(1).every((o) => +o >= 0 && +o <= 255);
+};
+
+// Validates full and "::"-compressed IPv6 notation — plain group-count math
+// rather than one giant regex, so every valid compression point is covered.
+const isIPv6 = (t) => {
+  if (!t.includes(":")) return false;
+  if (t.split("::").length > 2) return false; // at most one "::"
+  let groups;
+  if (t.includes("::")) {
+    const [left, right] = t.split("::");
+    const leftGroups = left ? left.split(":") : [];
+    const rightGroups = right ? right.split(":") : [];
+    groups = [...leftGroups, ...rightGroups];
+    if (groups.length > 7) return false; // "::" must stand in for >=1 group
+  } else {
+    groups = t.split(":");
+    if (groups.length !== 8) return false;
+  }
+  return groups.every((g) => /^[0-9a-f]{1,4}$/i.test(g));
 };
 
 const ipCat = (t) => (t.includes(":") ? "IPV6" : "IPV4");
@@ -1007,7 +1028,7 @@ const classify = (t) => {
   }
   if (isIPv4(t)) return ["IPV4", t]; // bare IP with no port
   if (/^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(t) || /^(?:[0-9a-f]{2}-){5}[0-9a-f]{2}$/i.test(t)) return ["MAC_ADDRESS", t.toLowerCase()];
-  if (/^(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{0,4}$/i.test(t) && (t.match(/:/g) || []).length >= 2) return ["IPV6", t.toLowerCase()];
+  if (isIPv6(t)) return ["IPV6", t.toLowerCase()];
   if (/^4[0-9AB][1-9A-HJ-NP-Za-km-z]{93}(?:[1-9A-HJ-NP-Za-km-z]{11})?$/.test(t)) return ["XMR", t];
   if (/^(bc1[ac-hj-np-z02-9]{11,71}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$/.test(t)) return ["BTC", t];
   if (/^ASN?\d{2,}$/i.test(t)) return ["ASN", t.toUpperCase().replace(/^ASN/, "AS")];
@@ -2507,8 +2528,13 @@ export default function App() {
               setBlastNodes(s => { const n = new Set(s); n.delete(value); return n; });
               // Clean up animation after another 600ms
               setTimeout(() => setHashCollapseAnims(a => a.filter(x => x.id !== `${value}->${canonical}`)), 600);
-              // Auto-trigger SHA256 enrichment after consolidation
-              setTimeout(() => enrichIOC("SHA256", canonical), 500);
+              // Auto-trigger SHA256 enrichment after consolidation — clear the
+              // partial pre-flight snapshot first so the full cascade isn't
+              // blocked by its own "already has non-error data" cache entry.
+              setTimeout(() => {
+                setEnrichCache((c) => { const n = { ...c }; delete n[sha256Key]; return n; });
+                enrichIOC("SHA256", canonical);
+              }, 500);
             }, 1600); // wait for arc to finish (1400ms) + 200ms buffer
           }, 500);
           return; // ← SHORT-CIRCUIT: skip all remaining enrichment calls
@@ -3748,7 +3774,10 @@ export default function App() {
             return next;
           });
           // Auto-trigger SHA256 enrichment after consolidation
-          setTimeout(() => enrichIOC("SHA256", canonical), 2000);
+          setTimeout(() => {
+            setEnrichCache((c) => { const n = { ...c }; delete n[`SHA256::${canonical}`]; return n; });
+            enrichIOC("SHA256", canonical);
+          }, 2000);
         }
         // else: canonical SHA256 not in list — leave MD5/SHA1 as-is.
         // User can click "Consolidate as SHA256 IOC" on card header to manually convert.
@@ -3858,8 +3887,12 @@ export default function App() {
         setTimeout(() => setBlastNodes(s => { const n = new Set(s); n.delete(value); return n; }), 950);
         fireDedupToast(cat, value, canonical);
         // Auto-trigger enrichment of the new SHA256 — staggered so a multi-hash
-        // consolidation doesn't fire a burst of simultaneous enrichments.
-        setTimeout(() => enrichIOC("SHA256", canonical), 1500 + idx * 1500);
+        // consolidation doesn't fire a burst of simultaneous enrichments. Clear
+        // any stray cache entry first so it can't block the fresh enrichment.
+        setTimeout(() => {
+          setEnrichCache((c) => { const n = { ...c }; delete n[`SHA256::${canonical}`]; return n; });
+          enrichIOC("SHA256", canonical);
+        }, 1500 + idx * 1500);
       });
       return next;
     });
@@ -4164,6 +4197,16 @@ export default function App() {
     setAiScanState("idle"); setAiScanCounts(null); setAiScanError("");
     setRetryCount(0); setCooldown(0); setRawArticle(""); setArticleClean(""); setDefangAll(false);
     setReferences([]); setMergedHashes({}); setShowMerged(false);
+  };
+
+  const goHome = () => {
+    resetResults();
+    setMode("url");
+    setUrl("");
+    setJsonText("");
+    setRawText("");
+    setReportOpen(false);
+    window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   // ---- URL mode: API call AND page fetch in parallel ----
@@ -6263,13 +6306,16 @@ export default function App() {
           );
         })()}
         <div className="flex items-start gap-3 mb-5 flex-wrap">
-          <div className="flex h-11 w-11 items-center justify-center rounded-lg shrink-0"
-            style={{ backgroundColor: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.35)", boxShadow: "0 0 22px rgba(0,229,255,0.25)" }}>
+          <button onClick={goHome} title="Back to home" aria-label="Back to home"
+            className="flex h-11 w-11 items-center justify-center rounded-lg shrink-0"
+            style={{ backgroundColor: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.35)", boxShadow: "0 0 22px rgba(0,229,255,0.25)", cursor: "pointer" }}>
             <Shield size={22} style={{ color: "#00e5ff" }} />
-          </div>
+          </button>
           <div className="min-w-0">
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight" style={{ color: "#eafcff", textShadow: "0 0 18px rgba(0,229,255,0.35)" }}>
-              Intel Extractor
+              <button onClick={goHome} title="Back to home" style={{ color: "inherit", background: "none", border: "none", padding: 0, font: "inherit", cursor: "pointer", textShadow: "inherit" }}>
+                Intel Extractor
+              </button>
             </h1>
             <p className="text-[11px]" style={{ color: "#5d7382", letterSpacing: "2px", marginTop: "2px" }}>
               EXTRACT · ENRICH · HUNT <span style={{ color: "#3a4a54", marginLeft: "8px" }}>{APP_VERSION}</span>
