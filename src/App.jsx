@@ -10,7 +10,8 @@ import * as XLSX from "xlsx";
 import {
   Shield, Search, Download, Copy, Check, Loader2, Globe,
   ClipboardPaste, AlertTriangle, ShieldOff, Trash2, Wand2,
-  Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles, ChevronDown, RefreshCw, FileUp, Pencil, Share2, Zap, FileBarChart
+  Crosshair, FileText, Linkedin, Github, X, Target, ShieldCheck, Sparkles, ChevronDown, RefreshCw, FileUp, Pencil, Share2, Zap, FileBarChart,
+  Database, Terminal
 } from "lucide-react";
 
 // ============================================================
@@ -36,7 +37,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v110";
+const APP_VERSION = "v111";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -6521,6 +6522,26 @@ export default function App() {
         </div>
 
         {!total && <ThreatWire onHunt={huntArticle} />}
+
+        {!total && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-5">
+            {[
+              { icon: <Search size={19} />, title: "IOC Extraction", desc: "Pull IPs, hashes, domains, and URLs from pasted text, JSON, or a live article URL." },
+              { icon: <Database size={19} />, title: "Multi-Engine Enrichment", desc: "Cross-reference every indicator against 10+ engines — OTX, Kaspersky, Hybrid Analysis, and more." },
+              { icon: <Share2 size={19} />, title: "Threat Graph", desc: "Pivot across shared infrastructure and visualize the blast radius as a live node graph." },
+              { icon: <Crosshair size={19} />, title: "Hunting Artifacts", desc: "Auto-generate Sigma and YARA rules plus EDR-ready artifacts from what was found." },
+              { icon: <Terminal size={19} />, title: "Query Generation", desc: "Ship straight to KQL, SPL, AQL, or CQL — no manual translation between platforms." },
+              { icon: <FileBarChart size={19} />, title: "Report Builder", desc: "Export a TLP-marked, analyst-ready report as HTML, Markdown, or PDF." },
+            ].map((f, i) => (
+              <div key={i} className="rounded-xl p-4"
+                style={{ backgroundColor: "rgba(10,14,20,0.5)", border: "1px solid rgba(217,154,78,0.16)", borderTop: "2px solid rgba(217,154,78,0.5)" }}>
+                <div style={{ color: "#d99a4e", marginBottom: 10 }}>{f.icon}</div>
+                <div className="text-sm font-bold mb-1" style={{ color: "#eafcff" }}>{f.title}</div>
+                <div className="text-xs leading-relaxed" style={{ color: "#8aa0ad" }}>{f.desc}</div>
+              </div>
+            ))}
+          </div>
+        )}
         </div>
 
         {meta && (meta.title || meta.description) && (
