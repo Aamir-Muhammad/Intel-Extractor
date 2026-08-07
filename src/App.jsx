@@ -1,10 +1,10 @@
-// =============================================================
+// ============================================================
 // Intel Extractor — © 2024-2026 Aamir Muhammad
 // Licensed under the PolyForm Noncommercial License 1.0.0
 // Commercial use, rehosting, and redistribution without
 // explicit written permission from the author is prohibited.
 // https://polyformproject.org/licenses/noncommercial/1.0.0/
-// =============================================================
+// ============================================================
 import { useState, useMemo, useRef, useEffect, Component } from "react";
 import * as XLSX from "xlsx";
 import {
