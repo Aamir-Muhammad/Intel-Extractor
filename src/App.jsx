@@ -37,7 +37,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v111";
+const APP_VERSION = "v112";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -6329,12 +6329,17 @@ export default function App() {
             className="relative flex h-11 w-11 items-center justify-center rounded-lg shrink-0"
             style={{ backgroundColor: "rgba(217,154,78,0.10)", border: "1px solid rgba(217,154,78,0.4)", boxShadow: "0 0 22px rgba(217,154,78,0.2)", cursor: "pointer" }}>
             <span className="sitroom-sonar"><i></i><i></i><i></i></span>
-            <Shield size={22} style={{ color: "#d99a4e", position: "relative" }} />
+            <svg width="22" height="22" viewBox="0 0 34 34" fill="none" style={{ position: "relative" }}>
+              <circle cx="17" cy="17" r="15.5" stroke="#d99a4e" strokeWidth="1.4" />
+              <circle cx="17" cy="17" r="9.5" stroke="#d99a4e" strokeWidth="1.4" opacity=".6" />
+              <circle cx="17" cy="17" r="2.4" fill="#d99a4e" />
+              <line x1="17" y1="17" x2="17" y2="3" stroke="#d99a4e" strokeWidth="1.4" />
+            </svg>
           </button>
           <div className="min-w-0">
-            <h1 className="text-xl sm:text-2xl font-bold tracking-tight" style={{ color: "#eafcff", textShadow: "0 0 16px rgba(217,154,78,0.3)", fontFamily: 'ui-monospace, "Cascadia Code", Consolas, monospace' }}>
+            <h1 className="text-xl sm:text-2xl font-bold tracking-tight uppercase" style={{ color: "#eafcff", textShadow: "0 0 16px rgba(217,154,78,0.3)", fontFamily: 'ui-monospace, "Cascadia Code", Consolas, monospace' }}>
               <button onClick={goHome} title="Back to home" style={{ color: "inherit", background: "none", border: "none", padding: 0, font: "inherit", cursor: "pointer", textShadow: "inherit" }}>
-                Intel Extractor
+                Intel_Extractor
               </button>
             </h1>
             <p className="text-[11px]" style={{ color: "#5d7382", letterSpacing: "2px", marginTop: "2px" }}>
@@ -6348,20 +6353,20 @@ export default function App() {
             </p>
             <div className="flex flex-wrap gap-1.5 sm:justify-end">
               <a href="https://www.linkedin.com/in/aamirmohammad/" target="_blank" rel="noreferrer noopener"
-                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold"
-                style={{ color: "#38bdf8", border: "1px solid rgba(56,189,248,0.4)", backgroundColor: "rgba(56,189,248,0.08)" }}>
+                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-bold"
+                style={{ color: "#d99a4e", border: "1px solid rgba(217,154,78,0.4)", backgroundColor: "rgba(217,154,78,0.08)" }}>
                 <Linkedin size={13} /> LinkedIn
               </a>
               <a href="https://github.com/Aamir-Muhammad/CrowdStrike-Queries" target="_blank" rel="noreferrer noopener"
                 title="CrowdStrike hunting queries on GitHub"
-                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold"
-                style={{ color: "#ff4d4d", border: "1px solid rgba(255,77,77,0.4)", backgroundColor: "rgba(255,77,77,0.08)" }}>
+                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-bold"
+                style={{ color: "#d99a4e", border: "1px solid rgba(217,154,78,0.4)", backgroundColor: "rgba(217,154,78,0.08)" }}>
                 <Github size={13} /><Target size={13} /> CrowdStrike Queries
               </a>
               <a href="https://github.com/Aamir-Muhammad/KQL-Queries" target="_blank" rel="noreferrer noopener"
                 title="Defender XDR hunting queries on GitHub"
-                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold"
-                style={{ color: "#00b7ff", border: "1px solid rgba(0,183,255,0.4)", backgroundColor: "rgba(0,183,255,0.08)" }}>
+                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-bold"
+                style={{ color: "#d99a4e", border: "1px solid rgba(217,154,78,0.4)", backgroundColor: "rgba(217,154,78,0.08)" }}>
                 <Github size={13} /><ShieldCheck size={13} /> Defender XDR Queries
               </a>
             </div>
@@ -6416,7 +6421,7 @@ export default function App() {
         )}
 
         <div className="rounded-xl p-4 mb-5" style={panel}>
-          <div className="flex flex-wrap gap-1 mb-3">
+          <div className="flex flex-wrap mb-3" style={{ borderBottom: "1px solid rgba(217,154,78,0.16)" }}>
             <Tab active={mode === "url"} onClick={() => setMode("url")} icon={<Globe size={14} />}>Fetch URL</Tab>
             <Tab active={mode === "upload"} onClick={() => setMode("upload")} icon={<FileUp size={14} />}>Upload File</Tab>
             <Tab active={mode === "paste"} onClick={() => setMode("paste")} icon={<ClipboardPaste size={14} />}>Paste JSON</Tab>
@@ -6533,8 +6538,11 @@ export default function App() {
               { icon: <Terminal size={19} />, title: "Query Generation", desc: "Ship straight to KQL, SPL, AQL, or CQL — no manual translation between platforms." },
               { icon: <FileBarChart size={19} />, title: "Report Builder", desc: "Export a TLP-marked, analyst-ready report as HTML, Markdown, or PDF." },
             ].map((f, i) => (
-              <div key={i} className="rounded-xl p-4"
+              <div key={i} className="relative rounded-xl p-4"
                 style={{ backgroundColor: "rgba(10,14,20,0.5)", border: "1px solid rgba(217,154,78,0.16)", borderTop: "2px solid rgba(217,154,78,0.5)" }}>
+                <span className="absolute top-4 right-4 text-[10px]" style={{ color: "#5d7382", fontFamily: 'ui-monospace, "Cascadia Code", Consolas, monospace', letterSpacing: "0.08em" }}>
+                  {String(i + 1).padStart(2, "0")}
+                </span>
                 <div style={{ color: "#d99a4e", marginBottom: 10 }}>{f.icon}</div>
                 <div className="text-sm font-bold mb-1" style={{ color: "#eafcff" }}>{f.title}</div>
                 <div className="text-xs leading-relaxed" style={{ color: "#8aa0ad" }}>{f.desc}</div>
@@ -9399,8 +9407,14 @@ function GButton({ children, onClick, disabled, color, icon, solid, flash }) {
 
 function Tab({ children, active, onClick, icon }) {
   return (
-    <button onClick={onClick} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold"
-      style={{ color: active ? "#04111a" : "#8aa0ad", backgroundColor: active ? "#d99a4e" : "transparent", boxShadow: active ? "0 0 14px rgba(217,154,78,0.4)" : "none" }}>
+    <button onClick={onClick} className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase"
+      style={{
+        color: active ? "#d99a4e" : "#7c8895",
+        backgroundColor: active ? "rgba(217,154,78,0.08)" : "transparent",
+        boxShadow: active ? "inset 0 -2px 0 #d99a4e" : "inset 0 -2px 0 transparent",
+        letterSpacing: "0.04em",
+        fontFamily: 'ui-monospace, "Cascadia Code", Consolas, monospace',
+      }}>
       {icon} {children}
     </button>
   );
@@ -9541,7 +9555,7 @@ function ThreatWireTicker({ items, onHunt }) {
       onMouseLeave={() => { pausedRef.current = false; }}
       onScroll={(e) => { posRef.current = e.currentTarget.scrollTop; }}
       className="flex flex-col gap-2"
-      style={{ maxHeight: 460, overflowY: "auto" }}
+      style={{ maxHeight: 920, overflowY: "auto" }}
     >
       {items.map((it) => <ThreatWireRow key={`a-${it.id}`} item={it} onHunt={onHunt} />)}
       {items.length > 1 && items.map((it) => <ThreatWireRow key={`b-${it.id}`} item={it} onHunt={onHunt} />)}
