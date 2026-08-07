@@ -37,7 +37,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v113";
+const APP_VERSION = "v114";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -5813,10 +5813,7 @@ export default function App() {
     minHeight: "100vh", color: "#e6f0f3", backgroundColor: "#05070a",
     backgroundImage:
       "radial-gradient(1200px 600px at 80% -10%, rgba(0,229,255,0.10), transparent 60%)," +
-      "radial-gradient(900px 500px at 0% 10%, rgba(0,255,156,0.08), transparent 55%)," +
-      "linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px)," +
-      "linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px)",
-    backgroundSize: "auto, auto, 38px 38px, 38px 38px",
+      "radial-gradient(900px 500px at 0% 10%, rgba(0,255,156,0.08), transparent 55%)",
   };
   const panel = { backgroundColor: "rgba(10,14,20,0.72)", border: "1px solid rgba(120,160,180,0.16)", backdropFilter: "blur(6px)" };
 
