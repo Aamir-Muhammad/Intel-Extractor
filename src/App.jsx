@@ -36,7 +36,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v109";
+const APP_VERSION = "v110";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -6265,6 +6265,15 @@ export default function App() {
         }
         *::-webkit-scrollbar-thumb:hover { background: #00e5ffaa; }
         *::-webkit-scrollbar-corner { background: #070b10; }
+        .sitroom-sonar { position: absolute; inset: 0; pointer-events: none; }
+        .sitroom-sonar i {
+          position: absolute; inset: 0; border-radius: 50%; border: 1.4px solid #d99a4e;
+          opacity: 0; animation: sitroomPing 4.2s cubic-bezier(.2,.6,.4,1) infinite;
+        }
+        .sitroom-sonar i:nth-child(2) { animation-delay: 1.4s; }
+        .sitroom-sonar i:nth-child(3) { animation-delay: 2.8s; }
+        @keyframes sitroomPing { 0% { transform: scale(1); opacity: .55; } 100% { transform: scale(6.5); opacity: 0; } }
+        @media (prefers-reduced-motion: reduce) { .sitroom-sonar i { animation: none; opacity: 0; } }
       `}</style>
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
         {!tokenBannerDismissed && expiringTokens.length > 0 && (() => {
@@ -6305,14 +6314,24 @@ export default function App() {
             </div>
           );
         })()}
-        <div className="flex items-start gap-3 mb-5 flex-wrap">
+        <div style={{ position: "relative", zIndex: 0 }}>
+          <div aria-hidden="true" style={{
+            position: "absolute", top: 0, right: 0, width: "100%", height: "100%", zIndex: -1,
+            backgroundImage: "radial-gradient(rgba(217,154,78,0.13) 1px, transparent 1px)",
+            backgroundSize: "26px 26px",
+            WebkitMaskImage: "radial-gradient(circle at 92% 0%, #000 0%, transparent 45%)",
+            maskImage: "radial-gradient(circle at 92% 0%, #000 0%, transparent 45%)",
+            pointerEvents: "none",
+          }} />
+        <div className="relative flex items-start gap-3 mb-5 flex-wrap">
           <button onClick={goHome} title="Back to home" aria-label="Back to home"
-            className="flex h-11 w-11 items-center justify-center rounded-lg shrink-0"
-            style={{ backgroundColor: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.35)", boxShadow: "0 0 22px rgba(0,229,255,0.25)", cursor: "pointer" }}>
-            <Shield size={22} style={{ color: "#00e5ff" }} />
+            className="relative flex h-11 w-11 items-center justify-center rounded-lg shrink-0"
+            style={{ backgroundColor: "rgba(217,154,78,0.10)", border: "1px solid rgba(217,154,78,0.4)", boxShadow: "0 0 22px rgba(217,154,78,0.2)", cursor: "pointer" }}>
+            <span className="sitroom-sonar"><i></i><i></i><i></i></span>
+            <Shield size={22} style={{ color: "#d99a4e", position: "relative" }} />
           </button>
           <div className="min-w-0">
-            <h1 className="text-xl sm:text-2xl font-bold tracking-tight" style={{ color: "#eafcff", textShadow: "0 0 18px rgba(0,229,255,0.35)" }}>
+            <h1 className="text-xl sm:text-2xl font-bold tracking-tight" style={{ color: "#eafcff", textShadow: "0 0 16px rgba(217,154,78,0.3)", fontFamily: 'ui-monospace, "Cascadia Code", Consolas, monospace' }}>
               <button onClick={goHome} title="Back to home" style={{ color: "inherit", background: "none", border: "none", padding: 0, font: "inherit", cursor: "pointer", textShadow: "inherit" }}>
                 Intel Extractor
               </button>
@@ -6417,7 +6436,7 @@ export default function App() {
                     style={{ backgroundColor: "rgba(0,0,0,0.45)", border: "1px solid rgba(120,160,180,0.22)", color: "#dff" }}
                   />
                 </div>
-                <GButton onClick={() => runFetch()} disabled={!url || loading} color="#00e5ff" solid icon={loading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}>
+                <GButton onClick={() => runFetch()} disabled={!url || loading} color="#d99a4e" solid icon={loading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}>
                   {loading ? "Fetching…" : "Fetch & Extract"}
                 </GButton>
               </div>
@@ -6433,16 +6452,16 @@ export default function App() {
                 onClick={() => fileInputRef.current?.click()}
                 className="rounded-lg px-6 py-8 text-center cursor-pointer transition-colors"
                 style={{
-                  backgroundColor: uploadDragging ? "rgba(0,229,255,0.08)" : "rgba(0,0,0,0.35)",
-                  border: `2px dashed ${uploadDragging ? "rgba(0,229,255,0.5)" : "rgba(120,160,180,0.25)"}`,
+                  backgroundColor: uploadDragging ? "rgba(217,154,78,0.08)" : "rgba(0,0,0,0.35)",
+                  border: `2px dashed ${uploadDragging ? "rgba(217,154,78,0.5)" : "rgba(120,160,180,0.25)"}`,
                 }}>
-                <FileUp size={28} className="mx-auto mb-2" style={{ color: uploadDragging ? "#00e5ff" : "#5d7382" }} />
+                <FileUp size={28} className="mx-auto mb-2" style={{ color: uploadDragging ? "#d99a4e" : "#5d7382" }} />
                 {loading ? (
                   <p className="text-sm animate-pulse" style={{ color: "#9fb3bd" }}>Processing file…</p>
                 ) : (
                   <>
                     <p className="text-sm" style={{ color: "#9fb3bd" }}>
-                      <span style={{ color: "#00e5ff", fontWeight: 600 }}>Click to browse</span> or drag & drop a file
+                      <span style={{ color: "#d99a4e", fontWeight: 600 }}>Click to browse</span> or drag & drop a file
                     </p>
                     <p className="text-[11px] mt-1.5" style={{ color: "#5d7382" }}>
                       PDF · DOCX · PPTX · XLSX · HTML · TXT · CSV · JSON · MD · EML
@@ -6502,6 +6521,7 @@ export default function App() {
         </div>
 
         {!total && <ThreatWire onHunt={huntArticle} />}
+        </div>
 
         {meta && (meta.title || meta.description) && (
           <div className="flex items-start gap-3 mb-3 py-3" style={{ borderBottom: "1px solid rgba(120,160,180,0.06)" }}>
@@ -9359,7 +9379,7 @@ function GButton({ children, onClick, disabled, color, icon, solid, flash }) {
 function Tab({ children, active, onClick, icon }) {
   return (
     <button onClick={onClick} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold"
-      style={{ color: active ? "#04111a" : "#8aa0ad", backgroundColor: active ? "#00e5ff" : "transparent", boxShadow: active ? "0 0 14px rgba(0,229,255,0.4)" : "none" }}>
+      style={{ color: active ? "#04111a" : "#8aa0ad", backgroundColor: active ? "#d99a4e" : "transparent", boxShadow: active ? "0 0 14px rgba(217,154,78,0.4)" : "none" }}>
       {icon} {children}
     </button>
   );
@@ -9450,7 +9470,7 @@ function ThreatWireRow({ item, onHunt }) {
         <div style={{ fontFamily: WIRE_SANS_FONT, fontSize: 15.5, fontWeight: 600, lineHeight: 1.4, color: "#eafcff" }}>{item.title}</div>
         <div className="flex items-center justify-between gap-2">
           <span className="truncate" style={{ fontFamily: WIRE_SANS_FONT, fontSize: 11.5, color: "#7f95a3" }}>{item.domain}</span>
-          <span className="shrink-0" style={{ fontFamily: WIRE_SANS_FONT, fontSize: 11, fontWeight: 700, color: "#00e5ff", letterSpacing: "0.4px" }}>HUNT THIS →</span>
+          <span className="shrink-0" style={{ fontFamily: WIRE_SANS_FONT, fontSize: 11, fontWeight: 700, color: "#d99a4e", letterSpacing: "0.4px" }}>HUNT THIS →</span>
         </div>
       </div>
     </div>
@@ -9526,8 +9546,8 @@ function ThreatWire({ onHunt }) {
   return (
     <div className="rounded-xl p-4 mb-5" style={{ backgroundColor: "rgba(10,14,20,0.5)", border: "1px solid rgba(120,160,180,0.14)" }}>
       <div className="flex items-center gap-2 mb-1">
-        <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ backgroundColor: "#00e5ff", boxShadow: "0 0 8px #00e5ff" }} />
-        <span className="text-[10px] font-bold uppercase" style={{ letterSpacing: "2.5px", color: "#00e5ff" }}>Live threat intel wire</span>
+        <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ backgroundColor: "#d99a4e", boxShadow: "0 0 8px #d99a4e" }} />
+        <span className="text-[10px] font-bold uppercase" style={{ letterSpacing: "2.5px", color: "#d99a4e" }}>Live threat intel wire</span>
       </div>
       <div className="mt-3">
         {items === null
