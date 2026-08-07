@@ -37,7 +37,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v112";
+const APP_VERSION = "v113";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -6316,20 +6316,12 @@ export default function App() {
           );
         })()}
         <div style={{ position: "relative", zIndex: 0 }}>
-          <div aria-hidden="true" style={{
-            position: "absolute", top: 0, right: 0, width: "100%", height: "100%", zIndex: -1,
-            backgroundImage: "radial-gradient(rgba(217,154,78,0.13) 1px, transparent 1px)",
-            backgroundSize: "26px 26px",
-            WebkitMaskImage: "radial-gradient(circle at 92% 0%, #000 0%, transparent 45%)",
-            maskImage: "radial-gradient(circle at 92% 0%, #000 0%, transparent 45%)",
-            pointerEvents: "none",
-          }} />
         <div className="relative flex items-start gap-3 mb-5 flex-wrap">
           <button onClick={goHome} title="Back to home" aria-label="Back to home"
-            className="relative flex h-11 w-11 items-center justify-center rounded-lg shrink-0"
-            style={{ backgroundColor: "rgba(217,154,78,0.10)", border: "1px solid rgba(217,154,78,0.4)", boxShadow: "0 0 22px rgba(217,154,78,0.2)", cursor: "pointer" }}>
+            className="relative flex h-11 w-11 items-center justify-center shrink-0"
+            style={{ background: "none", border: "none", cursor: "pointer" }}>
             <span className="sitroom-sonar"><i></i><i></i><i></i></span>
-            <svg width="22" height="22" viewBox="0 0 34 34" fill="none" style={{ position: "relative" }}>
+            <svg width="26" height="26" viewBox="0 0 34 34" fill="none" style={{ position: "relative" }}>
               <circle cx="17" cy="17" r="15.5" stroke="#d99a4e" strokeWidth="1.4" />
               <circle cx="17" cy="17" r="9.5" stroke="#d99a4e" strokeWidth="1.4" opacity=".6" />
               <circle cx="17" cy="17" r="2.4" fill="#d99a4e" />
@@ -6339,7 +6331,7 @@ export default function App() {
           <div className="min-w-0">
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight uppercase" style={{ color: "#eafcff", textShadow: "0 0 16px rgba(217,154,78,0.3)", fontFamily: 'ui-monospace, "Cascadia Code", Consolas, monospace' }}>
               <button onClick={goHome} title="Back to home" style={{ color: "inherit", background: "none", border: "none", padding: 0, font: "inherit", cursor: "pointer", textShadow: "inherit" }}>
-                Intel_Extractor
+                Intel Extractor
               </button>
             </h1>
             <p className="text-[11px]" style={{ color: "#5d7382", letterSpacing: "2px", marginTop: "2px" }}>
@@ -6348,7 +6340,7 @@ export default function App() {
           </div>
           <div className="sm:ml-auto flex flex-col sm:items-end gap-1.5">
             <p className="text-xs" style={{ color: "#7f95a3" }}>
-              Author — <span style={{ color: "#eafcff", fontWeight: 700 }}>Aamir Muhammad</span>
+              <span style={{ color: "#eafcff", fontWeight: 700 }}>Aamir Muhammad</span>
               <span style={{ color: "#5d7382" }}> · Threat Hunter | Incident Responder</span>
             </p>
             <div className="flex flex-wrap gap-1.5 sm:justify-end">
@@ -6526,8 +6518,6 @@ export default function App() {
           )}
         </div>
 
-        {!total && <ThreatWire onHunt={huntArticle} />}
-
         {!total && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-5">
             {[
@@ -6550,6 +6540,8 @@ export default function App() {
             ))}
           </div>
         )}
+
+        {!total && <ThreatWire onHunt={huntArticle} />}
         </div>
 
         {meta && (meta.title || meta.description) && (
@@ -8047,15 +8039,6 @@ export default function App() {
             <div className="px-3 py-2" style={{ borderTop: "1px solid rgba(120,160,180,0.08)" }}>
               <CopyBtn label="Copy All" copied={copied === "refs-all"} onClick={() => copyText(references.join("\n"), "refs-all")} color="#5d7382" />
             </div>
-          </div>
-        )}
-
-        {!iocData && !loading && !error && (
-          <div className="rounded-xl p-10 text-center" style={panel}>
-            <Shield size={34} className="mx-auto mb-3" style={{ color: "#1f4754" }} />
-            <p className="text-sm" style={{ color: "#5d7382" }}>
-              Fetch a threat-intel article URL, paste JSON, or paste raw IOCs.
-            </p>
           </div>
         )}
 
