@@ -37,7 +37,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v114";
+const APP_VERSION = "v115";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -2832,6 +2832,24 @@ export default function App() {
             if (best.md5) results._siblingMD5 = results._siblingMD5 || String(best.md5).toLowerCase();
             if (best.sha1) results._siblingSHA1 = results._siblingSHA1 || String(best.sha1).toLowerCase();
             if (best.sha256) results._siblingSHA256 = results._siblingSHA256 || String(best.sha256).toLowerCase();
+
+            // CrowdStrike Falcon Static Analysis (ML) — one of HA's bundled AV
+            // scanners. Treated as authoritative: its verdict supersedes every
+            // other engine below (see verdict cascade), so it gets its own card
+            // rather than being folded into the generic HA summary.
+            const csScanner = Array.isArray(best.scanners)
+              ? best.scanners.find(s => typeof s?.name === "string" && s.name.toLowerCase().includes("crowdstrike"))
+              : null;
+            if (csScanner) {
+              results.crowdstrike = {
+                name: csScanner.name,
+                status: (csScanner.status || "").toLowerCase(),
+                statusRaw: csScanner.status_raw || null,
+                positives: typeof csScanner.positives === "number" ? csScanner.positives : null,
+                total: typeof csScanner.total === "number" ? csScanner.total : null,
+                avResults: Array.isArray(csScanner.anti_virus_results) ? csScanner.anti_virus_results.slice(0, 3) : [],
+              };
+            }
           }
         } catch (e) { console.warn("Enrich Hybrid Analysis (overview) failed:", e.message); }
         setPartial();
@@ -3647,10 +3665,17 @@ export default function App() {
       }
 
       // ---- Derive combined verdict ----
-      // MalwareBazaar only indexes confirmed malware — existence = Malicious.
-      // Individual vendor verdicts (NO_THREAT, LIKELY_MALICIOUS) are ignored.
       let verdict = "Unknown";
       const _isHashCat = ["MD5", "SHA1", "SHA256", "SHA512"].includes(cat);
+      // CrowdStrike Falcon Static Analysis (ML) — a first-party EDR vendor's ML
+      // engine, bundled inside the Hybrid Analysis response. Treated as
+      // authoritative: when it returns a confident status, it supersedes every
+      // other engine below — the rest of the cascade is skipped entirely.
+      // "suspicious"/"type-unsupported"/"failed"/etc. aren't confident enough
+      // either way, so those fall through to the normal cascade.
+      if (results.crowdstrike?.status === "malicious") verdict = "Malicious";
+      else if (results.crowdstrike?.status === "clean") verdict = "Whitelisted";
+      else {
       // CVE verdict: CISA KEV listing = confirmed active exploitation in the
       // wild, treated the same as any other confirmed-malicious signal. High
       // EPSS (≥50%) without a KEV listing is a prediction, not a confirmation
@@ -3664,7 +3689,11 @@ export default function App() {
       else if (results.kaspersky?.zone === "red") verdict = "Malicious";
       else if (results.threatfox) verdict = "Malicious";
       else if (results.urlhaus?.status === "online") verdict = "Malicious";
-      else if (results.malwarebazaar) verdict = "Malicious";
+      // MalwareBazaar with a real attributed family (not "unknown") is a
+      // confirmed-malware signal. An unattributed "unknown" entry just means
+      // someone uploaded/reported the sample — not confirmed malicious, so it's
+      // downgraded to Suspicious further below, after the whitelist checks.
+      else if (results.malwarebazaar?.family && results.malwarebazaar.family !== "unknown") verdict = "Malicious";
       // Tri.age score 10 = confirmed malicious; 5-9 = suspicious
       else if (results.triage?.score === 10) verdict = "Malicious";
       else if ((results.triage?.score || 0) >= 5) verdict = "Suspicious";
@@ -3687,6 +3716,9 @@ export default function App() {
       // CIRCL known-legitimate: NSRL/community-attested legit file, trust > 50.
       // (CIRCL is hash-only, so no domain risk here.)
       else if (results.circl?.legit) verdict = "Whitelisted";
+      // MalwareBazaar present but with no attributed family — reported/uploaded,
+      // not confirmed. Worth a look, not an automatic Malicious.
+      else if (results.malwarebazaar) verdict = "Suspicious";
       else if (results.otx?.validation) verdict = "Suspicious"; // OTX flagged (DGA, blocklist, etc.)
       else if ((results.otx?.pulses || 0) >= 9) verdict = "Malicious";
       else if ((results.abuseipdb?.score || 0) >= 80) verdict = "Malicious";
@@ -3710,9 +3742,10 @@ export default function App() {
         if (results.validin.verdict === "malicious" || results.validin.maliciousCount > 0) verdict = "Malicious";
         else if (results.validin.verdict === "suspicious") verdict = "Suspicious";
       }
+      } // end CrowdStrike-absent cascade
 
       // OTX-only with 0 pulses and no other signals → Unknown
-      const hasNonOtx = results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin || results.abuseipdb || results.urlscan || results.circl || results.kaspersky || results.triage || results.hybridAnalysis;
+      const hasNonOtx = results.crowdstrike || results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin || results.abuseipdb || results.urlscan || results.circl || results.kaspersky || results.triage || results.hybridAnalysis;
       if (!hasNonOtx && results.otx && results.otx.pulses === 0 && !results.otx.validation) verdict = "Unknown";
 
       // Final verdict normalization — catch any non-standard strings
@@ -7229,6 +7262,7 @@ export default function App() {
                           const isDomUrl = ["DOMAIN","URL"].includes(cat);
                           const isIpAsDomain = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(arr[i]);
                           const hasVerdict = d._verdict && d._verdict !== "Unknown";
+                          const hasCrowdstrike = !!d.crowdstrike;
                           const hasThreatfox = !!d.threatfox;
                           const hasMalBaz = !!d.malwarebazaar;
                           const hasUrlhaus = !!d.urlhaus;
@@ -7317,8 +7351,17 @@ export default function App() {
                                   )}
                               </>
                             ))}
-                            {!isCondensed && (hasVerdict || hasThreatfox || hasMalBaz || hasUrlhaus || hasCircl || (hasKaspersky && isHash)) && secRow("Verdict & Identity", (
+                            {!isCondensed && (hasVerdict || hasCrowdstrike || hasThreatfox || hasMalBaz || hasUrlhaus || hasCircl || (hasKaspersky && isHash)) && secRow("Verdict & Identity", (
                               <>
+                                  {hasCrowdstrike && (
+                                    <span className="rounded-full px-2 py-0.5 font-bold" style={{
+                                      color: d.crowdstrike.status === "malicious" ? "#ff4d6d" : d.crowdstrike.status === "clean" ? "#00ff9c" : "#8aa0ad",
+                                      backgroundColor: d.crowdstrike.status === "malicious" ? "rgba(255,77,109,0.15)" : d.crowdstrike.status === "clean" ? "rgba(0,255,156,0.15)" : "rgba(138,160,173,0.15)",
+                                      border: `1px solid ${d.crowdstrike.status === "malicious" ? "rgba(255,77,109,0.4)" : d.crowdstrike.status === "clean" ? "rgba(0,255,156,0.4)" : "rgba(138,160,173,0.3)"}`,
+                                    }} title="CrowdStrike Falcon Static Analysis (ML), via Hybrid Analysis — treated as authoritative and supersedes every other engine's verdict when confident (clean/malicious)">
+                                      🛡️ CrowdStrike Falcon (ML) · {d.crowdstrike.statusRaw || d.crowdstrike.status}{d.crowdstrike.positives != null && d.crowdstrike.total != null ? ` · ${d.crowdstrike.positives}/${d.crowdstrike.total}` : ""}
+                                    </span>
+                                  )}
                                   {hasVerdict && (
                                     <span className="rounded-full px-2 py-0.5 font-bold" style={{
                                       color: d._verdict === "Malicious" ? "#ff4d6d" : d._verdict === "Suspicious" ? "#fbbf24" : d._verdict === "Whitelisted" ? "#00ff9c" : "#8aa0ad",
