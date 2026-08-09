@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v117";
+const APP_VERSION = "v118";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -8223,6 +8223,23 @@ class GraphErrorBoundary extends Component {
   }
 }
 
+// Human-readable label + swatch color per edge relationship kind — the single
+// source of truth for the legend, hover tooltips, and the connected-node panel,
+// so all three always agree on what a given line color means.
+const EDGE_KIND_META = {
+  serves: { label: "Serving IP", color: "#00e5ff" },
+  resolved: { label: "Resolved (passive DNS)", color: "#2dd4bf" },
+  hosts: { label: "Hosts file", color: "#ff4d6d" },
+  scanned: { label: "Scanned URL", color: "#7c9cff" },
+  contacted: { label: "Contacted", color: "#fb923c" },
+  loads: { label: "Loads resource", color: "#ff4d6d" },
+  c2: { label: "C2 communication", color: "#ff4d6d" },
+  downloaded_from: { label: "Downloaded from", color: "#ff4d6d" },
+  hosted_on: { label: "Hosted on", color: "#00e5ff" },
+  related: { label: "Related sample", color: "#ff4d6d" },
+  dropped: { label: "Execution parent", color: "#c084fc" },
+};
+
 function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addPivotIOC, isPivotAdded, removeIoc, anyEnriched, hashCollapseAnims = [] }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
@@ -8230,6 +8247,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
   const camRef = useRef({ x: 0, y: 0, zoom: 1, dragNode: null, panning: false, lastX: 0, lastY: 0, hover: null });
   const [dims, setDims] = useState({ w: 900, h: 600 });
   const [hoverInfo, setHoverInfo] = useState(null);
+  const [hoverEdgeInfo, setHoverEdgeInfo] = useState(null);
   const [selected, setSelected] = useState(null);       // node for the floating action panel
   const [fullscreen, setFullscreen] = useState(false);
   const [hiddenCats, setHiddenCats] = useState({});     // { CAT: true } to hide a type
@@ -8516,12 +8534,39 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
     const connected = new Set();
     edges.forEach((e) => { if (e.kind !== "asn") { connected.add(e.a); connected.add(e.b); } });
     nodeArr.forEach((n) => { n.orphan = !connected.has(n.id); });
+
+    // Degree (real, non-asn connections) — hub infrastructure should read as
+    // more important at a glance, before a single edge is traced by eye.
+    const degreeMap = {};
+    edges.forEach((e) => {
+      if (e.kind === "asn") return;
+      degreeMap[e.a] = (degreeMap[e.a] || 0) + 1;
+      degreeMap[e.b] = (degreeMap[e.b] || 0) + 1;
+    });
+    nodeArr.forEach((n) => {
+      n.degree = degreeMap[n.id] || 0;
+      n.r = (n.derived ? 7 : 11) + Math.min(n.degree * 0.6, 6); // capped bonus, hubs still read but never dominate
+    });
+
+    // Execution-chain (dropper → payload) and C2 links — the two most
+    // narratively significant relationship kinds, called out explicitly for
+    // the auto-summary headline and the kill-chain edge styling.
+    const dropperEdges = edges.filter((e) => e.kind === "dropped");
+    const c2Edges = edges.filter((e) => e.kind === "c2");
+    const nodeById = new Map(nodeArr.map((n) => [n.id, n]));
+
+    // Which relationship kinds actually appear in this graph — drives the
+    // legend, so it only ever lists kinds a user can actually see right now.
+    const edgeKindsPresent = [...new Set(edges.filter((e) => e.kind !== "asn").map((e) => e.kind))];
+
     // Per-type counts for the slicer (only categories actually present).
     const typeCountMap = {};
     nodeArr.forEach((n) => { typeCountMap[n.cat] = (typeCountMap[n.cat] || 0) + 1; });
     const typeCounts = Object.entries(typeCountMap).sort((a, b) => b[1] - a[1]);
     return {
-      nodes: nodeArr, edges, typeCounts,
+      nodes: nodeArr, edges, typeCounts, edgeKindsPresent,
+      dropperChains: dropperEdges.map((e) => ({ parent: nodeById.get(e.a)?.label || e.a, child: nodeById.get(e.b)?.label || e.b })),
+      c2Links: c2Edges.map((e) => ({ from: nodeById.get(e.a)?.label || e.a, to: nodeById.get(e.b)?.label || e.b })),
       stats: { nodes: nodeArr.length, edges: edges.length, derived: nodeArr.filter((n) => n.derived).length, bridges: bridgeCount, orphans: nodeArr.filter((n) => n.orphan).length },
     };
   }, [iocData, enrichCache]);
@@ -8898,9 +8943,27 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
         const dim = hoverId && !(e.a === hoverId || e.b === hoverId);
         // Bridge edges (touching shared-infrastructure pivot nodes) stand out in gold.
         const edgeColor = e.toBridge ? "rgba(255,209,102,0.75)" : e.color;
+        const isDropped = e.kind === "dropped";
+        const isHotC2 = e.kind === "c2" && (a.verdict === "Malicious" || b.verdict === "Malicious");
         ctx.strokeStyle = dim ? "rgba(120,160,180,0.06)" : edgeColor;
-        ctx.lineWidth = e.kind === "asn" ? 0.6 : (e.toBridge ? 1.8 : 1.1);
+        ctx.lineWidth = e.kind === "asn" ? 0.6 : (e.toBridge ? 1.8 : (isDropped || isHotC2 ? 2.2 : 1.1));
         ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
+        // Directional arrowhead for execution-parent (dropper) edges — this is
+        // the one relationship where direction is the whole point (parent
+        // produced child), so it's worth showing explicitly, not just by color.
+        if (isDropped && !dim) {
+          const angle = Math.atan2(pb.y - pa.y, pb.x - pa.x);
+          const tipOffset = (b.r || 8) * cam.zoom + 3;
+          const tipX = pb.x - Math.cos(angle) * tipOffset, tipY = pb.y - Math.sin(angle) * tipOffset;
+          const size = 6;
+          ctx.fillStyle = edgeColor;
+          ctx.beginPath();
+          ctx.moveTo(tipX, tipY);
+          ctx.lineTo(tipX - size * Math.cos(angle - Math.PI / 6), tipY - size * Math.sin(angle - Math.PI / 6));
+          ctx.lineTo(tipX - size * Math.cos(angle + Math.PI / 6), tipY - size * Math.sin(angle + Math.PI / 6));
+          ctx.closePath();
+          ctx.fill();
+        }
         // Flow particle
         if (!dim && e.kind !== "asn") {
           const prog = ((S.t * 0.01) + (e.a.charCodeAt(0) % 10) * 0.1) % 1;
@@ -9080,9 +9143,45 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
     }
     return null;
   };
+  // Closest edge to the cursor, within a small pixel threshold — only tried
+  // when no node was picked, so edge hover never fights node hover for focus.
+  const pickEdge = (mx, my) => {
+    const S = stateRef.current, cam = camRef.current;
+    const cx = dims.w / 2, cy = dims.h / 2;
+    const vis = visibleRef.current;
+    const anyFilter = vis && vis.size !== S.nodes.length;
+    const nodeById = new Map(S.nodes.map((n) => [n.id, n]));
+    let best = null, bestDist = 8;
+    for (const e of S.edges) {
+      if (e.kind === "asn") continue;
+      if (anyFilter && (!vis.has(e.a) || !vis.has(e.b))) continue;
+      const a = nodeById.get(e.a), b = nodeById.get(e.b);
+      if (!a || !b) continue;
+      const ax = cx + (a.x + cam.x) * cam.zoom, ay = cy + (a.y + cam.y) * cam.zoom;
+      const bx = cx + (b.x + cam.x) * cam.zoom, by = cy + (b.y + cam.y) * cam.zoom;
+      const dx = bx - ax, dy = by - ay;
+      const lenSq = dx * dx + dy * dy;
+      let t = lenSq === 0 ? 0 : ((mx - ax) * dx + (my - ay) * dy) / lenSq;
+      t = Math.max(0, Math.min(1, t));
+      const ex = ax + t * dx, ey = ay + t * dy;
+      const dist = Math.hypot(mx - ex, my - ey);
+      if (dist < bestDist) { bestDist = dist; best = { edge: e, a, b }; }
+    }
+    return best;
+  };
   const relPos = (e) => {
     const rect = canvasRef.current.getBoundingClientRect();
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  };
+  // Export the current canvas frame as a PNG — analysts routinely need to
+  // drop the infra graph straight into a ticket or report.
+  const exportGraphImage = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const link = document.createElement("a");
+    link.download = `threat-graph-${Date.now()}.png`;
+    link.href = canvas.toDataURL("image/png");
+    link.click();
   };
   const onDown = (e) => {
     const { x, y } = relPos(e);
@@ -9109,7 +9208,12 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
       if (n) {
         const d = enrichCache[`${n.cat}::${n.id}`]?.data;
         setHoverInfo({ x, y, node: n, verdict: n.verdict, asn: n.asn || d?.whoisASN?.asn || null, country: d?.whoisASN?.country || null });
-      } else setHoverInfo(null);
+        setHoverEdgeInfo(null);
+      } else {
+        setHoverInfo(null);
+        const eh = pickEdge(x, y);
+        setHoverEdgeInfo(eh ? { x, y, ...eh } : null);
+      }
       // Grab cursor over draggable nodes; default elsewhere. Copy is via the
       // action panel (canvas text can't be natively selected).
       canvasRef.current.style.cursor = n ? "grab" : "default";
@@ -9210,6 +9314,30 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
       style={fullscreen
         ? { position: "fixed", inset: 0, zIndex: 9999, background: "radial-gradient(1200px 600px at 50% 0%, rgba(0,229,255,0.06), transparent 60%), #05070a" }
         : { background: "radial-gradient(1200px 600px at 50% 0%, rgba(0,229,255,0.06), transparent 60%), #05070a", border: "1px solid rgba(120,160,180,0.2)" }}>
+      {/* Auto-narrated headline — turns the graph's own bridge/dropper/C2
+          detection into one plain-language line instead of requiring a
+          manual scan to notice it. Only appears when there's something to say. */}
+      {hasGraph && (model.stats.bridges > 0 || model.dropperChains.length > 0 || model.c2Links.length > 0) && (
+        <div className="relative z-10 px-3 py-2 text-[11px] leading-relaxed"
+          style={{ background: "rgba(10,14,20,0.88)", borderBottom: "1px solid rgba(120,160,180,0.15)", color: "#c8d4da" }}>
+          {model.dropperChains.length > 0 && (
+            <span>
+              <span style={{ color: "#c084fc", fontWeight: 700 }}>⚡ {model.dropperChains.length} execution chain{model.dropperChains.length !== 1 ? "s" : ""}</span>
+              {model.dropperChains.length === 1
+                ? <> — <span style={{ fontFamily: "monospace" }}>{model.dropperChains[0].parent}</span> dropped <span style={{ fontFamily: "monospace" }}>{model.dropperChains[0].child}</span></>
+                : " detected — a parent sample produced a tracked payload"}
+            </span>
+          )}
+          {model.dropperChains.length > 0 && (model.stats.bridges > 0 || model.c2Links.length > 0) && <span style={{ color: "#3a4a54" }}> · </span>}
+          {model.stats.bridges > 0 && (
+            <span><span style={{ color: "#ffd166", fontWeight: 700 }}>🔗 {model.stats.bridges} shared pivot{model.stats.bridges !== 1 ? "s" : ""}</span> link separate indicators through common infrastructure</span>
+          )}
+          {model.stats.bridges > 0 && model.c2Links.length > 0 && <span style={{ color: "#3a4a54" }}> · </span>}
+          {model.c2Links.length > 0 && (
+            <span><span style={{ color: "#ff4d6d", fontWeight: 700 }}>📡 {model.c2Links.length} confirmed C2 link{model.c2Links.length !== 1 ? "s" : ""}</span></span>
+          )}
+        </div>
+      )}
       {!hasGraph && (
         <button onClick={() => setFullscreen((v) => !v)}
           className="absolute z-20 flex items-center gap-1 rounded-md px-2.5 py-1 text-[10px] font-semibold"
@@ -9257,6 +9385,13 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
               </>
             )}
           </div>
+          {/* Export */}
+          <button onClick={exportGraphImage}
+            className="flex items-center gap-1 rounded-md px-2.5 py-1 text-[10px] font-semibold shrink-0"
+            title="Export the current graph view as a PNG"
+            style={{ background: "rgba(0,255,156,0.12)", color: "#00ff9c", border: "1px solid rgba(0,255,156,0.4)", cursor: "pointer" }}>
+            <Download size={11} /> Export
+          </button>
           {/* Fullscreen */}
           <button onClick={() => setFullscreen((v) => !v)}
             className="flex items-center gap-1 rounded-md px-2.5 py-1 text-[10px] font-semibold shrink-0"
@@ -9357,6 +9492,12 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
         <span className="flex items-center gap-1 text-[10px]" style={{ color: "#ffd166" }}>
           <span style={{ width: 8, height: 8, borderRadius: 99, background: "#ffd166", boxShadow: "0 0 6px #ffd166" }} /> shared pivot
         </span>
+        {model.edgeKindsPresent.filter((k) => k !== "contacted").map((k) => (
+          <span key={k} className="flex items-center gap-1 text-[10px]" style={{ color: "#9fb3bd" }} title={`Line color for "${EDGE_KIND_META[k]?.label || k}" connections`}>
+            <span style={{ width: 12, height: 2, background: EDGE_KIND_META[k]?.color || "#8aa0ad" }} />
+            {EDGE_KIND_META[k]?.label || k}
+          </span>
+        ))}
       </div>
       )}
       {!anyEnriched && (
@@ -9373,7 +9514,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
       <canvas ref={canvasRef}
         style={{ width: dims.w, height: dims.h, display: "block", touchAction: "none", transition: "height 0.6s cubic-bezier(0.22,1,0.36,1)" }}
         onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp}
-        onPointerLeave={() => { const cam = camRef.current; cam.dragNode = null; cam.panning = false; }}
+        onPointerLeave={() => { const cam = camRef.current; cam.dragNode = null; cam.panning = false; setHoverInfo(null); setHoverEdgeInfo(null); }}
         onDoubleClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
       />
 
@@ -9397,6 +9538,29 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
           {hoverInfo.country && <div style={{ color: "#8aa0ad" }}>{hoverInfo.country}</div>}
         </div>
       )}
+
+      {/* Edge hover card — names the relationship a line represents, since
+          color alone (the only always-visible signal) isn't self-explanatory. */}
+      {hoverEdgeInfo && (() => {
+        const meta = EDGE_KIND_META[hoverEdgeInfo.edge.kind];
+        const label = meta?.label || hoverEdgeInfo.edge.kind;
+        const swatch = meta?.color || "#8aa0ad";
+        return (
+          <div className="absolute z-20 pointer-events-none rounded-lg px-3 py-2 text-[11px]"
+            style={{
+              left: Math.min(hoverEdgeInfo.x + 14, dims.w - 240), top: Math.min(hoverEdgeInfo.y + 14, dims.h - 70),
+              background: "rgba(10,14,20,0.95)", border: `1px solid ${swatch}66`,
+              backdropFilter: "blur(8px)", minWidth: 180, maxWidth: 280,
+            }}>
+            <div className="font-bold mb-1" style={{ color: swatch }}>{label}</div>
+            <div className="break-all" style={{ color: "#c8d4da" }}>
+              {hoverEdgeInfo.edge.kind === "dropped"
+                ? <>{hoverEdgeInfo.a.label} <span style={{ color: "#5d7382" }}>dropped</span> {hoverEdgeInfo.b.label}</>
+                : <>{hoverEdgeInfo.a.label} <span style={{ color: "#5d7382" }}>→</span> {hoverEdgeInfo.b.label}</>}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Node action panel — click a node to open, click canvas to close */}
       {selected && (() => {
@@ -9450,6 +9614,37 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
                   ))}
                 </div>
               )}
+
+              {/* Connected via — names the relationship(s) that link this node
+                  into the graph, since the canvas itself only shows color. */}
+              {(() => {
+                const links = model.edges
+                  .filter((e) => e.kind !== "asn" && (e.a === selected.id || e.b === selected.id))
+                  .map((e) => {
+                    const meta = EDGE_KIND_META[e.kind];
+                    const otherId = e.a === selected.id ? e.b : e.a;
+                    const other = model.nodes.find((n) => n.id === otherId);
+                    const isSource = e.kind === "dropped" ? e.a === selected.id : null;
+                    return { kind: e.kind, label: meta?.label || e.kind, color: meta?.color || "#8aa0ad", other: other?.label || otherId, isSource };
+                  });
+                if (!links.length) return null;
+                return (
+                  <div className="mb-2.5 rounded-lg px-2.5 py-2 flex flex-col gap-1"
+                    style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(120,160,180,0.15)" }}>
+                    <div className="text-[9px] uppercase tracking-widest font-bold mb-0.5" style={{ color: "#5d7382" }}>Connected via</div>
+                    {links.map((l, i) => (
+                      <div key={i} className="flex items-center gap-1.5 text-[10px]">
+                        <span style={{ width: 8, height: 2, background: l.color, flexShrink: 0 }} />
+                        <span style={{ color: l.color, fontWeight: 700 }}>{l.label}</span>
+                        <span style={{ color: "#5d7382" }}>
+                          {l.kind === "dropped" ? (l.isSource ? "dropped" : "dropped by") : "↔"}
+                        </span>
+                        <span className="truncate" style={{ color: "#c8d6dd" }}>{l.other}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
 
               {/* Action buttons */}
               <div className="flex flex-wrap gap-1.5">
