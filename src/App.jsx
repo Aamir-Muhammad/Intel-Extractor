@@ -19,6 +19,17 @@ import {
 // ============================================================
 const WORKER_BASE = "https://ioc-parser.aamirmuhd.workers.dev";
 
+// VirusTotal: 3 free keys rotated server-side, each capped at 4 req/min.
+// Client-side pacing keeps combined volume well under the 3-key ceiling with
+// a randomized gap so calls never land in a predictable burst pattern.
+let _vtLastCallAt = 0;
+const vtPaceGate = async () => {
+  const minGap = 6000 + Math.random() * 4000; // 6-10s, randomized
+  const wait = _vtLastCallAt + minGap - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  _vtLastCallAt = Date.now();
+};
+
 // Anonymous per-browser session id for usage analytics. Generated once,
 // persisted in localStorage. No PII — just a random string so the dashboard
 // can group activity by browser. Cleared if the user clears site data.
@@ -37,7 +48,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v115";
+const APP_VERSION = "v116";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -2770,6 +2781,56 @@ export default function App() {
             }
           }
         } catch (e) { console.warn("Enrich Tri.age failed:", e.message); }
+        setPartial();
+
+        // VirusTotal — pivot metadata only (execution parents, contacted
+        // domains/IPs, threat classification, Sigma/YARA hits). Deliberately
+        // never feeds the verdict cascade — additive context and ThreatGraph
+        // pivots, same principle as the "signed" chip elsewhere. Three free
+        // keys are rotated server-side; vtPaceGate keeps combined client call
+        // volume well under their shared per-minute ceiling.
+        try {
+          await vtPaceGate();
+          const vj = await callEnrich("virustotal");
+          const vAttr = vj?.data?.attributes;
+          if (vAttr) {
+            const ptc = vAttr.popular_threat_classification;
+            const sigma = vAttr.sigma_analysis_results;
+            const yara = vAttr.crowdsourced_yara_results;
+            const vt = {
+              threatLabel: ptc?.suggested_threat_label || null,
+              threatCategory: Array.isArray(ptc?.popular_threat_category) ? ptc.popular_threat_category.map((t) => t.value).filter(Boolean).slice(0, 3) : [],
+              capabilities: Array.isArray(vAttr.capabilities_tags) ? vAttr.capabilities_tags.slice(0, 6) : [],
+              sigmaHits: Array.isArray(sigma) ? sigma.length : 0,
+              yaraHits: Array.isArray(yara) ? yara.map((y) => y.rule_name).filter(Boolean).slice(0, 3) : [],
+              timesSubmitted: typeof vAttr.times_submitted === "number" ? vAttr.times_submitted : null,
+              firstSubmission: vAttr.first_submission_date ? new Date(vAttr.first_submission_date * 1000).toISOString().split("T")[0] : null,
+              signatureVerified: vAttr.signature_info?.verified || null,
+              signatureSigners: vAttr.signature_info?.signers || null,
+            };
+            // Graph-pivot relationships — descriptor ids are directly usable:
+            // a file descriptor's id is its SHA256, domain/ip descriptor ids
+            // are the literal string. (Note: contacted_urls' id is a SHA256
+            // of the URL, not the URL itself, so it's not requested here —
+            // would need a separate full-object call to be pivot-usable.)
+            const rel = vj?.data?.relationships;
+            const execParents = rel?.execution_parents?.data;
+            const cDomains = rel?.contacted_domains?.data;
+            const cIPs = rel?.contacted_ips?.data;
+            if (Array.isArray(execParents) && execParents.length) {
+              vt.executionParents = execParents.map((p) => p.id).filter(Boolean).slice(0, 10);
+            }
+            if (Array.isArray(cDomains) && cDomains.length) {
+              vt.contactedDomains = cDomains.map((d) => d.id).filter(Boolean).slice(0, 10);
+            }
+            if (Array.isArray(cIPs) && cIPs.length) {
+              vt.contactedIPs = cIPs.map((p) => p.id).filter(Boolean).slice(0, 10);
+            }
+            if (vt.threatLabel || vt.capabilities.length || vt.sigmaHits || vt.yaraHits.length || vt.signatureVerified || vt.executionParents || vt.contactedDomains || vt.contactedIPs) {
+              results.virustotal = vt;
+            }
+          }
+        } catch (e) { console.warn("Enrich VirusTotal failed:", e.message); }
         setPartial();
       }
       // Hybrid Analysis (Falcon Sandbox) — hash lookup with behavioral analysis.
@@ -7287,6 +7348,7 @@ export default function App() {
                           const hasNvd = !!d.nvd;
                           const hasCircl = !!d.circl;
                           const hasKaspersky = !!d.kaspersky;
+                          const hasVT = !!d.virustotal;
                           const hasPivotIP = hasUrlscan && d.urlscan.servingIP && d.urlscan.servingIP !== arr[i];
                           const isCondensed = isRowCollapsed;
                           // Compact row: bold label on the left, chips flowing right
@@ -7537,6 +7599,41 @@ export default function App() {
                                       </span>
                                     );
                                   })()}
+                              </>
+                            ))}
+
+                            {/* ── VIRUSTOTAL INTEL (pivot/context only — never feeds verdict) ── */}
+                            {!isCondensed && hasVT && secRow("VT Intel", (
+                              <>
+                                  {(d.virustotal.threatLabel || d.virustotal.threatCategory.length > 0) && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#c084fc", backgroundColor: "rgba(192,132,252,0.10)", border: "1px solid rgba(192,132,252,0.3)" }}
+                                      title="VirusTotal community threat classification — context only, does not drive the verdict">
+                                      VT · {d.virustotal.threatLabel || d.virustotal.threatCategory.join(", ")}
+                                      {d.virustotal.timesSubmitted != null ? ` · Submitted ${d.virustotal.timesSubmitted}×` : ""}
+                                      {d.virustotal.firstSubmission ? ` · First seen ${d.virustotal.firstSubmission}` : ""}
+                                    </span>
+                                  )}
+                                  {d.virustotal.capabilities.length > 0 && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
+                                      ⚙️ {d.virustotal.capabilities.join(", ")}
+                                    </span>
+                                  )}
+                                  {(d.virustotal.sigmaHits > 0 || d.virustotal.yaraHits.length > 0) && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#7c9cff", backgroundColor: "rgba(124,156,255,0.08)", border: "1px solid rgba(124,156,255,0.3)" }}>
+                                      {d.virustotal.sigmaHits > 0 ? `Σ ${d.virustotal.sigmaHits} Sigma match${d.virustotal.sigmaHits !== 1 ? "es" : ""}` : ""}
+                                      {d.virustotal.sigmaHits > 0 && d.virustotal.yaraHits.length > 0 ? " · " : ""}
+                                      {d.virustotal.yaraHits.length > 0 ? `YARA: ${d.virustotal.yaraHits.join(", ")}` : ""}
+                                    </span>
+                                  )}
+                                  {d.virustotal.signatureVerified && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{
+                                      color: d.virustotal.signatureVerified === "Signed" ? "#8aa0ad" : "#fbbf24",
+                                      backgroundColor: d.virustotal.signatureVerified === "Signed" ? "rgba(148,163,184,0.06)" : "rgba(251,191,36,0.10)",
+                                      border: `1px solid ${d.virustotal.signatureVerified === "Signed" ? "rgba(148,163,184,0.2)" : "rgba(251,191,36,0.35)"}`,
+                                    }} title="VirusTotal Sigcheck/codesign verification — informational only">
+                                      ✍️ {d.virustotal.signatureVerified}{d.virustotal.signatureSigners ? ` · ${d.virustotal.signatureSigners}` : ""}
+                                    </span>
+                                  )}
                               </>
                             ))}
 
@@ -8339,6 +8436,30 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
           if (norm(rh) === srcId) return;
           addNode(rh, rh.slice(0, 12) + "…", "SHA256", true, null);
           addEdge(val, rh, "related", "rgba(255,77,109,0.35)");
+        });
+        // VirusTotal execution parents — files that, when run, produced/dropped
+        // this sample. Directional lineage edge (parent → child), distinct from
+        // the network-contact edges above.
+        (d.virustotal?.executionParents || []).forEach((sha) => {
+          if (!sha || typeof sha !== "string") return;
+          if (norm(sha) === srcId) return;
+          addNode(sha, sha.slice(0, 12) + "…", "SHA256", true, null);
+          addEdge(sha, val, "dropped", "rgba(192,132,252,0.45)");
+        });
+        // VirusTotal contacted domains/IPs — sandbox-observed infrastructure.
+        (d.virustotal?.contactedDomains || []).forEach((dom) => {
+          if (!dom || typeof dom !== "string") return;
+          if (norm(dom) === srcId) return;
+          const n = addNode(dom, dom, "DOMAIN", true, null);
+          if (n) n.contacted = true;
+          addEdge(val, dom, "contacted", "rgba(251,146,60,0.4)");
+        });
+        (d.virustotal?.contactedIPs || []).forEach((ip) => {
+          if (!ip || typeof ip !== "string") return;
+          if (norm(ip) === srcId) return;
+          const n = addNode(ip, ip, ipCat(ip), true, null);
+          if (n) n.contacted = true;
+          addEdge(val, ip, "contacted", "rgba(251,146,60,0.4)");
         });
       });
     });
