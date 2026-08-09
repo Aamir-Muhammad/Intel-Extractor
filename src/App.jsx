@@ -22,12 +22,19 @@ const WORKER_BASE = "https://ioc-parser.aamirmuhd.workers.dev";
 // VirusTotal: 3 free keys rotated server-side, each capped at 4 req/min.
 // Client-side pacing keeps combined volume well under the 3-key ceiling with
 // a randomized gap so calls never land in a predictable burst pattern.
-let _vtLastCallAt = 0;
+// Every caller queues here rather than being dropped — with N hashes pending,
+// the Nth VT call simply lands N * ~6-10s later; nothing skips its turn.
+// The slot is claimed synchronously (before the only await) so concurrent
+// callers — e.g. 24 hashes from one "Enrich All" — can't both read the same
+// stale timestamp and slip through the gate together.
+let _vtNextSlotAt = 0;
 const vtPaceGate = async () => {
-  const minGap = 6000 + Math.random() * 4000; // 6-10s, randomized
-  const wait = _vtLastCallAt + minGap - Date.now();
+  const now = Date.now();
+  const gap = 6000 + Math.random() * 4000; // 6-10s, randomized
+  const slot = Math.max(now, _vtNextSlotAt);
+  _vtNextSlotAt = slot + gap;
+  const wait = slot - now;
   if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-  _vtLastCallAt = Date.now();
 };
 
 // Anonymous per-browser session id for usage analytics. Generated once,
@@ -48,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v116";
+const APP_VERSION = "v117";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
