@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v118";
+const APP_VERSION = "v119";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -66,6 +66,16 @@ const isPrivateIP = (ip) => {
   const [, a, b] = m.map(Number);
   return a === 10 || a === 127 || a === 0 || (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 255);
+};
+// IPv4 private/reserved (via isPrivateIP) + IPv6 loopback/link-local/unique-local —
+// used to strip sandbox-artifact addresses (a detonation VM's own NIC, its
+// gateway, etc.) out of upstream "contacted infrastructure" lists before they
+// ever reach a card or the graph. Those addresses aren't attacker infra.
+const isPrivateOrReservedIP = (ip) => {
+  const v = String(ip).toLowerCase();
+  if (isPrivateIP(v)) return true;
+  if (!v.includes(":")) return false;
+  return v === "::1" || v === "::" || v.startsWith("fe80:") || v.startsWith("fc") || v.startsWith("fd");
 };
 // DOMAIN whitelist — github.com IS filtered here (bare github.com domain is noise)
 const WL_DOMAINS = new Set(["github.com","www.github.com","github.io","localhost","example.com","www.example.com","kaspersky.com","www.kaspersky.com","fbi.gov","www.fbi.gov","mitre.org","attack.mitre.org","www.mitre.org","gmail.com","www.gmail.com","trendmicro.com","www.trendmicro.com","zscloud.net","admin.zscloud.net"]);
@@ -1437,7 +1447,7 @@ const huntKQL = (cat, arr) => {
     case "EMAIL":
       return `EmailEvents\n| where SenderFromAddress in~ (${kqlList(arr)})\n| project Timestamp, Subject, SenderFromAddress, RecipientEmailAddress, DeliveryAction, NetworkMessageId`;
     case "CVE":
-      return `DeviceTvmSoftwareVulnerabilities\n| where CveId in~ (${kqlList(arr)})\n| project DeviceName, SoftwareName, SoftwareVersion, CveId, VulnerabilitySeverityLevel`;
+      return `DeviceTvmSoftwareVulnerabilities\n| where CveId has_any (${kqlList(arr)})\n| summarize make_list(CveId) by DeviceName, OSPlatform`;
     case "SCHEDULED_TASK": {
       // Extract names from "Name" or "Name → target" canonical strings
       const names = arr.map((v) => v.split(" → ")[0].trim());
@@ -2823,19 +2833,24 @@ export default function App() {
             const rel = vj?.data?.relationships;
             const execParents = rel?.execution_parents?.data;
             const cDomains = rel?.contacted_domains?.data;
-            const cIPs = rel?.contacted_ips?.data;
+            // Sandbox-artifact addresses (the detonation VM's own NIC, its
+            // gateway, loopback) are private/reserved ranges — never real
+            // attacker infrastructure, so they're dropped before display.
+            const cIPs = (rel?.contacted_ips?.data || []).filter((p) => p?.id && !isPrivateOrReservedIP(p.id));
             if (Array.isArray(execParents) && execParents.length) {
-              vt.executionParents = execParents.map((p) => p.id).filter(Boolean).slice(0, 10);
+              vt.executionParents = execParents.map((p) => p.id).filter(Boolean).slice(0, 20);
             }
             if (Array.isArray(cDomains) && cDomains.length) {
-              vt.contactedDomains = cDomains.map((d) => d.id).filter(Boolean).slice(0, 10);
+              vt.contactedDomains = cDomains.map((d) => d.id).filter(Boolean).slice(0, 20);
             }
-            if (Array.isArray(cIPs) && cIPs.length) {
-              vt.contactedIPs = cIPs.map((p) => p.id).filter(Boolean).slice(0, 10);
+            if (cIPs.length) {
+              vt.contactedIPs = cIPs.map((p) => p.id).filter(Boolean).slice(0, 20);
             }
-            if (vt.threatLabel || vt.capabilities.length || vt.sigmaHits || vt.yaraHits.length || vt.signatureVerified || vt.executionParents || vt.contactedDomains || vt.contactedIPs) {
-              results.virustotal = vt;
-            }
+            // VT had a record for this hash (vAttr exists) but nothing notable
+            // came back — say so explicitly rather than showing nothing, so
+            // "checked, unremarkable" isn't confused with "never checked".
+            vt.noNotableData = !(vt.threatLabel || vt.capabilities.length || vt.sigmaHits || vt.yaraHits.length || vt.signatureVerified || vt.executionParents || vt.contactedDomains || vt.contactedIPs);
+            results.virustotal = vt;
           }
         } catch (e) { console.warn("Enrich VirusTotal failed:", e.message); }
         setPartial();
@@ -3713,6 +3728,9 @@ export default function App() {
       const allFirsts = [
         results.threatfox?.first, results.urlhaus?.first,
         results.malwarebazaar?.first, results.urlscan?.firstSeen,
+        // Tri.age submission and VT's first-submission date are both a
+        // reasonable "first known" proxy when no earlier ITW sighting exists.
+        results.triage?.submitted, results.virustotal?.firstSubmission,
       ].filter(Boolean).sort();
       const allLasts = [
         results.threatfox?.last, results.urlhaus?.last,
@@ -3733,47 +3751,59 @@ export default function App() {
       }
 
       // ---- Derive combined verdict ----
+      // Tiered by confidence, checked top to bottom — first match wins:
+      //   TIER 0  CrowdStrike Malicious only. A first-party EDR vendor's ML
+      //           verdict, confirmed malicious — supersedes everything below.
+      //   TIER 1  Confirmed/strong signals (curated feeds, first-party AV,
+      //           sandbox verdicts) — these outrank Tier 2 whitelist checks,
+      //           because a real detection from one engine should win over
+      //           "no one else has flagged it yet" from another.
+      //   TIER 2  Confirmed-clean / whitelist signals.
+      //   TIER 3  Weaker/generic signals (community pulse counts, reputation
+      //           scores, unattributed reports, domain-age heuristics) — these
+      //           sit BELOW whitelist: a real "known good" from a named vendor
+      //           beats a raw pulse count or an unconfirmed report.
+      //   default Unknown.
+      //
+      // CrowdStrike note: "clean" used to sit in Tier 0 next to "malicious",
+      // auto-whitelisting anything it hadn't flagged. That produced a false
+      // Whitelisted on a hash VT considered heavily malicious — CrowdStrike
+      // doesn't publish its detections to the open-source feeds this app
+      // otherwise relies on, so its silence isn't evidence of innocence.
+      // CrowdStrike is trusted to CONFIRM malware, not to CLEAR a file other
+      // engines have flagged — "clean" now just falls into the normal cascade
+      // like any other engine's clean-ish signal, instead of overriding it.
       let verdict = "Unknown";
       const _isHashCat = ["MD5", "SHA1", "SHA256", "SHA512"].includes(cat);
-      // CrowdStrike Falcon Static Analysis (ML) — a first-party EDR vendor's ML
-      // engine, bundled inside the Hybrid Analysis response. Treated as
-      // authoritative: when it returns a confident status, it supersedes every
-      // other engine below — the rest of the cascade is skipped entirely.
-      // "suspicious"/"type-unsupported"/"failed"/etc. aren't confident enough
-      // either way, so those fall through to the normal cascade.
+
+      // ── TIER 0 — CrowdStrike Malicious only ──────────────────────────
       if (results.crowdstrike?.status === "malicious") verdict = "Malicious";
-      else if (results.crowdstrike?.status === "clean") verdict = "Whitelisted";
-      else {
-      // CVE verdict: CISA KEV listing = confirmed active exploitation in the
-      // wild, treated the same as any other confirmed-malicious signal. High
-      // EPSS (≥50%) without a KEV listing is a prediction, not a confirmation
-      // — Suspicious, not Malicious. CVSS severity alone (no KEV, no high
-      // EPSS) doesn't drive verdict at all — it's shown as context only,
-      // same principle as Kaspersky green not being auto-trusted for non-hashes.
-      if (cat === "CVE" && results.cisaKev?.listed) verdict = "Malicious";
+
+      // ── TIER 1 — confirmed/strong signals (outrank whitelist below) ──
+      // CISA KEV = confirmed active exploitation. High EPSS without KEV is a
+      // prediction, not a confirmation — Suspicious, not Malicious.
+      else if (cat === "CVE" && results.cisaKev?.listed) verdict = "Malicious";
       else if (cat === "CVE" && (results.epss?.score || 0) >= 50) verdict = "Suspicious";
-      // Kaspersky Zone=Red is a strong signal from a first-party AV vendor —
-      // check it first alongside the explicit threat feeds.
       else if (results.kaspersky?.zone === "red") verdict = "Malicious";
       else if (results.threatfox) verdict = "Malicious";
       else if (results.urlhaus?.status === "online") verdict = "Malicious";
       // MalwareBazaar with a real attributed family (not "unknown") is a
       // confirmed-malware signal. An unattributed "unknown" entry just means
-      // someone uploaded/reported the sample — not confirmed malicious, so it's
-      // downgraded to Suspicious further below, after the whitelist checks.
+      // someone uploaded/reported the sample — not confirmed, so it's
+      // downgraded to Tier 3, below the whitelist checks.
       else if (results.malwarebazaar?.family && results.malwarebazaar.family !== "unknown") verdict = "Malicious";
-      // Tri.age score 10 = confirmed malicious; 5-9 = suspicious
+      // Tri.age score 10 = confirmed malicious; 5-9 = suspicious.
       else if (results.triage?.score === 10) verdict = "Malicious";
       else if ((results.triage?.score || 0) >= 5) verdict = "Suspicious";
-      // Hybrid Analysis verdict — sandbox behavioral analysis with AV consensus
+      // Hybrid Analysis verdict — sandbox behavioral analysis with AV consensus.
       else if (results.hybridAnalysis?.verdict === "malicious" || (results.hybridAnalysis?.threatScore || 0) >= 70) verdict = "Malicious";
       else if (results.hybridAnalysis?.verdict === "suspicious" || (results.hybridAnalysis?.threatScore || 0) >= 30) verdict = "Suspicious";
-      // urlscan's own engine flagged the latest scan malicious.
       else if (results.urlscan?.overallMalicious) verdict = "Malicious";
       else if (results.urlhaus?.status === "offline") verdict = "Suspicious";
       // Brand impersonation detected by urlscan (page mimics Microsoft/PayPal/etc).
-      // Strong phishing signal — would have caught onedrive.cv-style impersonation.
       else if (results.urlscan?.brands && results.urlscan.brands.length) verdict = "Suspicious";
+
+      // ── TIER 2 — confirmed-clean / whitelist ─────────────────────────
       else if (results.otx?.whitelisted === true) verdict = "Whitelisted";
       // Kaspersky green: for a HASH it means the file is in Kaspersky's known-clean
       // DB (reliable — file hashes are immutable). For a DOMAIN/URL/IP, green only
@@ -3782,8 +3812,9 @@ export default function App() {
       // classification, which would wrongly whitelist it. So green whitelists hashes only.
       else if (results.kaspersky?.zone === "green" && _isHashCat) verdict = "Whitelisted";
       // CIRCL known-legitimate: NSRL/community-attested legit file, trust > 50.
-      // (CIRCL is hash-only, so no domain risk here.)
       else if (results.circl?.legit) verdict = "Whitelisted";
+
+      // ── TIER 3 — weaker/generic signals (whitelist above outranks these) ──
       // MalwareBazaar present but with no attributed family — reported/uploaded,
       // not confirmed. Worth a look, not an automatic Malicious.
       else if (results.malwarebazaar) verdict = "Suspicious";
@@ -3797,20 +3828,16 @@ export default function App() {
       else if ((results.sansIsc?.attacks || 0) >= 5) verdict = "Suspicious";
       else if (results.kaspersky?.zone === "yellow") verdict = "Suspicious";
       // EPP hold / withheld status = registry/registrar intervention → suspicious.
-      // Catches withheld impersonation domains that engines haven't classified yet.
       else if (results.domainReg?.status && /hold|withheld|pendingdelete|redemption/i.test(results.domainReg.status)) verdict = "Suspicious";
       else if ((results.otx?.pulses || 0) > 0) verdict = "Suspicious";
-      // Recently registered domain with OTX data = suspicious
+      // Recently registered domain with OTX data = suspicious.
       else if (results.whois && results.whois.ageDays !== null && results.whois.ageDays < 90 && results.otx) verdict = "Suspicious";
-      // Parent domain had pulses (subdomain fallback hit)
+      // Parent domain had pulses (subdomain fallback hit).
       else if (results.otx?.parentDomain && results.otx.pulses > 0) verdict = "Suspicious";
-
-      // Validin verdict override
       else if (results.validin) {
         if (results.validin.verdict === "malicious" || results.validin.maliciousCount > 0) verdict = "Malicious";
         else if (results.validin.verdict === "suspicious") verdict = "Suspicious";
       }
-      } // end CrowdStrike-absent cascade
 
       // OTX-only with 0 pulses and no other signals → Unknown
       const hasNonOtx = results.crowdstrike || results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin || results.abuseipdb || results.urlscan || results.circl || results.kaspersky || results.triage || results.hybridAnalysis;
@@ -3925,7 +3952,13 @@ export default function App() {
     if (["MD5","SHA1","SHA256","SHA512"].includes(cat)) return `https://www.virustotal.com/gui/file/${v}`;
     if (cat === "IPV4" || cat === "IPV6") return `https://www.virustotal.com/gui/ip-address/${v}`;
     if (cat === "DOMAIN") return `https://www.virustotal.com/gui/domain/${v}`;
-    if (cat === "URL") return `https://www.virustotal.com/gui/url/${btoa(value).replace(/=/g, "")}`;
+    if (cat === "URL") {
+      // VT's URL id is base64 of the FULL url including scheme — this app
+      // stores/displays URLs without one, so it has to be added back before
+      // encoding or the lookup silently resolves to a different VT record.
+      const full = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+      return `https://www.virustotal.com/gui/url/${btoa(full).replace(/=/g, "")}`;
+    }
     return null;
   };
   const [sourceUrl, setSourceUrl] = useState("");
@@ -3998,6 +4031,70 @@ export default function App() {
       });
       return next;
     });
+  };
+  // "Convert to SHA256" — resolves MD5/SHA1 to their canonical SHA256 using
+  // only the three cheap preflight lookups (Tri.age hash search, Kaspersky
+  // hash, Hybrid Analysis search/hash), same engines and same first-match-wins
+  // order as the auto-preflight inside enrichIOC. Deliberately does NOT run
+  // the full multi-engine enrichment cascade and does NOT auto-trigger
+  // enrichIOC afterward — this is a quick hash-conversion, not a threat report.
+  // Processed sequentially (one hash at a time) to stay gentle on rate limits.
+  const [converting, setConverting] = useState({}); // { "cat::value": true } while a conversion is in flight
+  const convertToSHA256Preflight = async (cat, values) => {
+    const triageAlgo = { MD5: "md5", SHA1: "sha1" }[cat];
+    for (const value of values) {
+      const convKey = `${cat}::${value}`;
+      setConverting((p) => ({ ...p, [convKey]: true }));
+      try {
+        let canonical = enrichCache[convKey]?.data?._canonicalSHA256 || null;
+        const post = (body) => fetch(`${WORKER_BASE}/enrich`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ value, cat, session_id: SESSION_ID, ...body }),
+        }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+
+        if (!canonical) {
+          const tj = await post({ api: "triage", otx_type: triageAlgo });
+          if (tj?.found) canonical = (tj.sha256 || tj.SHA256 || "").toLowerCase() || null;
+        }
+        if (!canonical) {
+          const kj = await post({ api: "kaspersky", kaspersky_type: "hash" });
+          if (kj?.Zone) {
+            const gi = kj.FileGeneralInfo || {};
+            canonical = (gi.SHA256 || gi.Sha256 || kj.SHA256 || "").toLowerCase() || null;
+          }
+        }
+        if (!canonical) {
+          const hj = await post({ api: "hybrid_analysis", ha_type: "hash" });
+          if (Array.isArray(hj) && hj.length) {
+            const best = hj.find((r) => r?.sha256) || hj[0];
+            canonical = best?.sha256 ? String(best.sha256).toLowerCase() : null;
+          }
+        }
+        if (!canonical) continue; // none of the 3 engines had this hash — leave as-is
+
+        setIocData((prev) => {
+          if (!prev) return prev;
+          const next = { ...prev };
+          const sha256List = (next.SHA256 || []).map((v) => v.toLowerCase());
+          if (!sha256List.includes(canonical)) next.SHA256 = [...(next.SHA256 || []), canonical];
+          if (next[cat]) {
+            next[cat] = next[cat].filter((v) => v.toLowerCase() !== value.toLowerCase());
+            if (!next[cat].length) delete next[cat];
+          }
+          return next;
+        });
+        setMergedHashes((m) => {
+          const entry = m[canonical] || { removed: [], sources: [] };
+          if (entry.removed.some((r) => r.cat === cat && r.value.toLowerCase() === value.toLowerCase())) return m;
+          return { ...m, [canonical]: { removed: [...entry.removed, { cat, value, manual: true }], sources: [...new Set([...entry.sources, cat])] } };
+        });
+        setBlastNodes((s) => new Set([...s, value]));
+        setTimeout(() => setBlastNodes((s) => { const n = new Set(s); n.delete(value); return n; }), 950);
+        fireDedupToast(cat, value, canonical);
+      } finally {
+        setConverting((p) => { const n = { ...p }; delete n[convKey]; return n; });
+      }
+    }
   };
   const [customAddCat, setCustomAddCat] = useState(null);           // category currently showing add input
   const [customAddValue, setCustomAddValue] = useState("");
@@ -7055,6 +7152,29 @@ export default function App() {
                         https://
                       </button>
                     )}
+                    {/* "Convert to SHA256" — MD5/SHA1 cards only. Cheap preflight-only
+                        lookup (Tri.age/Kaspersky/HA hash-search), no full enrichment
+                        cascade and no auto-triggered enrichment afterward — for when
+                        the analyst just wants the SHA256 form, not a threat report. */}
+                    {["MD5","SHA1"].includes(cat) && (() => {
+                      const isConverting = arr.some((v) => converting[`${cat}::${v}`]);
+                      return (
+                        <button
+                          onClick={() => convertToSHA256Preflight(cat, arr)}
+                          disabled={isConverting}
+                          title={`Resolve ${cat} hashes to SHA256 via Tri.age/Kaspersky/Hybrid Analysis lookups only — no full enrichment triggered`}
+                          className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-bold"
+                          style={{
+                            color: isConverting ? "#5d7382" : "#04111a",
+                            backgroundColor: isConverting ? "rgba(120,160,180,0.06)" : "#2dd4bf",
+                            border: `1px solid ${isConverting ? "rgba(120,160,180,0.25)" : "rgba(45,212,191,0.7)"}`,
+                            cursor: isConverting ? "not-allowed" : "pointer",
+                          }}>
+                          {isConverting ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+                          {isConverting ? "Converting…" : "Convert to SHA256"}
+                        </button>
+                      );
+                    })()}
                     {/* Manual "Consolidate as SHA256 IOC" — MD5/SHA1 cards only.
                         Shows resolved canonical SHA256 count for any IOC in this card.
                         Click promotes all resolvable weak hashes to SHA256 in one go. */}
@@ -7330,7 +7450,10 @@ export default function App() {
                           const isDomUrl = ["DOMAIN","URL"].includes(cat);
                           const isIpAsDomain = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(arr[i]);
                           const hasVerdict = d._verdict && d._verdict !== "Unknown";
-                          const hasCrowdstrike = !!d.crowdstrike;
+                          // "Clean" no longer gets its own card — it's not a
+                          // dominant signal anymore (see verdict cascade), so
+                          // surfacing it here would visually overstate it.
+                          const hasCrowdstrike = !!d.crowdstrike && d.crowdstrike.status !== "clean";
                           const hasThreatfox = !!d.threatfox;
                           const hasMalBaz = !!d.malwarebazaar;
                           const hasUrlhaus = !!d.urlhaus;
@@ -7612,6 +7735,12 @@ export default function App() {
                             {/* ── VIRUSTOTAL INTEL (pivot/context only — never feeds verdict) ── */}
                             {!isCondensed && hasVT && secRow("VT Intel", (
                               <>
+                                  {d.virustotal.noNotableData && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#8aa0ad", backgroundColor: "rgba(138,160,173,0.08)", border: "1px solid rgba(138,160,173,0.25)" }}
+                                      title="VirusTotal has a record for this hash but returned no classification, capabilities, Sigma/YARA matches, or contacted infrastructure">
+                                      ⚪ VirusTotal · Unknown
+                                    </span>
+                                  )}
                                   {(d.virustotal.threatLabel || d.virustotal.threatCategory.length > 0) && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#c084fc", backgroundColor: "rgba(192,132,252,0.10)", border: "1px solid rgba(192,132,252,0.3)" }}
                                       title="VirusTotal community threat classification — context only, does not drive the verdict">
@@ -7801,11 +7930,21 @@ export default function App() {
                             ))}
 
                             {/* ── TIMELINE ── */}
-                            {!isCondensed && (hasTimeline || hasApexObs || (hasDomainReg && d.domainReg.state !== "deleted")) && secRow("Timeline", (
+                            {!isCondensed && (hasTimeline || hasApexObs || (hasDomainReg && d.domainReg.state !== "deleted") || d.triage?.submitted || d.virustotal?.firstSubmission) && secRow("Timeline", (
                               <>
                                   {hasTimeline && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.25)" }}>
                                       🕐{d._timeline.firstFmt ? ` First Seen: ${d._timeline.firstFmt}` : ""}{d._timeline.lastFmt ? ` · Last Seen: ${d._timeline.lastFmt}` : ""}
+                                    </span>
+                                  )}
+                                  {(d.triage?.submitted || d.triage?.completed) && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#fbbf24", backgroundColor: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.3)" }}>
+                                      🕐 Tri.age{d.triage.submitted ? ` · Submitted ${fmtDate(d.triage.submitted)}` : ""}{d.triage.completed ? ` · Completed ${fmtDate(d.triage.completed)}` : ""}
+                                    </span>
+                                  )}
+                                  {d.virustotal?.firstSubmission && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#c084fc", backgroundColor: "rgba(192,132,252,0.08)", border: "1px solid rgba(192,132,252,0.3)" }}>
+                                      🕐 VT · First submission {fmtDate(d.virustotal.firstSubmission)}{d.virustotal.timesSubmitted != null ? ` · Submitted ${d.virustotal.timesSubmitted}×` : ""}
                                     </span>
                                   )}
                                   {hasDomainReg && d.domainReg.state !== "deleted" && (() => {
@@ -7814,7 +7953,11 @@ export default function App() {
                                     const isUnregistered = dr?.state === "unregistered";
                                     const iocHost = arr[i].replace(/^https?:\/\//i, "").split("/")[0];
                                     const isActualSubdomain = registrableDomain(iocHost) !== iocHost.toLowerCase();
-                                    const isNewDomain = dr?.state === "active" && dr?.ageDays != null && dr.ageDays < 30;
+                                    // Newly Created (<90d / 3mo) is a real hunting signal — most
+                                    // legitimate domains aren't fresh. Young (90-180d / 3-6mo) is
+                                    // a softer heads-up, worth noting but not alarming.
+                                    const isNewDomain = dr?.state === "active" && dr?.ageDays != null && dr.ageDays < 90;
+                                    const isYoungDomain = dr?.state === "active" && dr?.ageDays != null && dr.ageDays >= 90 && dr.ageDays < 180;
                                     const isNewSubdomain = isActualSubdomain && sd?.subdomainAgeDays != null && sd.subdomainAgeDays < 30 && dr?.ageDays > 120;
                                     // A subdomain cannot be older than its registrable domain's
                                     // registration. urlscan's observational age is unreliable for
@@ -7825,11 +7968,13 @@ export default function App() {
                                     const isAlert = isNewDomain || isNewSubdomain;
                                     return (
                                       <span className="rounded-full px-2 py-0.5" style={{
-                                        color: isAlert ? "#ff4d6d" : isUnregistered ? "#8aa0ad" : "#94a3b8",
-                                        backgroundColor: isAlert ? "rgba(255,77,109,0.10)" : "rgba(148,163,184,0.08)",
-                                        border: `1px solid ${isAlert ? "rgba(255,77,109,0.3)" : "rgba(148,163,184,0.25)"}`,
+                                        color: isAlert ? "#ff4d6d" : isYoungDomain ? "#fbbf24" : isUnregistered ? "#8aa0ad" : "#94a3b8",
+                                        backgroundColor: isAlert ? "rgba(255,77,109,0.10)" : isYoungDomain ? "rgba(251,191,36,0.10)" : "rgba(148,163,184,0.08)",
+                                        border: `1px solid ${isAlert ? "rgba(255,77,109,0.3)" : isYoungDomain ? "rgba(251,191,36,0.35)" : "rgba(148,163,184,0.25)"}`,
                                       }}>
                                         📋{dr?.state === "active" && dr.ageDays != null ? ` Domain: ${smartAge(dr.ageDays)} old (Reg. ${fmtDate(dr.date)})` : ""}{isUnregistered ? " ⚪ Domain Not Registered" : ""}{showSubdomainLine ? ` · Subdomain: ${smartAge(sd.subdomainAgeDays)} old (Active Since ${fmtDate(sd.subdomainCreated)})` : ""}{dr?.status ? ` · Status: ${dr.status}` : ""}
+                                        {isNewDomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Domain</span>}
+                                        {isYoungDomain && <span style={{ color: "#fbbf24", fontWeight: 700 }}>{" · "}🟡 Young Domain</span>}
                                         {isNewSubdomain && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Subdomain</span>}
                                       </span>
                                     );
@@ -7839,15 +7984,17 @@ export default function App() {
                                     const iocHost = arr[i].replace(/^https?:\/\//i, "").split("/")[0];
                                     const isActualSubdomain = registrableDomain(iocHost) !== iocHost.toLowerCase();
                                     const showSub = sd?.subdomainAgeDays != null && isActualSubdomain && (sd.apexAgeDays == null || sd.subdomainAgeDays <= sd.apexAgeDays);
-                                    const isNewApex = sd.apexAgeDays < 30;
+                                    const isNewApex = sd.apexAgeDays < 90;
+                                    const isYoungApex = sd.apexAgeDays >= 90 && sd.apexAgeDays < 180;
                                     return (
                                       <span className="rounded-full px-2 py-0.5" style={{
-                                        color: isNewApex ? "#ff4d6d" : "#8aa0ad",
-                                        backgroundColor: isNewApex ? "rgba(255,77,109,0.10)" : "rgba(148,163,184,0.05)",
-                                        border: `1px dashed ${isNewApex ? "rgba(255,77,109,0.35)" : "rgba(148,163,184,0.3)"}`,
+                                        color: isNewApex ? "#ff4d6d" : isYoungApex ? "#fbbf24" : "#8aa0ad",
+                                        backgroundColor: isNewApex ? "rgba(255,77,109,0.10)" : isYoungApex ? "rgba(251,191,36,0.10)" : "rgba(148,163,184,0.05)",
+                                        border: `1px dashed ${isNewApex ? "rgba(255,77,109,0.35)" : isYoungApex ? "rgba(251,191,36,0.35)" : "rgba(148,163,184,0.3)"}`,
                                       }} title="Observational — urlscan first-sighting, not registry data">
                                         👁️ Domain: ~{smartAge(sd.apexAgeDays)} old (First Observed {fmtDate(sd.apexFirstSeen)}){showSub ? ` · Subdomain: ${smartAge(sd.subdomainAgeDays)} old (Active Since ${fmtDate(sd.subdomainCreated)})` : ""}
-                                        {isNewApex && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Recently Observed Domain</span>}
+                                        {isNewApex && <span style={{ color: "#ff4d6d", fontWeight: 700 }}>{" · "}🔴 Newly Created Domain</span>}
+                                        {isYoungApex && <span style={{ color: "#fbbf24", fontWeight: 700 }}>{" · "}🟡 Young Domain</span>}
                                       </span>
                                     );
                                   })()}
