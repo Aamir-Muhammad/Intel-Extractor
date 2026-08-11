@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v119";
+const APP_VERSION = "v120";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -2822,6 +2822,7 @@ export default function App() {
               yaraHits: Array.isArray(yara) ? yara.map((y) => y.rule_name).filter(Boolean).slice(0, 3) : [],
               timesSubmitted: typeof vAttr.times_submitted === "number" ? vAttr.times_submitted : null,
               firstSubmission: vAttr.first_submission_date ? new Date(vAttr.first_submission_date * 1000).toISOString().split("T")[0] : null,
+              lastSubmission: vAttr.last_submission_date ? new Date(vAttr.last_submission_date * 1000).toISOString().split("T")[0] : null,
               signatureVerified: vAttr.signature_info?.verified || null,
               signatureSigners: vAttr.signature_info?.signers || null,
             };
@@ -3738,6 +3739,9 @@ export default function App() {
         // AbuseIPDB lastReported = last time this IP was reported malicious —
         // include as Last Seen if it's more recent than other sources.
         results.abuseipdb?.lastReported,
+        // Tri.age's analysis-completed date and VT's last-submission date —
+        // both fold into the same consolidated Last Seen, not a separate chip.
+        results.triage?.completed, results.virustotal?.lastSubmission,
       ].filter(Boolean).sort();
       if (allFirsts.length || allLasts.length) {
         const firstDate = allFirsts.length ? allFirsts[0] : null;
@@ -7335,12 +7339,26 @@ export default function App() {
                                 🔴 Domain Deleted / Taken Down
                               </span>
                             )}
-                            {enr?.data?.domainReg?.state === "active" && enr.data.domainReg.ageDays != null && enr.data.domainReg.ageDays < 30 && (
-                              <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle font-bold"
-                                style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.15)", border: "1px solid rgba(255,77,109,0.3)" }}>
-                                🔴 Newly Created Domain
-                              </span>
-                            )}
+                            {(() => {
+                              const dr = enr?.data?.domainReg;
+                              const sd = enr?.data?.urlscan;
+                              const hasReg = dr?.state === "active" && dr?.ageDays != null;
+                              const ageDays = hasReg ? dr.ageDays : (sd?.apexAgeDays != null ? sd.apexAgeDays : null);
+                              if (ageDays == null) return null;
+                              const isNew = ageDays < 90;
+                              const isYoung = ageDays >= 90 && ageDays < 180;
+                              if (!isNew && !isYoung) return null;
+                              return (
+                                <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle font-bold"
+                                  style={{
+                                    color: isNew ? "#ff4d6d" : "#fbbf24",
+                                    backgroundColor: isNew ? "rgba(255,77,109,0.15)" : "rgba(251,191,36,0.15)",
+                                    border: `1px solid ${isNew ? "rgba(255,77,109,0.3)" : "rgba(251,191,36,0.3)"}`,
+                                  }}>
+                                  {isNew ? "🔴 Newly Created Domain" : "🟡 Young Domain"}
+                                </span>
+                              );
+                            })()}
                             {/* In-flight indicator: partial data exists but more engines still running */}
                             {enr?.loading && enr?.data && (
                               <span className="ml-1 inline-flex items-center" title="Enrichment still in progress — more data arriving">
@@ -7930,21 +7948,14 @@ export default function App() {
                             ))}
 
                             {/* ── TIMELINE ── */}
-                            {!isCondensed && (hasTimeline || hasApexObs || (hasDomainReg && d.domainReg.state !== "deleted") || d.triage?.submitted || d.virustotal?.firstSubmission) && secRow("Timeline", (
+                            {/* Tri.age (submitted/completed) and VT (first/last submission)
+                                feed straight into the same consolidated First/Last Seen chip
+                                below via allFirsts/allLasts — no separate per-engine chip. */}
+                            {!isCondensed && (hasTimeline || hasApexObs || (hasDomainReg && d.domainReg.state !== "deleted")) && secRow("Timeline", (
                               <>
                                   {hasTimeline && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#94a3b8", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.25)" }}>
                                       🕐{d._timeline.firstFmt ? ` First Seen: ${d._timeline.firstFmt}` : ""}{d._timeline.lastFmt ? ` · Last Seen: ${d._timeline.lastFmt}` : ""}
-                                    </span>
-                                  )}
-                                  {(d.triage?.submitted || d.triage?.completed) && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#fbbf24", backgroundColor: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.3)" }}>
-                                      🕐 Tri.age{d.triage.submitted ? ` · Submitted ${fmtDate(d.triage.submitted)}` : ""}{d.triage.completed ? ` · Completed ${fmtDate(d.triage.completed)}` : ""}
-                                    </span>
-                                  )}
-                                  {d.virustotal?.firstSubmission && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#c084fc", backgroundColor: "rgba(192,132,252,0.08)", border: "1px solid rgba(192,132,252,0.3)" }}>
-                                      🕐 VT · First submission {fmtDate(d.virustotal.firstSubmission)}{d.virustotal.timesSubmitted != null ? ` · Submitted ${d.virustotal.timesSubmitted}×` : ""}
                                     </span>
                                   )}
                                   {hasDomainReg && d.domainReg.state !== "deleted" && (() => {
