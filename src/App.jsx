@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v120";
+const APP_VERSION = "v121";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -7339,7 +7339,7 @@ export default function App() {
                                 🔴 Domain Deleted / Taken Down
                               </span>
                             )}
-                            {(() => {
+                            {["DOMAIN","URL"].includes(cat) && !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(arr[i]) && (() => {
                               const dr = enr?.data?.domainReg;
                               const sd = enr?.data?.urlscan;
                               const hasReg = dr?.state === "active" && dr?.ageDays != null;
