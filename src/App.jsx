@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v123";
+const APP_VERSION = "v124";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -8396,6 +8396,29 @@ const EDGE_KIND_META = {
   hosted_on: { label: "Hosted on", color: "#00e5ff" },
   related: { label: "Related sample", color: "#ff4d6d" },
   dropped: { label: "Execution parent", color: "#c084fc" },
+  asn: { label: "Shared ASN infrastructure", color: "#a78bfa" },
+};
+
+// Major CDN/cloud ASNs where "these two IOCs share an ASN" carries no real
+// forensic signal — a huge fraction of the internet sits behind Cloudflare,
+// AWS, Google, Azure, Akamai, or Fastly, so co-location there is noise, not
+// a pivot. Excluded from the shared-ASN grouping edge entirely. Not
+// exhaustive — covers the handful that account for most false positives.
+const SHARED_INFRA_ASNS = new Set([
+  "13335",                    // Cloudflare
+  "16509", "14618", "8987",   // Amazon / AWS
+  "15169", "396982",          // Google
+  "8075", "8068",             // Microsoft / Azure
+  "20940", "16625", "34164", "35994", // Akamai
+  "54113",                    // Fastly
+]);
+const SHARED_INFRA_NAME_RE = /cloudflare|amazon|\baws\b|google|microsoft|azure|akamai|fastly/i;
+const isSharedInfraAsn = (asnRaw, orgRaw) => {
+  const num = asnRaw ? String(asnRaw).match(/\d+/)?.[0] : null;
+  if (num && SHARED_INFRA_ASNS.has(num)) return true;
+  if (orgRaw && SHARED_INFRA_NAME_RE.test(String(orgRaw))) return true;
+  if (asnRaw && SHARED_INFRA_NAME_RE.test(String(asnRaw))) return true;
+  return false;
 };
 
 function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addPivotIOC, isPivotAdded, removeIoc, anyEnriched, hashCollapseAnims = [] }) {
@@ -8647,12 +8670,15 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
       });
     });
 
-    // 3. Shared-ASN grouping edges (faint — infrastructure signal)
+    // 3. Shared-ASN grouping edges (faint — infrastructure signal). Skips
+    // major CDN/cloud ASNs (see SHARED_INFRA_ASNS) — co-location there is
+    // never a meaningful pivot, only smaller/specific hosting ASNs are.
     const asnGroups = {};
     nodes.forEach((n) => {
       const d = enrichCache[`${n.cat}::${n.id}`]?.data;
       const asn = d?.whoisASN?.asn || d?.urlscan?.servingASN || n.asn;
-      if (asn) { (asnGroups[asn] = asnGroups[asn] || []).push(n.id); }
+      const org = d?.whoisASN?.asnOrg || d?.urlscan?.servingASNName || n.asn;
+      if (asn && !isSharedInfraAsn(asn, org)) { (asnGroups[asn] = asnGroups[asn] || []).push(n.id); }
     });
     Object.values(asnGroups).forEach((ids) => {
       if (ids.length < 2 || ids.length > 8) return; // skip singletons and huge shared hosts
@@ -9311,7 +9337,6 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
     const nodeById = new Map(S.nodes.map((n) => [n.id, n]));
     let best = null, bestDist = 8;
     for (const e of S.edges) {
-      if (e.kind === "asn") continue;
       if (anyFilter && (!vis.has(e.a) || !vis.has(e.b))) continue;
       const a = nodeById.get(e.a), b = nodeById.get(e.b);
       if (!a || !b) continue;
