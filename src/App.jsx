@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v121";
+const APP_VERSION = "v122";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -9963,7 +9963,6 @@ function ThreatWireThumb({ item }) {
   if (stage === 1 && item.favicon) {
     return (
       <div className="shrink-0 rounded-md overflow-hidden relative flex items-center justify-center" style={{ width: 100, height: 72, backgroundColor: `${item.color}1f` }}>
-        <div className="absolute inset-0" style={{ opacity: 0.14, backgroundImage: "repeating-linear-gradient(135deg, currentColor 0 2px, transparent 2px 9px)", color: item.color }} />
         <img src={item.favicon} alt="" onError={() => setStage(2)}
           style={{ width: 30, height: 30, objectFit: "contain", position: "relative", borderRadius: 6 }} />
       </div>
@@ -9971,7 +9970,6 @@ function ThreatWireThumb({ item }) {
   }
   return (
     <div className="shrink-0 rounded-md overflow-hidden relative flex items-center justify-center" style={{ width: 100, height: 72, backgroundColor: `${item.color}1f`, color: item.color }}>
-      <div className="absolute inset-0" style={{ opacity: 0.16, backgroundImage: "repeating-linear-gradient(135deg, currentColor 0 2px, transparent 2px 9px)" }} />
       <span className="relative text-[14px] font-bold tracking-wide">{monogram}</span>
     </div>
   );
