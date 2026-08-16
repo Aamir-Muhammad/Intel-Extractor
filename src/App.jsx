@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v122";
+const APP_VERSION = "v123";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -392,7 +392,7 @@ const smartAge = (days) => {
     const hours = Math.max(1, Math.round(days * 24));
     return `${hours} Hour${hours !== 1 ? "s" : ""}`;
   }
-  if (days < 60) return `${days} Day${days !== 1 ? "s" : ""}`;
+  if (days < 60) { const d = Math.floor(days); return `${d} Day${d !== 1 ? "s" : ""}`; }
   if (days < 365) {
     const months = Math.round(days / 30.44);
     return `${months} Month${months !== 1 ? "s" : ""}`;
@@ -3345,7 +3345,7 @@ export default function App() {
             let ageDays = null;
             if (created) {
               const d = new Date(created);
-              if (!isNaN(d)) ageDays = Math.floor((Date.now() - d.getTime()) / 86400000);
+              if (!isNaN(d)) ageDays = (Date.now() - d.getTime()) / 86400000;
             }
             if (regOrg || regCountry || ageDays !== null) {
               results.whois = { org: regOrg, country: regCountry, ageDays };
@@ -3636,7 +3636,7 @@ export default function App() {
             const eppStatus = Array.isArray(rj.status) ? rj.status.filter((s) => typeof s === "string").slice(0, 4) : [];
             if (regDate) {
               const regD = new Date(regDate);
-              const ageDays = !isNaN(regD) ? Math.floor((Date.now() - regD.getTime()) / 86400000) : null;
+              const ageDays = !isNaN(regD) ? (Date.now() - regD.getTime()) / 86400000 : null;
               results.domainReg = {
                 date: regDate.split("T")[0],
                 ageDays,
@@ -3674,7 +3674,7 @@ export default function App() {
             if (created) {
               const cd = new Date(created);
               if (!isNaN(cd)) {
-                const ageDays = Math.floor((Date.now() - cd.getTime()) / 86400000);
+                const ageDays = (Date.now() - cd.getTime()) / 86400000;
                 const eppStatus = statusArr && statusArr.length
                   ? statusArr.filter((s) => typeof s === "string" && /^[a-zA-Z]/.test(s)).slice(0, 4).join(", ")
                   : null;
@@ -7896,7 +7896,7 @@ export default function App() {
                                   )}
                                   {hasWhois && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#a78bfa", backgroundColor: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)" }}>
-                                      WHOIS{d.whois.org ? ` · ${d.whois.org}` : ""}{d.whois.country ? ` · ${d.whois.country}` : ""}{d.whois.ageDays !== null ? ` · ${d.whois.ageDays}d old` : ""}
+                                      WHOIS{d.whois.org ? ` · ${d.whois.org}` : ""}{d.whois.country ? ` · ${d.whois.country}` : ""}{d.whois.ageDays !== null ? ` · ${Math.floor(d.whois.ageDays)}d old` : ""}
                                     </span>
                                   )}
                                   {hasShodan && (() => {
