@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v125";
+const APP_VERSION = "v126";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -3722,6 +3722,56 @@ export default function App() {
               }
             }
           } catch (e) { console.warn("Enrich Validin failed:", e.message); }
+        }
+      }
+
+      // ---- VirusTotal (Domain) — gated, not automatic like hashes ----
+      // Domain lookups share the exact same VT_1/VT_2/VT_3 quota pool as hash
+      // lookups (see admin dashboard's API Quota Status panel), so calling it
+      // unconditionally for every domain would meaningfully cut into that
+      // shared budget. Only fires when the cheaper engines above (Kaspersky,
+      // ThreatFox, URLhaus, OTX, Validin) haven't already produced a confident
+      // signal — VT is most valuable exactly when nothing else resolved this
+      // domain. Same principle as hashes: pivot/context metadata only, never
+      // feeds the verdict cascade.
+      if (cat === "DOMAIN") {
+        const hasStrongDomainSignal = results.kaspersky?.zone === "red" || results.kaspersky?.zone === "green"
+          || !!results.threatfox || results.urlhaus?.status === "online" || results.otx?.whitelisted === true
+          || (results.validin && (results.validin.verdict === "malicious" || results.validin.maliciousCount > 0));
+        if (!hasStrongDomainSignal) {
+          try {
+            await vtPaceGate();
+            const vj = await callEnrich("virustotal", null, null, undefined, { vt_type: "domain" });
+            const vAttr = vj?.data?.attributes;
+            if (vAttr) {
+              const stats = vAttr.last_analysis_stats || {};
+              const cats = vAttr.categories && typeof vAttr.categories === "object"
+                ? [...new Set(Object.values(vAttr.categories))].filter(Boolean).slice(0, 4) : [];
+              const ranks = vAttr.popularity_ranks && typeof vAttr.popularity_ranks === "object" ? Object.entries(vAttr.popularity_ranks) : [];
+              // Lowest rank number = most popular; surface only the best one found.
+              const bestRank = ranks.reduce((best, [src, r]) =>
+                (r?.rank != null && (!best || r.rank < best.rank) ? { source: src, rank: r.rank } : best), null);
+              const vt = {
+                detectionStats: {
+                  malicious: stats.malicious || 0, suspicious: stats.suspicious || 0,
+                  harmless: stats.harmless || 0, undetected: stats.undetected || 0,
+                },
+                categories: cats,
+                reputation: typeof vAttr.reputation === "number" ? vAttr.reputation : null,
+                popularityRank: bestRank,
+              };
+              const rel = vj?.data?.relationships;
+              const commFiles = rel?.communicating_files?.data;
+              const dlFiles = rel?.downloaded_files?.data;
+              const subs = rel?.subdomains?.data;
+              if (Array.isArray(commFiles) && commFiles.length) vt.communicatingFiles = commFiles.map((f) => f.id).filter(Boolean).slice(0, 20);
+              if (Array.isArray(dlFiles) && dlFiles.length) vt.downloadedFiles = dlFiles.map((f) => f.id).filter(Boolean).slice(0, 20);
+              if (Array.isArray(subs) && subs.length) vt.subdomains = subs.map((s) => s.id).filter(Boolean).slice(0, 20);
+              vt.noNotableData = !(vt.detectionStats.malicious || vt.detectionStats.suspicious || vt.categories.length || vt.communicatingFiles || vt.downloadedFiles);
+              results.virustotal = vt;
+            }
+          } catch (e) { console.warn("Enrich VirusTotal (domain) failed:", e.message); }
+          setPartial();
         }
       }
 
@@ -7751,7 +7801,56 @@ export default function App() {
                             ))}
 
                             {/* ── VIRUSTOTAL INTEL (pivot/context only — never feeds verdict) ── */}
-                            {!isCondensed && hasVT && secRow("VT Intel", (
+                            {!isCondensed && hasVT && cat === "DOMAIN" && secRow("VT Intel", (
+                              <>
+                                  {d.virustotal.noNotableData && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#8aa0ad", backgroundColor: "rgba(138,160,173,0.08)", border: "1px solid rgba(138,160,173,0.25)" }}
+                                      title="VirusTotal has a record for this domain but returned no detections, categorization, or file-relationship pivots">
+                                      ⚪ VirusTotal · Unknown
+                                    </span>
+                                  )}
+                                  {(d.virustotal.detectionStats.malicious > 0 || d.virustotal.detectionStats.suspicious > 0) && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.10)", border: "1px solid rgba(255,77,109,0.3)" }}
+                                      title="VirusTotal multi-vendor URL/domain categorization consensus — context only, does not drive the verdict">
+                                      VT · {d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious}/{d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious + d.virustotal.detectionStats.harmless + d.virustotal.detectionStats.undetected} engines flagged
+                                    </span>
+                                  )}
+                                  {d.virustotal.categories.length > 0 && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
+                                      📁 {d.virustotal.categories.join(", ")}
+                                    </span>
+                                  )}
+                                  {d.virustotal.popularityRank && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#00ff9c", backgroundColor: "rgba(0,255,156,0.06)", border: "1px solid rgba(0,255,156,0.25)" }}
+                                      title="Lower rank = more popular — a counter-signal against this being a throwaway malicious domain">
+                                      📈 {d.virustotal.popularityRank.source} rank #{d.virustotal.popularityRank.rank.toLocaleString()}
+                                    </span>
+                                  )}
+                                  {d.virustotal.reputation != null && d.virustotal.reputation !== 0 && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{
+                                      color: d.virustotal.reputation < 0 ? "#fbbf24" : "#8aa0ad",
+                                      backgroundColor: d.virustotal.reputation < 0 ? "rgba(251,191,36,0.10)" : "rgba(148,163,184,0.06)",
+                                      border: `1px solid ${d.virustotal.reputation < 0 ? "rgba(251,191,36,0.35)" : "rgba(148,163,184,0.2)"}`,
+                                    }} title="VirusTotal community reputation score — negative means the community has flagged it more than voted for it">
+                                      Reputation: {d.virustotal.reputation > 0 ? "+" : ""}{d.virustotal.reputation}
+                                    </span>
+                                  )}
+                                  {(d.virustotal.communicatingFiles?.length > 0 || d.virustotal.downloadedFiles?.length > 0) && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#c084fc", backgroundColor: "rgba(192,132,252,0.10)", border: "1px solid rgba(192,132,252,0.3)" }}
+                                      title="Pivotable in ThreatGraph">
+                                      {d.virustotal.downloadedFiles?.length > 0 ? `⬇️ ${d.virustotal.downloadedFiles.length} downloaded file${d.virustotal.downloadedFiles.length !== 1 ? "s" : ""}` : ""}
+                                      {d.virustotal.downloadedFiles?.length > 0 && d.virustotal.communicatingFiles?.length > 0 ? " · " : ""}
+                                      {d.virustotal.communicatingFiles?.length > 0 ? `📡 ${d.virustotal.communicatingFiles.length} communicating file${d.virustotal.communicatingFiles.length !== 1 ? "s" : ""}` : ""}
+                                    </span>
+                                  )}
+                                  {d.virustotal.subdomains?.length > 0 && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#7c9cff", backgroundColor: "rgba(124,156,255,0.08)", border: "1px solid rgba(124,156,255,0.3)" }}>
+                                      🌐 {d.virustotal.subdomains.length} subdomain{d.virustotal.subdomains.length !== 1 ? "s" : ""}
+                                    </span>
+                                  )}
+                              </>
+                            ))}
+                            {!isCondensed && hasVT && cat !== "DOMAIN" && secRow("VT Intel", (
                               <>
                                   {d.virustotal.noNotableData && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#8aa0ad", backgroundColor: "rgba(138,160,173,0.08)", border: "1px solid rgba(138,160,173,0.25)" }}
@@ -8397,6 +8496,7 @@ const EDGE_KIND_META = {
   related: { label: "Related sample", color: "#ff4d6d" },
   dropped: { label: "Execution parent", color: "#c084fc" },
   asn: { label: "Shared ASN infrastructure", color: "#a78bfa" },
+  subdomain: { label: "Subdomain", color: "#7c9cff" },
 };
 
 // Major CDN/cloud ASNs where "these two IOCs share an ASN" carries no real
@@ -8666,6 +8766,28 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
           const n = addNode(ip, ip, ipCat(ip), true, null);
           if (n) n.contacted = true;
           addEdge(val, ip, "contacted", "rgba(251,146,60,0.4)");
+        });
+        // VirusTotal Domain lookups — files served BY this domain (hosts, same
+        // direction as urlscan's served-files edge above) vs files that merely
+        // talked TO this domain over the network (contacted, file→domain since
+        // the file is the one initiating contact) — distinct relationships.
+        (d.virustotal?.downloadedFiles || []).forEach((sha) => {
+          if (!sha || typeof sha !== "string") return;
+          if (norm(sha) === srcId) return;
+          addNode(sha, sha.slice(0, 12) + "…", "SHA256", true, null);
+          addEdge(val, sha, "hosts", "rgba(255,77,109,0.45)");
+        });
+        (d.virustotal?.communicatingFiles || []).forEach((sha) => {
+          if (!sha || typeof sha !== "string") return;
+          if (norm(sha) === srcId) return;
+          addNode(sha, sha.slice(0, 12) + "…", "SHA256", true, null);
+          addEdge(sha, val, "contacted", "rgba(251,146,60,0.4)");
+        });
+        (d.virustotal?.subdomains || []).forEach((sub) => {
+          if (!sub || typeof sub !== "string") return;
+          if (norm(sub) === srcId) return;
+          addNode(sub, sub, "DOMAIN", true, null);
+          addEdge(val, sub, "subdomain", "rgba(124,156,255,0.35)");
         });
       });
     });
