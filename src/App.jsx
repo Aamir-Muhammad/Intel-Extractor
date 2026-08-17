@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v124";
+const APP_VERSION = "v125";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -1424,7 +1424,7 @@ const huntKQL = (cat, arr) => {
     case "IPV4": case "IPV6":
       return `DeviceNetworkEvents\n| where RemoteIP in (${kqlList(arr)})\n| project Timestamp, DeviceName, RemoteIP, RemotePort, RemoteUrl, InitiatingProcessFileName, InitiatingProcessCommandLine`;
     case "DOMAIN":
-      return `let IOCs=${dyn};\nDeviceNetworkEvents\n| where RemoteUrl has_any (IOCs) or AdditionalFields has_any (IOCs)\n| where ActionType has_any (\n    "HttpConnectionInspected",\n    "SslConnectionInspected",\n    "DnsConnectionInspected",\n    "ConnectionSuccess",\n    "ConnectionFailed"\n  )\n| extend AF = parse_json(AdditionalFields)\n| extend Host = case(\n    ActionType == "HttpConnectionInspected",  tostring(AF["host"]),\n    ActionType == "SslConnectionInspected",   tostring(AF["server_name"]),\n    ActionType == "DnsConnectionInspected",   tostring(AF["query"]),\n    ""\n  )\n| extend URI = case(\n      ActionType == "HttpConnectionInspected",   tostring(AF["uri"]),\n    ""\n  )\n| extend HTTPMethod = case(\n      ActionType == "HttpConnectionInspected",   tostring(AF["method"]),\n    ""\n  )\n| extend Direction = case(\n      ActionType == "HttpConnectionInspected",   tostring(AF["direction"]),\n    ""\n  )\n|extend RemoteUrl=coalesce(RemoteUrl,Host)\n| summarize AntionType=make_set(ActionType),URI=make_set(URI),FirstTime=min(Timestamp), LastTime=max(Timestamp),Direction=make_set(Direction),HTTPMethod=make_set(HTTPMethod) by DeviceName,RemoteUrl`;
+      return `let IOCs=${dyn};\nDeviceNetworkEvents\n| where RemoteUrl has_any (IOCs) or AdditionalFields has_any (IOCs)\n| where ActionType has_any (\n    "HttpConnectionInspected",\n    "SslConnectionInspected",\n    "DnsConnectionInspected",\n    "ConnectionSuccess",\n    "ConnectionFailed"\n  )\n| extend AF = parse_json(AdditionalFields)\n| extend Host = case(\n    ActionType == "HttpConnectionInspected",  tostring(AF["host"]),\n    ActionType == "SslConnectionInspected",   tostring(AF["server_name"]),\n    ActionType == "DnsConnectionInspected",   tostring(AF["query"]),\n    ""\n  )\n| extend URI = case(\n      ActionType == "HttpConnectionInspected",   tostring(AF["uri"]),\n    ""\n  )\n| extend HTTPMethod = case(\n      ActionType == "HttpConnectionInspected",   tostring(AF["method"]),\n    ""\n  )\n| extend Direction = case(\n      ActionType == "HttpConnectionInspected",   tostring(AF["direction"]),\n    ""\n  )\n|extend RemoteUrl=coalesce(RemoteUrl,Host)\n| summarize ActionType=make_set(ActionType),URI=make_set(URI),FirstTime=min(Timestamp), LastTime=max(Timestamp),Direction=make_set(Direction),HTTPMethod=make_set(HTTPMethod) by DeviceName,RemoteUrl`;
     case "URL": {
       const hostExtract = arr.map((u) => { try { const h = u.replace(/^https?:\/\//i, "").split("/")[0].split(":")[0]; return h; } catch { return u; } });
       const hosts = [...new Set(hostExtract)];
