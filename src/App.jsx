@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v126";
+const APP_VERSION = "v127";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -78,7 +78,12 @@ const isPrivateOrReservedIP = (ip) => {
   return v === "::1" || v === "::" || v.startsWith("fe80:") || v.startsWith("fc") || v.startsWith("fd");
 };
 // DOMAIN whitelist — github.com IS filtered here (bare github.com domain is noise)
-const WL_DOMAINS = new Set(["github.com","www.github.com","github.io","localhost","example.com","www.example.com","kaspersky.com","www.kaspersky.com","fbi.gov","www.fbi.gov","mitre.org","attack.mitre.org","www.mitre.org","gmail.com","www.gmail.com","trendmicro.com","www.trendmicro.com","zscloud.net","admin.zscloud.net"]);
+// Bare apex domains only (exact match) — NOT suffixes. workers.dev/pages.dev/
+// supabase.co are multi-tenant hosting platforms where anyone can register a
+// free subdomain, a well-known phishing/C2 pattern (e.g. paypal-verify.pages.dev),
+// so only the platform's own apex is whitelisted here, same treatment as
+// github.io above — a malicious *.pages.dev subdomain is still a real IOC.
+const WL_DOMAINS = new Set(["github.com","www.github.com","github.io","localhost","example.com","www.example.com","kaspersky.com","www.kaspersky.com","fbi.gov","www.fbi.gov","mitre.org","attack.mitre.org","www.mitre.org","gmail.com","www.gmail.com","trendmicro.com","www.trendmicro.com","zscloud.net","admin.zscloud.net","workers.dev","pages.dev","supabase.co"]);
 // Wildcard suffix whitelist — any subdomain of these roots is whitelisted.
 const WL_SUFFIXES = [
   "microsoft.com","microsoftonline.com","office.com","office365.com",
@@ -2635,6 +2640,26 @@ export default function App() {
         } catch (e) { console.warn("Enrich URLhaus URL failed:", e.message); }
         setPartial();
       }
+      // PhishTank — anonymous checkurl (no account required; new-user
+      // registration has been closed since 2020, so no app_key is sent).
+      // A "verified" + "valid" hit is a human-confirmed phishing report —
+      // high-confidence enough to feed the verdict as Malicious.
+      if (cat === "URL") {
+        try {
+          const pj = await callEnrich("phishtank");
+          const pr = pj?.results;
+          if (pr && pr.in_database) {
+            results.phishtank = {
+              verified: !!pr.verified,
+              valid: !!pr.valid,
+              verifiedAt: pr.verified_at || null,
+              submittedAt: pr.submitted_at || null,
+              detailPage: pr.phish_detail_page || null,
+            };
+          }
+        } catch (e) { console.warn("Enrich PhishTank failed:", e.message); }
+        setPartial();
+      }
       // MalwareBazaar — hashes (includes vendor_intel for detection names)
       if (["MD5","SHA1","SHA256","SHA512"].includes(cat)) {
         try {
@@ -2800,12 +2825,14 @@ export default function App() {
         } catch (e) { console.warn("Enrich Tri.age failed:", e.message); }
         setPartial();
 
-        // VirusTotal — pivot metadata only (execution parents, contacted
-        // domains/IPs, threat classification, Sigma/YARA hits). Deliberately
-        // never feeds the verdict cascade — additive context and ThreatGraph
-        // pivots, same principle as the "signed" chip elsewhere. Three free
-        // keys are rotated server-side; vtPaceGate keeps combined client call
-        // volume well under their shared per-minute ceiling.
+        // VirusTotal — pivot metadata (execution parents, contacted domains/
+        // IPs, threat classification, Sigma/YARA hits) PLUS the multi-vendor
+        // detection ratio, which does feed the verdict cascade below (weak/
+        // strong tiers by detection count) — everything else here (threat
+        // label, capabilities, signature info) stays context-only, same
+        // principle as the "signed" chip elsewhere. Three free keys are
+        // rotated server-side; vtPaceGate keeps combined client call volume
+        // well under their shared per-minute ceiling.
         try {
           await vtPaceGate();
           const vj = await callEnrich("virustotal");
@@ -2814,6 +2841,7 @@ export default function App() {
             const ptc = vAttr.popular_threat_classification;
             const sigma = vAttr.sigma_analysis_results;
             const yara = vAttr.crowdsourced_yara_results;
+            const stats = vAttr.last_analysis_stats || {};
             const vt = {
               threatLabel: ptc?.suggested_threat_label || null,
               threatCategory: Array.isArray(ptc?.popular_threat_category) ? ptc.popular_threat_category.map((t) => t.value).filter(Boolean).slice(0, 3) : [],
@@ -2825,6 +2853,14 @@ export default function App() {
               lastSubmission: vAttr.last_submission_date ? new Date(vAttr.last_submission_date * 1000).toISOString().split("T")[0] : null,
               signatureVerified: vAttr.signature_info?.verified || null,
               signatureSigners: vAttr.signature_info?.signers || null,
+              // Multi-vendor detection ratio — was fetched but never surfaced,
+              // which is exactly why the verdict could show Unknown even after
+              // a VT record came back. Now feeds the cascade below (weak/strong
+              // tiers by detection count), same as it does for domains.
+              detectionStats: {
+                malicious: stats.malicious || 0, suspicious: stats.suspicious || 0,
+                harmless: stats.harmless || 0, undetected: stats.undetected || 0,
+              },
             };
             // Graph-pivot relationships — descriptor ids are directly usable:
             // a file descriptor's id is its SHA256, domain/ip descriptor ids
@@ -2850,7 +2886,7 @@ export default function App() {
             // VT had a record for this hash (vAttr exists) but nothing notable
             // came back — say so explicitly rather than showing nothing, so
             // "checked, unremarkable" isn't confused with "never checked".
-            vt.noNotableData = !(vt.threatLabel || vt.capabilities.length || vt.sigmaHits || vt.yaraHits.length || vt.signatureVerified || vt.executionParents || vt.contactedDomains || vt.contactedIPs);
+            vt.noNotableData = !(vt.threatLabel || vt.capabilities.length || vt.sigmaHits || vt.yaraHits.length || vt.signatureVerified || vt.executionParents || vt.contactedDomains || vt.contactedIPs || vt.detectionStats.malicious || vt.detectionStats.suspicious);
             results.virustotal = vt;
           }
         } catch (e) { console.warn("Enrich VirusTotal failed:", e.message); }
@@ -3323,6 +3359,35 @@ export default function App() {
           }
           // 401/403 = expired/invalid key; 404 = not in DB; 429 = rate limited — all silent
         } catch (e) { console.warn("Enrich Kaspersky failed:", e.message); }
+        setPartial();
+      }
+      // Rocky Raccoon — Windows process behavioral intelligence (EchoTrail
+      // dataset: millions of real-world process executions). Context only,
+      // does not feed the verdict cascade — LOLBin status and "unexpected
+      // parent" are investigative leads for an analyst, not a malware verdict
+      // by themselves (legit admin tools get flagged as LOLBins too).
+      if (cat === "FILE_NAME") {
+        try {
+          const rj = await callEnrich("rockyraccoon");
+          if (rj && !rj.error) {
+            const intel = rj.intel || {};
+            const classification = rj.classification || {};
+            const executions = rj.executions || {};
+            results.rockyRaccoon = {
+              description: rj.description || null,
+              category: classification.category || null,
+              publisher: classification.publisher || null,
+              isLOLBin: !!classification.is_lolbin || !!classification.lolbin,
+              riskLevel: classification.risk_level || null,
+              expectedParent: classification.expected_parent || null,
+              suspiciousIndicators: Array.isArray(intel.suspicious_indicators) ? intel.suspicious_indicators.slice(0, 5) : [],
+              abusePatterns: Array.isArray(intel.abuse_patterns) ? intel.abuse_patterns.slice(0, 5) : [],
+              mitreAttacks: Array.isArray(intel.mitre_attack_techniques) ? intel.mitre_attack_techniques.slice(0, 5) : [],
+              executionsTotal: typeof executions.total === "number" ? executions.total : null,
+              confidence: rj.confidence || executions.confidence || null,
+            };
+          }
+        } catch (e) { console.warn("Enrich Rocky Raccoon failed:", e.message); }
         setPartial();
       }
       // OTX WHOIS for domains — registrant org, country, registration age
@@ -3841,6 +3906,15 @@ export default function App() {
       else if (results.kaspersky?.zone === "red") verdict = "Malicious";
       else if (results.threatfox) verdict = "Malicious";
       else if (results.urlhaus?.status === "online") verdict = "Malicious";
+      // PhishTank verified+valid = a human moderator confirmed this exact URL
+      // as phishing — as high-confidence as ThreatFox/URLhaus.
+      else if (results.phishtank?.verified && results.phishtank?.valid) verdict = "Malicious";
+      // VirusTotal multi-vendor consensus — 5+ engines flagging malicious is a
+      // strong enough signal to sit in Tier 1, same confidence class as
+      // ThreatFox/URLhaus. Weaker counts (1-4 malicious, or suspicious-only)
+      // are handled further down in Tier 3, since a handful of hits are often
+      // generic heuristic/YARA engines prone to false positives.
+      else if ((results.virustotal?.detectionStats?.malicious || 0) >= 5) verdict = "Malicious";
       // MalwareBazaar with a real attributed family (not "unknown") is a
       // confirmed-malware signal. An unattributed "unknown" entry just means
       // someone uploaded/reported the sample — not confirmed, so it's
@@ -3872,6 +3946,10 @@ export default function App() {
       // MalwareBazaar present but with no attributed family — reported/uploaded,
       // not confirmed. Worth a look, not an automatic Malicious.
       else if (results.malwarebazaar) verdict = "Suspicious";
+      // Weak VT signal — 1-4 malicious engines, or 3+ suspicious-only. Below
+      // the Tier 2 whitelist checks above, same treatment as an unattributed
+      // MalwareBazaar report or a raw OTX pulse count.
+      else if ((results.virustotal?.detectionStats?.malicious || 0) >= 1 || (results.virustotal?.detectionStats?.suspicious || 0) >= 3) verdict = "Suspicious";
       else if (results.otx?.validation) verdict = "Suspicious"; // OTX flagged (DGA, blocklist, etc.)
       else if ((results.otx?.pulses || 0) >= 9) verdict = "Malicious";
       else if ((results.abuseipdb?.score || 0) >= 80) verdict = "Malicious";
@@ -3893,8 +3971,12 @@ export default function App() {
         else if (results.validin.verdict === "suspicious") verdict = "Suspicious";
       }
 
-      // OTX-only with 0 pulses and no other signals → Unknown
-      const hasNonOtx = results.crowdstrike || results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin || results.abuseipdb || results.urlscan || results.circl || results.kaspersky || results.triage || results.hybridAnalysis;
+      // OTX-only with 0 pulses and no other signals → Unknown. results.virustotal
+      // must count as "non-OTX" here — otherwise a VT-driven Malicious/Suspicious
+      // verdict (set above) gets silently stomped back to Unknown whenever OTX
+      // also ran and came back with 0 pulses, which was exactly the bug being
+      // fixed by wiring VT into the cascade in the first place.
+      const hasNonOtx = results.crowdstrike || results.threatfox || results.urlhaus || results.malwarebazaar || results.whois || results.validin || results.abuseipdb || results.urlscan || results.circl || results.kaspersky || results.triage || results.hybridAnalysis || results.virustotal || results.phishtank;
       if (!hasNonOtx && results.otx && results.otx.pulses === 0 && !results.otx.validation) verdict = "Unknown";
 
       // Final verdict normalization — catch any non-standard strings
@@ -7525,6 +7607,8 @@ export default function App() {
                           const hasThreatfox = !!d.threatfox;
                           const hasMalBaz = !!d.malwarebazaar;
                           const hasUrlhaus = !!d.urlhaus;
+                          const hasPhishtank = !!d.phishtank;
+                          const hasRockyRaccoon = !!d.rockyRaccoon;
                           const hasOtx = !!d.otx;
                           const hasAbuse = !!d.abuseipdb;
                           const hasValidin = !!d.validin;
@@ -7611,7 +7695,7 @@ export default function App() {
                                   )}
                               </>
                             ))}
-                            {!isCondensed && (hasVerdict || hasCrowdstrike || hasThreatfox || hasMalBaz || hasUrlhaus || hasCircl || (hasKaspersky && isHash)) && secRow("Verdict & Identity", (
+                            {!isCondensed && (hasVerdict || hasCrowdstrike || hasThreatfox || hasMalBaz || hasUrlhaus || hasPhishtank || hasCircl || (hasKaspersky && isHash)) && secRow("Verdict & Identity", (
                               <>
                                   {hasCrowdstrike && (
                                     <span className="rounded-full px-2 py-0.5 font-bold" style={{
@@ -7643,6 +7727,16 @@ export default function App() {
                                       border: `1px solid ${d.urlhaus.status === "online" ? "rgba(255,77,109,0.3)" : "rgba(251,191,36,0.3)"}`,
                                     }}>
                                       URLhaus · {d.urlhaus.status === "online" ? "🔴 Online" : "⚫ Offline"}{d.urlhaus.urls_total ? ` · ${d.urlhaus.urls_total} URLs` : ""}{d.urlhaus.tags ? ` · ${d.urlhaus.tags}` : ""}
+                                    </span>
+                                  )}
+                                  {hasPhishtank && (
+                                    <span className="rounded-full px-2 py-0.5" style={{
+                                      color: d.phishtank.verified && d.phishtank.valid ? "#ff4d6d" : "#8aa0ad",
+                                      backgroundColor: d.phishtank.verified && d.phishtank.valid ? "rgba(255,77,109,0.12)" : "rgba(138,160,173,0.12)",
+                                      border: `1px solid ${d.phishtank.verified && d.phishtank.valid ? "rgba(255,77,109,0.3)" : "rgba(138,160,173,0.25)"}`,
+                                    }} title="PhishTank community-verified phishing report">
+                                      {d.phishtank.verified && d.phishtank.valid ? "🔴 PhishTank · Verified Phishing" : "⚪ PhishTank · Reported, unverified"}
+                                      {d.phishtank.verifiedAt ? ` · ${d.phishtank.verifiedAt.split("T")[0]}` : ""}
                                     </span>
                                   )}
                                   {hasMalBaz && (
@@ -7811,7 +7905,7 @@ export default function App() {
                                   )}
                                   {(d.virustotal.detectionStats.malicious > 0 || d.virustotal.detectionStats.suspicious > 0) && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.10)", border: "1px solid rgba(255,77,109,0.3)" }}
-                                      title="VirusTotal multi-vendor URL/domain categorization consensus — context only, does not drive the verdict">
+                                      title="VirusTotal multi-vendor detection ratio — feeds the verdict (5+ malicious = Malicious, 1+ malicious or 3+ suspicious = Suspicious)">
                                       VT · {d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious}/{d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious + d.virustotal.detectionStats.harmless + d.virustotal.detectionStats.undetected} engines flagged
                                     </span>
                                   )}
@@ -7858,6 +7952,12 @@ export default function App() {
                                       ⚪ VirusTotal · Unknown
                                     </span>
                                   )}
+                                  {(d.virustotal.detectionStats?.malicious > 0 || d.virustotal.detectionStats?.suspicious > 0) && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.10)", border: "1px solid rgba(255,77,109,0.3)" }}
+                                      title="VirusTotal multi-vendor detection ratio — feeds the verdict (5+ malicious = Malicious, 1+ malicious or 3+ suspicious = Suspicious)">
+                                      VT · {d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious}/{d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious + d.virustotal.detectionStats.harmless + d.virustotal.detectionStats.undetected} engines flagged
+                                    </span>
+                                  )}
                                   {(d.virustotal.threatLabel || d.virustotal.threatCategory.length > 0) && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#c084fc", backgroundColor: "rgba(192,132,252,0.10)", border: "1px solid rgba(192,132,252,0.3)" }}
                                       title="VirusTotal community threat classification — context only, does not drive the verdict">
@@ -7885,6 +7985,40 @@ export default function App() {
                                       border: `1px solid ${d.virustotal.signatureVerified === "Signed" ? "rgba(148,163,184,0.2)" : "rgba(251,191,36,0.35)"}`,
                                     }} title="VirusTotal Sigcheck/codesign verification — informational only">
                                       ✍️ {d.virustotal.signatureVerified}{d.virustotal.signatureSigners ? ` · ${d.virustotal.signatureSigners}` : ""}
+                                    </span>
+                                  )}
+                              </>
+                            ))}
+
+                            {/* ── ROCKY RACCOON (process behavioral intel — FILE_NAME only, context only) ── */}
+                            {!isCondensed && hasRockyRaccoon && secRow("Process Intel", (
+                              <>
+                                  <span className="rounded-full px-2 py-0.5" style={{
+                                    color: d.rockyRaccoon.riskLevel && /high|critical/i.test(d.rockyRaccoon.riskLevel) ? "#fbbf24" : "#8aa0ad",
+                                    backgroundColor: d.rockyRaccoon.riskLevel && /high|critical/i.test(d.rockyRaccoon.riskLevel) ? "rgba(251,191,36,0.10)" : "rgba(148,163,184,0.08)",
+                                    border: `1px solid ${d.rockyRaccoon.riskLevel && /high|critical/i.test(d.rockyRaccoon.riskLevel) ? "rgba(251,191,36,0.35)" : "rgba(148,163,184,0.25)"}`,
+                                  }} title="Rocky Raccoon — Windows process behavioral baseline (EchoTrail dataset). Context/investigative only, does not drive the verdict.">
+                                    🦝 {d.rockyRaccoon.category || "Process"}{d.rockyRaccoon.publisher ? ` · ${d.rockyRaccoon.publisher}` : ""}{d.rockyRaccoon.riskLevel ? ` · Risk: ${d.rockyRaccoon.riskLevel}` : ""}
+                                    {d.rockyRaccoon.isLOLBin ? " · ⚠️ LOLBin" : ""}
+                                  </span>
+                                  {d.rockyRaccoon.expectedParent && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
+                                      Expected parent: {d.rockyRaccoon.expectedParent}
+                                    </span>
+                                  )}
+                                  {d.rockyRaccoon.suspiciousIndicators.length > 0 && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#fbbf24", backgroundColor: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.3)" }}>
+                                      🚩 {d.rockyRaccoon.suspiciousIndicators.join(" · ")}
+                                    </span>
+                                  )}
+                                  {d.rockyRaccoon.mitreAttacks.length > 0 && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#f43f5e", backgroundColor: "rgba(244,63,94,0.08)", border: "1px solid rgba(244,63,94,0.25)" }}>
+                                      🎯 MITRE: {d.rockyRaccoon.mitreAttacks.join(", ")}
+                                    </span>
+                                  )}
+                                  {d.rockyRaccoon.description && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#7f95a3", backgroundColor: "rgba(148,163,184,0.04)", border: "1px solid rgba(148,163,184,0.15)" }}>
+                                      {d.rockyRaccoon.description}
                                     </span>
                                   )}
                               </>
