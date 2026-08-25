@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v127";
+const APP_VERSION = "v128";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -7254,7 +7254,7 @@ export default function App() {
                         +
                       </button>
                     )}
-                    {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","EMAIL","CVE"].includes(cat) && (
+                    {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","EMAIL","CVE","FILE_NAME"].includes(cat) && (
                       <button onClick={() => { const pending = arr.filter((v) => { const e = enrichCache[`${cat}::${v}`]; return !e || e.error; }); pending.forEach((v, i) => setTimeout(() => enrichIOC(cat, v), i * 1500)); setEnrichAllDone((p) => ({ ...p, [cat]: true })); setTimeout(() => setEnrichAllDone((p) => { const n = { ...p }; delete n[cat]; return n; }), 5000); }}
                         disabled={!!enrichAllDone[cat]}
                         className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
@@ -7418,7 +7418,7 @@ export default function App() {
                     const isEditing = editingKey === rowKey;
                     const eKey = `${cat}::${arr[i]}`;
                     const enr = enrichCache[eKey];
-                    const enrichable = ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","SSDEEP","IMPHASH","AUTHENTIHASH","CVE"].includes(cat);
+                    const enrichable = ["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","SSDEEP","IMPHASH","AUTHENTIHASH","CVE","FILE_NAME"].includes(cat);
                     // Precedence: row override > card/global effective (inheritedCollapse from card scope).
                     const isRowCollapsed = rowOverride[eKey] !== undefined ? rowOverride[eKey] : inheritedCollapse;
                     const isBlasting = blastNodes.has(arr[i]) || blastNodes.has(arr[i].toLowerCase());
