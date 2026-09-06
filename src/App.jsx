@@ -55,27 +55,93 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v130";
+const APP_VERSION = "v131";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
 // ============================================================
+// IANA IPv4 Special-Purpose Address Registry (RFC 6890) — every block that's
+// never globally routable: private-use, loopback, link-local, CGNAT,
+// documentation/test-net, benchmarking, 6to4 relay, multicast, and the
+// 240.0.0.0/4 reserved block (which also covers 255.255.255.255 broadcast).
 const isPrivateIP = (ip) => {
-  const m = ip.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  const m = String(ip).match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
   if (!m) return false;
-  const [, a, b] = m.map(Number);
-  return a === 10 || a === 127 || a === 0 || (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 255);
+  const [a, b, c] = m.slice(1).map(Number);
+  if (a === 0) return true;                          // 0.0.0.0/8 — "this network"
+  if (a === 10) return true;                          // 10.0.0.0/8 — private-use
+  if (a === 100 && b >= 64 && b <= 127) return true;   // 100.64.0.0/10 — CGNAT shared space
+  if (a === 127) return true;                          // 127.0.0.0/8 — loopback
+  if (a === 169 && b === 254) return true;             // 169.254.0.0/16 — link-local
+  if (a === 172 && b >= 16 && b <= 31) return true;     // 172.16.0.0/12 — private-use
+  if (a === 192 && b === 0 && c === 0) return true;     // 192.0.0.0/24 — IETF protocol assignments
+  if (a === 192 && b === 0 && c === 2) return true;     // 192.0.2.0/24 — documentation (TEST-NET-1)
+  if (a === 192 && b === 88 && c === 99) return true;   // 192.88.99.0/24 — 6to4 relay anycast
+  if (a === 192 && b === 168) return true;              // 192.168.0.0/16 — private-use
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 — benchmarking
+  if (a === 198 && b === 51 && c === 100) return true;  // 198.51.100.0/24 — documentation (TEST-NET-2)
+  if (a === 203 && b === 0 && c === 113) return true;   // 203.0.113.0/24 — documentation (TEST-NET-3)
+  if (a >= 224) return true;                            // 224.0.0.0/4 multicast + 240.0.0.0/4 reserved + broadcast
+  return false;
 };
-// IPv4 private/reserved (via isPrivateIP) + IPv6 loopback/link-local/unique-local —
-// used to strip sandbox-artifact addresses (a detonation VM's own NIC, its
+// Expands a compressed IPv6 address ("::") into its 8 canonical 16-bit
+// groups (as numbers). Handles an embedded IPv4 tail (e.g. ::ffff:1.2.3.4)
+// and a zone index (%eth0). Returns null if the input isn't a plausible
+// IPv6 address, so callers can safely treat that as "not IPv6".
+const expandIPv6 = (ip) => {
+  let addr = String(ip).trim().replace(/%.*$/, "").replace(/^\[|\]$/g, "");
+  if (!addr.includes(":")) return null;
+  const ipv4Tail = addr.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (ipv4Tail) {
+    const parts = ipv4Tail[1].split(".").map(Number);
+    if (parts.some((p) => Number.isNaN(p) || p > 255)) return null;
+    const hex1 = ((parts[0] << 8) | parts[1]).toString(16);
+    const hex2 = ((parts[2] << 8) | parts[3]).toString(16);
+    addr = addr.slice(0, addr.length - ipv4Tail[1].length) + hex1 + ":" + hex2;
+  }
+  const halves = addr.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":").filter(Boolean) : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":").filter(Boolean) : [];
+  let groups;
+  if (halves.length === 2) {
+    const missing = 8 - head.length - tail.length;
+    if (missing < 0) return null;
+    groups = [...head, ...Array(missing).fill("0"), ...tail];
+  } else {
+    groups = head;
+  }
+  if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/i.test(g))) return null;
+  return groups.map((g) => parseInt(g, 16));
+};
+// IANA IPv6 Special-Purpose Address Registry (RFC 6890/8190) — unspecified,
+// loopback, the deprecated ::/96 "IPv4-compatible" block (never publicly
+// routed — this is what catches an address like "::1201"), IPv4-mapped,
+// NAT64, discard-only, documentation, 6to4, unique-local, link-local, and
+// multicast.
+const isReservedIPv6 = (ip) => {
+  const g = expandIPv6(ip);
+  if (!g) return false;
+  const [g0, g1, g2, g3, g4, g5] = g;
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) return true; // ::/96 (covers :: and ::1 too)
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0xffff) return true; // ::ffff:0:0/96 — IPv4-mapped
+  if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) return true; // 64:ff9b::/96 — NAT64
+  if (g0 === 0x100 && g1 === 0 && g2 === 0 && g3 === 0) return true; // 100::/64 — discard-only
+  if (g0 === 0x2001 && g1 === 0xdb8) return true; // 2001:db8::/32 — documentation
+  if (g0 === 0x2002) return true; // 2002::/16 — 6to4
+  if (g0 >= 0xfc00 && g0 <= 0xfdff) return true; // fc00::/7 — unique-local
+  if (g0 >= 0xfe80 && g0 <= 0xfebf) return true; // fe80::/10 — link-local
+  if (g0 >= 0xff00 && g0 <= 0xffff) return true; // ff00::/8 — multicast
+  return false;
+};
+// Used to strip sandbox-artifact addresses (a detonation VM's own NIC, its
 // gateway, etc.) out of upstream "contacted infrastructure" lists before they
-// ever reach a card or the graph. Those addresses aren't attacker infra.
+// ever reach a card or the graph, and to keep non-routable addresses out of
+// parsing entirely. Those addresses aren't attacker infra.
 const isPrivateOrReservedIP = (ip) => {
   const v = String(ip).toLowerCase();
   if (isPrivateIP(v)) return true;
-  if (!v.includes(":")) return false;
-  return v === "::1" || v === "::" || v.startsWith("fe80:") || v.startsWith("fc") || v.startsWith("fd");
+  return isReservedIPv6(v);
 };
 // DOMAIN whitelist — github.com IS filtered here (bare github.com domain is noise)
 // Bare apex domains only (exact match) — NOT suffixes. workers.dev/pages.dev/
@@ -280,13 +346,12 @@ const WL_FILES = new Set([
   "eventvwr.exe","mmc.exe","regedit.exe","tasklist.exe","taskkill.exe",
   "\\","/"
 ]);
-const WL_IPS6 = new Set(["::1","::","fe80::1","0:0:0:0:0:0:0:1","0:0:0:0:0:0:0:0"]);
 const applyWhitelist = (data) => {
   const out = {};
   Object.entries(data).forEach(([cat, arr]) => {
     let filtered = arr;
     if (cat === "IPV4") filtered = arr.filter(v => !isPrivateIP(v));
-    else if (cat === "IPV6") filtered = arr.filter(v => !WL_IPS6.has(v.toLowerCase()));
+    else if (cat === "IPV6") filtered = arr.filter(v => !isReservedIPv6(v));
     else if (cat === "DOMAIN") filtered = arr.filter(v => {
       const vl = v.toLowerCase();
       if (WL_DOMAINS.has(vl)) return false;
@@ -2589,16 +2654,30 @@ export default function App() {
       if (["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512"].includes(cat)) {
         try {
           const j = await callEnrich("threatfox");
+          // ThreatFox's search_ioc endpoint does a loose match rather than an
+          // exact one — querying a bare IP has been observed matching an
+          // unrelated "ip:port" record purely because the port digits appear
+          // in the ioc string (e.g. querying "::1201" matched
+          // "177.22.88.133:1201"). Verify the returned ioc actually IS (or is
+          // "ioc:port"/"ioc/path" prefixed by) the value we searched for
+          // before trusting it — reject anything else as a false match.
           if (j.query_status === "ok" && Array.isArray(j.data) && j.data.length > 0) {
             const d = j.data[0];
-            results.threatfox = {
-              malware: d.malware_printable || d.malware || "—",
-              threat: d.threat_type_desc || d.threat_type || "—",
-              confidence: d.confidence_level,
-              first: d.first_seen ? d.first_seen.split(" ")[0] : null,
-              last: d.last_seen ? d.last_seen.split(" ")[0] : null,
-              tags: Array.isArray(d.tags) ? d.tags.filter((t) => t && !GENERIC_TAGS.has(t.toLowerCase())).slice(0, 4).join(", ") : null,
-            };
+            const iocLower = String(d.ioc || "").toLowerCase();
+            const valueLower = String(value).toLowerCase();
+            const isRealMatch = iocLower === valueLower || iocLower.startsWith(`${valueLower}:`) || iocLower.startsWith(`${valueLower}/`);
+            if (!isRealMatch) {
+              console.warn(`ThreatFox returned unrelated ioc "${d.ioc}" for query "${value}" — discarding as a false match`);
+            } else {
+              results.threatfox = {
+                malware: d.malware_printable || d.malware || "—",
+                threat: d.threat_type_desc || d.threat_type || "—",
+                confidence: d.confidence_level,
+                first: d.first_seen ? d.first_seen.split(" ")[0] : null,
+                last: d.last_seen ? d.last_seen.split(" ")[0] : null,
+                tags: Array.isArray(d.tags) ? d.tags.filter((t) => t && !GENERIC_TAGS.has(t.toLowerCase())).slice(0, 4).join(", ") : null,
+              };
+            }
           }
         } catch (e) { console.warn("Enrich ThreatFox failed:", e.message); }
         setPartial();
@@ -7540,7 +7619,7 @@ export default function App() {
                                 backgroundColor: enr.data._verdict === "Malicious" ? "rgba(255,77,109,0.15)" : enr.data._verdict === "Suspicious" ? "rgba(251,191,36,0.15)" : enr.data._verdict === "Whitelisted" ? "rgba(0,255,156,0.15)" : "rgba(138,160,173,0.15)",
                                 border: `1px solid ${enr.data._verdict === "Malicious" ? "rgba(255,77,109,0.4)" : enr.data._verdict === "Suspicious" ? "rgba(251,191,36,0.4)" : enr.data._verdict === "Whitelisted" ? "rgba(0,255,156,0.4)" : "rgba(138,160,173,0.3)"}`,
                               }}>
-                                {enr.data._verdict === "Malicious" ? "🔴" : enr.data._verdict === "Suspicious" ? "🟡" : enr.data._verdict === "Whitelisted" ? "🟢" : "⚪"} {enr.data._verdict === "Unknown" ? "Unknown - Check VirusTotal" : enr.data._verdict}
+                                {enr.data._verdict === "Malicious" ? "🔴" : enr.data._verdict === "Suspicious" ? "🟡" : enr.data._verdict === "Whitelisted" ? "🟢" : "⚪"} {enr.data._verdict === "Unknown" ? (enr.data.virustotal ? "Unknown" : "Unknown - Check VirusTotal") : enr.data._verdict}
                               </span>
                             )}
                             {enr?.data?.domainReg?.state === "active" && enr?.data?.domainReg?.status && /client.?hold|server.?hold/i.test(enr.data.domainReg.status) && (
@@ -8102,7 +8181,7 @@ export default function App() {
                               <>
                                   {d._verdict === "Unknown" && d.domainReg?.state !== "deleted" && (
                                     <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#5d7382", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.2)" }}>
-                                      ⚪ Unknown - Check VirusTotal
+                                      {d.virustotal ? "⚪ Unknown" : "⚪ Unknown - Check VirusTotal"}
                                     </span>
                                   )}
                                   {hasOtx && d._verdict !== "Unknown" && (
