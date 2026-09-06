@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v131";
+const APP_VERSION = "v132";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -142,6 +142,45 @@ const isPrivateOrReservedIP = (ip) => {
   const v = String(ip).toLowerCase();
   if (isPrivateIP(v)) return true;
   return isReservedIPv6(v);
+};
+// Same ranges as isPrivateIP/isReservedIPv6, but names WHICH special-purpose
+// category matched instead of a plain boolean — lets the card show "Link-Local"
+// vs "Loopback" vs "Reserved" etc. rather than one generic label. Returns null
+// for an ordinary routable address.
+const classifyIPPurpose = (ip) => {
+  const v4 = String(ip).match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (v4) {
+    const [a, b, c] = v4.slice(1).map(Number);
+    if (a === 0) return "Unspecified";
+    if (a === 127) return "Loopback";
+    if (a === 169 && b === 254) return "Link-Local";
+    if (a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) return "Private-Use";
+    if (a === 100 && b >= 64 && b <= 127) return "Shared Address Space (CGNAT)";
+    if (a === 192 && b === 0 && c === 0) return "IETF Protocol Assignment";
+    if ((a === 192 && b === 0 && c === 2) || (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113)) return "Documentation";
+    if (a === 192 && b === 88 && c === 99) return "6to4 Relay Anycast";
+    if (a === 198 && (b === 18 || b === 19)) return "Benchmarking";
+    if (a >= 224 && a <= 239) return "Multicast";
+    if (a >= 240) return "Reserved";
+    return null;
+  }
+  const g = expandIPv6(ip);
+  if (!g) return null;
+  const [g0, g1, g2, g3, g4, g5, g6, g7] = g;
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
+    if (g6 === 0 && g7 === 0) return "Unspecified";
+    if (g6 === 0 && g7 === 1) return "Loopback";
+    return "Reserved (deprecated IPv4-compatible)";
+  }
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0xffff) return "IPv4-Mapped";
+  if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) return "NAT64";
+  if (g0 === 0x100 && g1 === 0 && g2 === 0 && g3 === 0) return "Discard-Only";
+  if (g0 === 0x2001 && g1 === 0xdb8) return "Documentation";
+  if (g0 === 0x2002) return "6to4";
+  if (g0 >= 0xfc00 && g0 <= 0xfdff) return "Unique-Local (Private-Use)";
+  if (g0 >= 0xfe80 && g0 <= 0xfebf) return "Link-Local";
+  if (g0 >= 0xff00 && g0 <= 0xffff) return "Multicast";
+  return null;
 };
 // DOMAIN whitelist — github.com IS filtered here (bare github.com domain is noise)
 // Bare apex domains only (exact match) — NOT suffixes. workers.dev/pages.dev/
@@ -3520,6 +3559,10 @@ export default function App() {
                 lastReported: d.lastReportedAt ? d.lastReportedAt.split("T")[0] : null,
                 isp: d.isp || null,
                 usageType: d.usageType || null,
+                // isPublic: false is AbuseIPDB's own authoritative "this is a
+                // special-purpose/reserved range" flag — used to short-circuit
+                // the whole card down to a single "non-routable" line.
+                isPublic: typeof d.isPublic === "boolean" ? d.isPublic : null,
                 categories: categories.length ? categories.join(", ") : null,
               };
             }
@@ -7713,6 +7756,30 @@ export default function App() {
                           const d = enr.data;
                           const isHash = ["MD5","SHA1","SHA256","SHA512"].includes(cat);
                           const isIP = ["IPV4","IPV6"].includes(cat);
+                          // Safety net beyond the parse-time reserved-range filter (which
+                          // already keeps most of these from ever becoming a card) —
+                          // catches a manually-added IOC, or a range that filter doesn't
+                          // know about, using the same local classifier plus authoritative
+                          // "this is reserved" signals from AbuseIPDB (isPublic: false) and
+                          // VirusTotal (tags: ["reserved"]) when they're stronger/more
+                          // specific than the local check. When it fires, everything else
+                          // (verdict, ThreatFox, reputation, etc.) is skipped — a reserved
+                          // address is never real attacker infrastructure.
+                          const reservedLabel = isIP ? (
+                            classifyIPPurpose(arr[i])
+                            || (d.abuseipdb?.isPublic === false ? (d.abuseipdb.usageType || "Reserved") : null)
+                            || (Array.isArray(d.virustotal?.tags) && d.virustotal.tags.some((t) => /reserved/i.test(t)) ? "Reserved" : null)
+                          ) : null;
+                          if (reservedLabel) {
+                            return (
+                              <div className="ml-4 mb-1.5 text-[10px]">
+                                <span className="rounded-full px-2 py-0.5 font-bold inline-flex items-center gap-1" style={{ color: "#fbbf24", backgroundColor: "rgba(251,191,36,0.10)", border: "1px solid rgba(251,191,36,0.35)" }}
+                                  title="This address is within a special-purpose/non-routable range — never real attacker infrastructure, so no further enrichment is shown.">
+                                  🟠 {reservedLabel} — Non-Routable IP Address
+                                </span>
+                              </div>
+                            );
+                          }
                           const isDomUrl = ["DOMAIN","URL"].includes(cat);
                           const isIpAsDomain = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(arr[i]);
                           const hasVerdict = d._verdict && d._verdict !== "Unknown";
