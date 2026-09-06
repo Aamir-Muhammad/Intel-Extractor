@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v128";
+const APP_VERSION = "v129";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -10027,7 +10027,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
 
           return (
             <div className="absolute z-30 rounded-xl p-3"
-              style={{ top: 52, right: 12, width: 270, background: "rgba(10,14,20,0.97)", border: `1px solid ${c}66`, backdropFilter: "blur(10px)", boxShadow: `0 0 30px ${c}33` }}>
+              style={{ top: 52, right: 12, width: 270, maxHeight: Math.max(200, dims.h - 70), overflowY: "auto", background: "rgba(10,14,20,0.97)", border: `1px solid ${c}66`, backdropFilter: "blur(10px)", boxShadow: `0 0 30px ${c}33` }}>
               <div className="flex items-start justify-between gap-2 mb-2">
                 <div className="min-w-0">
                   <div className="font-bold break-all text-[12px]" style={{ color: c }}>{selected.label}</div>
