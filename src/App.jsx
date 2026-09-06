@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v135";
+const APP_VERSION = "v136";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -7240,159 +7240,170 @@ export default function App() {
         )}
 
         {(articleClean || rawArticle) && sourceUrl && (
-          <div className="flex flex-col sm:flex-row gap-3 mb-4 items-start">
-            <div className="rounded-xl overflow-hidden flex-1 w-full" style={{ ...panel, borderColor: "rgba(192,132,252,0.35)", boxShadow: aiOpen ? "0 0 24px rgba(192,132,252,0.10)" : "none" }}>
-              <button onClick={toggleAiPanel}
-                className="w-full flex items-center justify-between px-4 py-3 text-left gap-3"
-                style={{ backgroundColor: aiOpen ? "rgba(192,132,252,0.06)" : "transparent" }}>
-                <span className="flex items-center gap-2.5 min-w-0">
-                  <span className="shrink-0 flex h-7 w-7 items-center justify-center rounded-lg"
-                    style={{ backgroundColor: "rgba(192,132,252,0.08)", border: "1px solid rgba(192,132,252,0.35)" }}>
-                    <Sparkles size={14} style={{ color: "#c084fc" }} />
-                  </span>
-                  <span className="text-sm font-bold tracking-wide truncate" style={{ color: "#c084fc" }}>AI Summary</span>
-                  {aiState === "idle" && (
-                    <span className="text-[10px] uppercase tracking-widest rounded-full px-2 py-0.5 hidden sm:inline shrink-0"
-                      style={{ color: "#8aa0ad", border: "1px solid rgba(120,160,180,0.3)" }}>
-                      click to generate
+          <div className="mb-4">
+            <div className="flex flex-col sm:flex-row gap-3 items-start">
+              <div className="rounded-xl overflow-hidden flex-1 w-full" style={{ ...panel, borderColor: "rgba(192,132,252,0.35)", boxShadow: aiOpen ? "0 0 24px rgba(192,132,252,0.10)" : "none" }}>
+                <button onClick={toggleAiPanel}
+                  className="w-full flex items-center justify-between px-4 py-3 text-left gap-3"
+                  style={{ backgroundColor: aiOpen ? "rgba(192,132,252,0.06)" : "transparent" }}>
+                  <span className="flex items-center gap-2.5 min-w-0">
+                    <span className="shrink-0 flex h-7 w-7 items-center justify-center rounded-lg"
+                      style={{ backgroundColor: "rgba(192,132,252,0.08)", border: "1px solid rgba(192,132,252,0.35)" }}>
+                      <Sparkles size={14} style={{ color: "#c084fc" }} />
                     </span>
-                  )}
-                </span>
-                <ChevronDown size={18} className="shrink-0 transition-transform"
-                  style={{ color: "#c084fc", transform: aiOpen ? "rotate(180deg)" : "rotate(0deg)" }} />
-              </button>
+                    <span className="text-sm font-bold tracking-wide truncate" style={{ color: "#c084fc" }}>AI Summary</span>
+                    {aiState === "idle" && (
+                      <span className="text-[10px] uppercase tracking-widest rounded-full px-2 py-0.5 hidden sm:inline shrink-0"
+                        style={{ color: "#8aa0ad", border: "1px solid rgba(120,160,180,0.3)" }}>
+                        click to generate
+                      </span>
+                    )}
+                  </span>
+                  <ChevronDown size={18} className="shrink-0 transition-transform"
+                    style={{ color: "#c084fc", transform: aiOpen ? "rotate(180deg)" : "rotate(0deg)" }} />
+                </button>
+              </div>
 
-              {aiOpen && (
-                <div className="px-4 pb-4 pt-1" style={{ borderTop: "1px solid rgba(192,132,252,0.2)" }}>
-                  {aiState === "loading" && (
-                    <p className="text-xs sm:text-sm animate-pulse pt-2" style={{ color: "#9fb3bd" }}>
-                      Analyzing article and generating summary…
-                    </p>
-                  )}
+              <div className="rounded-xl overflow-hidden flex-1 w-full" style={{ ...panel, borderColor: "rgba(253,224,71,0.35)", boxShadow: aiScanOpen ? "0 0 24px rgba(253,224,71,0.10)" : "none" }}>
+                <button onClick={() => setAiScanOpen((v) => !v)}
+                  className="w-full flex items-center justify-between px-4 py-3 text-left gap-3"
+                  style={{ backgroundColor: aiScanOpen ? "rgba(253,224,71,0.06)" : "transparent" }}>
+                  <span className="flex items-center gap-2.5 min-w-0">
+                    <span className="shrink-0 flex h-7 w-7 items-center justify-center rounded-lg"
+                      style={{ backgroundColor: "rgba(253,224,71,0.08)", border: "1px solid rgba(253,224,71,0.35)" }}>
+                      <span style={{ fontSize: 14 }}>🧠</span>
+                    </span>
+                    <span className="text-sm font-bold tracking-wide truncate" style={{ color: "#fde047" }}>AI Scan Artifacts</span>
+                    {aiScanState === "loading" && (
+                      <span className="text-[10px] uppercase tracking-widest flex items-center gap-1 shrink-0" style={{ color: "#8aa0ad" }}>
+                        <Loader2 size={11} className="animate-spin" /> scanning
+                      </span>
+                    )}
+                    {aiScanState === "done" && aiScanCounts && (
+                      <span className="text-[10px] uppercase tracking-widest rounded-full px-2 py-0.5 shrink-0"
+                        style={{ color: "#00ff9c", border: "1px solid rgba(0,255,156,0.35)", backgroundColor: "rgba(0,255,156,0.06)" }}>
+                        +{aiScanCounts.scheduled_tasks + aiScanCounts.services + aiScanCounts.registry_ops + aiScanCounts.command_lines + aiScanCounts.file_paths} merged
+                      </span>
+                    )}
+                    {aiScanState === "idle" && (
+                      <span className="text-[10px] uppercase tracking-widest rounded-full px-2 py-0.5 hidden sm:inline shrink-0"
+                        style={{ color: "#8aa0ad", border: "1px solid rgba(120,160,180,0.3)" }}>
+                        click to scan
+                      </span>
+                    )}
+                  </span>
+                  <ChevronDown size={18} className="shrink-0 transition-transform"
+                    style={{ color: "#fde047", transform: aiScanOpen ? "rotate(180deg)" : "rotate(0deg)" }} />
+                </button>
+              </div>
+            </div>
 
-                  {aiState === "done" && aiSummary && (
-                    <div className="pt-2">
-                      <h2 className="text-sm sm:text-base font-extrabold leading-snug" style={{ color: "#eafcff" }}>{aiSummary.headline}</h2>
-                      {aiSummary.executive_summary && (
-                        <>
-                          <p className="text-xs sm:text-sm uppercase tracking-widest font-bold mt-2.5 mb-1" style={{ color: "#00e5ff" }}>Executive Summary</p>
-                          <p className="text-xs sm:text-sm leading-relaxed" style={{ color: "#d4e3ea" }}>{defangProse(aiSummary.executive_summary)}</p>
-                        </>
+            {(aiOpen || aiScanOpen) && (
+              <div className="mt-3" style={{ overflow: "hidden" }}>
+                {aiScanOpen && (
+                  <div className="float-none sm:float-right w-full sm:w-80 sm:ml-3 mb-3 rounded-xl overflow-hidden"
+                    style={{ ...panel, borderColor: "rgba(253,224,71,0.35)" }}>
+                    <div className="px-4 py-4">
+                      <div>
+                        {aiScanState === "done" ? (
+                          <button onClick={() => { setAiScanState("idle"); setAiScanCounts(null); }}
+                            className="text-[11px] underline" style={{ color: "#8aa0ad", cursor: "pointer", background: "none", border: "none" }}>
+                            re-scan
+                          </button>
+                        ) : (
+                          <button onClick={runAIScan}
+                            disabled={aiScanState === "loading"}
+                            title="Deep artifact extraction — scheduled tasks, services, registry ops, command lines, file paths"
+                            className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-semibold"
+                            style={{
+                              color: "#04111a",
+                              backgroundColor: "#fde047",
+                              border: "1px solid rgba(253,224,71,0.6)",
+                              cursor: aiScanState === "loading" ? "not-allowed" : "pointer",
+                            }}>
+                            {aiScanState === "loading" ? <Loader2 size={12} className="animate-spin" /> : <span style={{ fontSize: 11 }}>🧠</span>}
+                            {aiScanState === "loading" ? "Scanning…" : "AI Scan Artifacts"}
+                          </button>
+                        )}
+                      </div>
+                      {aiScanState === "error" && (
+                        <p className="pt-2 text-xs" style={{ color: "#ffb4b4" }}>
+                          {aiScanError || "AI scan failed. Please retry."}
+                          <button onClick={() => { setAiScanState("idle"); setAiScanError(""); }}
+                            className="ml-2 underline" style={{ color: "#fde047" }}>reset</button>
+                        </p>
                       )}
-                      <p className="text-xs sm:text-sm uppercase tracking-widest font-bold mt-3 mb-1" style={{ color: "#00e5ff" }}>Technical Analysis</p>
-                      <p className="text-xs sm:text-sm font-medium leading-relaxed" style={{ color: "#b8c9d1" }}>{defangProse(aiSummary.summary)}</p>
-                      {aiSummary.recommendations.length > 0 && (
-                        <div className="mt-2.5">
-                          <p className="text-xs sm:text-sm uppercase tracking-widest font-bold mb-1" style={{ color: "#00e5ff" }}>Recommendations</p>
-                          {aiSummary.recommendations.map((rec, i) => (
-                            <div key={i} className="flex items-start gap-1.5 text-xs sm:text-sm py-0.5 leading-relaxed font-medium" style={{ color: "#9fb3bd" }}>
-                              <span className="shrink-0" style={{ color: "#c084fc" }}>▸</span> <span>{defangProse(rec)}</span>
+                      {aiScanState === "done" && aiScanCounts && (aiScanCounts.scheduled_tasks + aiScanCounts.services + aiScanCounts.registry_ops + aiScanCounts.command_lines + aiScanCounts.file_paths) === 0 && (
+                        <p className="pt-2 text-xs" style={{ color: "#8aa0ad" }}>
+                          No additional artifacts found beyond what regex already captured.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {aiOpen && (
+                  <div className="rounded-xl" style={{ ...panel, borderColor: "rgba(192,132,252,0.35)" }}>
+                    <div className="px-4 py-4">
+                      {aiState === "loading" && (
+                        <p className="text-xs sm:text-sm animate-pulse" style={{ color: "#9fb3bd" }}>
+                          Analyzing article and generating summary…
+                        </p>
+                      )}
+
+                      {aiState === "done" && aiSummary && (
+                        <div>
+                          <h2 className="text-sm sm:text-base font-extrabold leading-snug" style={{ color: "#eafcff" }}>{aiSummary.headline}</h2>
+                          {aiSummary.executive_summary && (
+                            <>
+                              <p className="text-xs sm:text-sm uppercase tracking-widest font-bold mt-2.5 mb-1" style={{ color: "#00e5ff" }}>Executive Summary</p>
+                              <p className="text-xs sm:text-sm leading-relaxed" style={{ color: "#d4e3ea" }}>{defangProse(aiSummary.executive_summary)}</p>
+                            </>
+                          )}
+                          <p className="text-xs sm:text-sm uppercase tracking-widest font-bold mt-3 mb-1" style={{ color: "#00e5ff" }}>Technical Analysis</p>
+                          <p className="text-xs sm:text-sm font-medium leading-relaxed" style={{ color: "#b8c9d1" }}>{defangProse(aiSummary.summary)}</p>
+                          {aiSummary.recommendations.length > 0 && (
+                            <div className="mt-2.5">
+                              <p className="text-xs sm:text-sm uppercase tracking-widest font-bold mb-1" style={{ color: "#00e5ff" }}>Recommendations</p>
+                              {aiSummary.recommendations.map((rec, i) => (
+                                <div key={i} className="flex items-start gap-1.5 text-xs sm:text-sm py-0.5 leading-relaxed font-medium" style={{ color: "#9fb3bd" }}>
+                                  <span className="shrink-0" style={{ color: "#c084fc" }}>▸</span> <span>{defangProse(rec)}</span>
+                                </div>
+                              ))}
                             </div>
-                          ))}
+                          )}
                         </div>
                       )}
+
+                      {aiState === "error" && (
+                        <div>
+                          <p className="text-xs sm:text-sm leading-relaxed" style={{ color: "#ffb4b4" }}>
+                            The AI engines are experiencing high traffic right now, so a summary couldn't be generated. Please give it a moment and retry.
+                          </p>
+                          <button onClick={retryAi} disabled={cooldown > 0}
+                            className="mt-2.5 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold"
+                            style={{
+                              color: cooldown > 0 ? "#5d7382" : "#c084fc",
+                              border: `1px solid ${cooldown > 0 ? "rgba(120,160,180,0.25)" : "rgba(192,132,252,0.45)"}`,
+                              backgroundColor: cooldown > 0 ? "rgba(120,160,180,0.06)" : "rgba(192,132,252,0.10)",
+                              cursor: cooldown > 0 ? "not-allowed" : "pointer",
+                            }}>
+                            <RefreshCw size={13} />
+                            {cooldown > 0 ? `Retry available in ${cooldown}s` : "Retry AI Summary"}
+                          </button>
+                        </div>
+                      )}
+
+                      {aiState === "idle" && (
+                        <p className="text-xs sm:text-sm animate-pulse" style={{ color: "#9fb3bd" }}>
+                          Initializing…
+                        </p>
+                      )}
                     </div>
-                  )}
-
-                  {aiState === "error" && (
-                    <div className="pt-2">
-                      <p className="text-xs sm:text-sm leading-relaxed" style={{ color: "#ffb4b4" }}>
-                        The AI engines are experiencing high traffic right now, so a summary couldn't be generated. Please give it a moment and retry.
-                      </p>
-                      <button onClick={retryAi} disabled={cooldown > 0}
-                        className="mt-2.5 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold"
-                        style={{
-                          color: cooldown > 0 ? "#5d7382" : "#c084fc",
-                          border: `1px solid ${cooldown > 0 ? "rgba(120,160,180,0.25)" : "rgba(192,132,252,0.45)"}`,
-                          backgroundColor: cooldown > 0 ? "rgba(120,160,180,0.06)" : "rgba(192,132,252,0.10)",
-                          cursor: cooldown > 0 ? "not-allowed" : "pointer",
-                        }}>
-                        <RefreshCw size={13} />
-                        {cooldown > 0 ? `Retry available in ${cooldown}s` : "Retry AI Summary"}
-                      </button>
-                    </div>
-                  )}
-
-                  {aiState === "idle" && (
-                    <p className="text-xs sm:text-sm pt-2 animate-pulse" style={{ color: "#9fb3bd" }}>
-                      Initializing…
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <div className="rounded-xl overflow-hidden flex-1 w-full" style={{ ...panel, borderColor: "rgba(253,224,71,0.35)", boxShadow: aiScanOpen ? "0 0 24px rgba(253,224,71,0.10)" : "none" }}>
-              <button onClick={() => setAiScanOpen((v) => !v)}
-                className="w-full flex items-center justify-between px-4 py-3 text-left gap-3"
-                style={{ backgroundColor: aiScanOpen ? "rgba(253,224,71,0.06)" : "transparent" }}>
-                <span className="flex items-center gap-2.5 min-w-0">
-                  <span className="shrink-0 flex h-7 w-7 items-center justify-center rounded-lg"
-                    style={{ backgroundColor: "rgba(253,224,71,0.08)", border: "1px solid rgba(253,224,71,0.35)" }}>
-                    <span style={{ fontSize: 14 }}>🧠</span>
-                  </span>
-                  <span className="text-sm font-bold tracking-wide truncate" style={{ color: "#fde047" }}>AI Scan Artifacts</span>
-                  {aiScanState === "loading" && (
-                    <span className="text-[10px] uppercase tracking-widest flex items-center gap-1 shrink-0" style={{ color: "#8aa0ad" }}>
-                      <Loader2 size={11} className="animate-spin" /> scanning
-                    </span>
-                  )}
-                  {aiScanState === "done" && aiScanCounts && (
-                    <span className="text-[10px] uppercase tracking-widest rounded-full px-2 py-0.5 shrink-0"
-                      style={{ color: "#00ff9c", border: "1px solid rgba(0,255,156,0.35)", backgroundColor: "rgba(0,255,156,0.06)" }}>
-                      +{aiScanCounts.scheduled_tasks + aiScanCounts.services + aiScanCounts.registry_ops + aiScanCounts.command_lines + aiScanCounts.file_paths} merged
-                    </span>
-                  )}
-                  {aiScanState === "idle" && (
-                    <span className="text-[10px] uppercase tracking-widest rounded-full px-2 py-0.5 hidden sm:inline shrink-0"
-                      style={{ color: "#8aa0ad", border: "1px solid rgba(120,160,180,0.3)" }}>
-                      click to scan
-                    </span>
-                  )}
-                </span>
-                <ChevronDown size={18} className="shrink-0 transition-transform"
-                  style={{ color: "#fde047", transform: aiScanOpen ? "rotate(180deg)" : "rotate(0deg)" }} />
-              </button>
-
-              {aiScanOpen && (
-                <div className="px-4 pb-4 pt-1" style={{ borderTop: "1px solid rgba(253,224,71,0.2)" }}>
-                  <div className="pt-2">
-                    {aiScanState === "done" ? (
-                      <button onClick={() => { setAiScanState("idle"); setAiScanCounts(null); }}
-                        className="text-[11px] underline" style={{ color: "#8aa0ad", cursor: "pointer", background: "none", border: "none" }}>
-                        re-scan
-                      </button>
-                    ) : (
-                      <button onClick={runAIScan}
-                        disabled={aiScanState === "loading"}
-                        title="Deep artifact extraction — scheduled tasks, services, registry ops, command lines, file paths"
-                        className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-semibold"
-                        style={{
-                          color: "#04111a",
-                          backgroundColor: "#fde047",
-                          border: "1px solid rgba(253,224,71,0.6)",
-                          cursor: aiScanState === "loading" ? "not-allowed" : "pointer",
-                        }}>
-                        {aiScanState === "loading" ? <Loader2 size={12} className="animate-spin" /> : <span style={{ fontSize: 11 }}>🧠</span>}
-                        {aiScanState === "loading" ? "Scanning…" : "AI Scan Artifacts"}
-                      </button>
-                    )}
                   </div>
-                  {aiScanState === "error" && (
-                    <p className="pt-2 text-xs" style={{ color: "#ffb4b4" }}>
-                      {aiScanError || "AI scan failed. Please retry."}
-                      <button onClick={() => { setAiScanState("idle"); setAiScanError(""); }}
-                        className="ml-2 underline" style={{ color: "#fde047" }}>reset</button>
-                    </p>
-                  )}
-                  {aiScanState === "done" && aiScanCounts && (aiScanCounts.scheduled_tasks + aiScanCounts.services + aiScanCounts.registry_ops + aiScanCounts.command_lines + aiScanCounts.file_paths) === 0 && (
-                    <p className="pt-2 text-xs" style={{ color: "#8aa0ad" }}>
-                      No additional artifacts found beyond what regex already captured.
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
