@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v129";
+const APP_VERSION = "v130";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -3836,6 +3836,43 @@ export default function App() {
               results.virustotal = vt;
             }
           } catch (e) { console.warn("Enrich VirusTotal (domain) failed:", e.message); }
+          setPartial();
+        }
+      }
+
+      // ---- VirusTotal (IP) — gated the same way as Domain ----
+      // Shares the same VT_1/VT_2/VT_3 quota pool. IPs are usually the
+      // highest-volume IOC category in an investigation, so this is at least
+      // as important to gate as Domain — only fires when AbuseIPDB, SANS ISC,
+      // OTX, or Validin haven't already produced a confident signal. IP
+      // objects have no categories/popularity_ranks field on VT's side (that's
+      // domain-only), and downloaded_files is Enterprise-only for IPs, so
+      // neither is requested/parsed here.
+      if (["IPV4","IPV6"].includes(cat)) {
+        const hasStrongIPSignal = (results.abuseipdb?.score || 0) >= 25 || (results.sansIsc?.attacks || 0) >= 5
+          || results.otx?.whitelisted === true
+          || (results.validin && (results.validin.verdict === "malicious" || results.validin.maliciousCount > 0));
+        if (!hasStrongIPSignal) {
+          try {
+            await vtPaceGate();
+            const vj = await callEnrich("virustotal", null, null, undefined, { vt_type: "ip" });
+            const vAttr = vj?.data?.attributes;
+            if (vAttr) {
+              const stats = vAttr.last_analysis_stats || {};
+              const vt = {
+                detectionStats: {
+                  malicious: stats.malicious || 0, suspicious: stats.suspicious || 0,
+                  harmless: stats.harmless || 0, undetected: stats.undetected || 0,
+                },
+                reputation: typeof vAttr.reputation === "number" ? vAttr.reputation : null,
+                tags: Array.isArray(vAttr.tags) ? vAttr.tags.slice(0, 5) : [],
+              };
+              const commFiles = vj?.data?.relationships?.communicating_files?.data;
+              if (Array.isArray(commFiles) && commFiles.length) vt.communicatingFiles = commFiles.map((f) => f.id).filter(Boolean).slice(0, 20);
+              vt.noNotableData = !(vt.detectionStats.malicious || vt.detectionStats.suspicious || vt.tags.length || vt.communicatingFiles);
+              results.virustotal = vt;
+            }
+          } catch (e) { console.warn("Enrich VirusTotal (IP) failed:", e.message); }
           setPartial();
         }
       }
@@ -7944,7 +7981,43 @@ export default function App() {
                                   )}
                               </>
                             ))}
-                            {!isCondensed && hasVT && cat !== "DOMAIN" && secRow("VT Intel", (
+                            {!isCondensed && hasVT && ["IPV4","IPV6"].includes(cat) && secRow("VT Intel", (
+                              <>
+                                  {d.virustotal.noNotableData && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#8aa0ad", backgroundColor: "rgba(138,160,173,0.08)", border: "1px solid rgba(138,160,173,0.25)" }}
+                                      title="VirusTotal has a record for this IP but returned no detections, tags, or communicating-file pivots">
+                                      ⚪ VirusTotal · Unknown
+                                    </span>
+                                  )}
+                                  {(d.virustotal.detectionStats.malicious > 0 || d.virustotal.detectionStats.suspicious > 0) && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.10)", border: "1px solid rgba(255,77,109,0.3)" }}
+                                      title="VirusTotal multi-vendor detection ratio — feeds the verdict (5+ malicious = Malicious, 1+ malicious or 3+ suspicious = Suspicious)">
+                                      VT · {d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious}/{d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious + d.virustotal.detectionStats.harmless + d.virustotal.detectionStats.undetected} engines flagged
+                                    </span>
+                                  )}
+                                  {d.virustotal.tags?.length > 0 && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
+                                      🏷️ {d.virustotal.tags.join(", ")}
+                                    </span>
+                                  )}
+                                  {d.virustotal.reputation != null && d.virustotal.reputation !== 0 && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{
+                                      color: d.virustotal.reputation < 0 ? "#fbbf24" : "#8aa0ad",
+                                      backgroundColor: d.virustotal.reputation < 0 ? "rgba(251,191,36,0.10)" : "rgba(148,163,184,0.06)",
+                                      border: `1px solid ${d.virustotal.reputation < 0 ? "rgba(251,191,36,0.35)" : "rgba(148,163,184,0.2)"}`,
+                                    }} title="VirusTotal community reputation score — negative means the community has flagged it more than voted for it">
+                                      Reputation: {d.virustotal.reputation > 0 ? "+" : ""}{d.virustotal.reputation}
+                                    </span>
+                                  )}
+                                  {d.virustotal.communicatingFiles?.length > 0 && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#c084fc", backgroundColor: "rgba(192,132,252,0.10)", border: "1px solid rgba(192,132,252,0.3)" }}
+                                      title="Pivotable in ThreatGraph">
+                                      📡 {d.virustotal.communicatingFiles.length} communicating file{d.virustotal.communicatingFiles.length !== 1 ? "s" : ""}
+                                    </span>
+                                  )}
+                              </>
+                            ))}
+                            {!isCondensed && hasVT && !["DOMAIN","IPV4","IPV6"].includes(cat) && secRow("VT Intel", (
                               <>
                                   {d.virustotal.noNotableData && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#8aa0ad", backgroundColor: "rgba(138,160,173,0.08)", border: "1px solid rgba(138,160,173,0.25)" }}
@@ -8672,6 +8745,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
   const [isolateMalicious, setIsolateMalicious] = useState(false);
   const [isolateSharedPivots, setIsolateSharedPivots] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
+  const [showLegend, setShowLegend] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [nodeActionState, setNodeActionState] = useState({}); // { nodeId: "enriching"|"added" }
   const [copiedNodeId, setCopiedNodeId] = useState(null);
@@ -9912,10 +9986,19 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
         {hasGraph && <span><span style={{ color: "#c084fc", fontWeight: 700 }}>{model.stats.derived}</span> derived</span>}
         {hasGraph && model.stats.bridges > 0 && <span><span style={{ color: "#ffd166", fontWeight: 700 }}>{model.stats.bridges}</span> shared</span>}
       </div>
-      {/* Legend — only once relationships exist */}
+      {/* Legend — only once relationships exist. Collapsed by default (a lot
+          of screen real estate for something most sessions never open) —
+          toggle button always visible when there's a legend to show. */}
       {hasGraph && (
-      <div className="absolute top-3 right-3 z-10 flex flex-wrap gap-2 rounded-lg px-3 py-1.5 max-w-[60%] justify-end"
-        style={{ background: "rgba(10,14,20,0.8)", border: "1px solid rgba(120,160,180,0.2)", backdropFilter: "blur(6px)" }}>
+      <button onClick={() => setShowLegend((v) => !v)}
+        className="absolute top-3 right-3 z-10 rounded-lg px-3 py-1.5 text-[10px] font-bold"
+        style={{ background: "rgba(10,14,20,0.8)", border: "1px solid rgba(120,160,180,0.2)", backdropFilter: "blur(6px)", color: "#9fb3bd", cursor: "pointer" }}>
+        {showLegend ? "Hide Legend" : "Show Legend"}
+      </button>
+      )}
+      {hasGraph && showLegend && (
+      <div className="absolute z-10 flex flex-wrap gap-2 rounded-lg px-3 py-1.5 max-w-[60%] justify-end"
+        style={{ top: 48, right: 12, background: "rgba(10,14,20,0.8)", border: "1px solid rgba(120,160,180,0.2)", backdropFilter: "blur(6px)" }}>
         {legendItems.map(([cat, label]) => (
           <span key={cat} className="flex items-center gap-1 text-[10px]" style={{ color: "#9fb3bd" }}>
             <span style={{ width: 8, height: 8, borderRadius: 99, background: colorFor(cat), boxShadow: `0 0 6px ${colorFor(cat)}` }} />
@@ -10014,7 +10097,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
           // High-level enrichment summary snippets
           const summary = enrData ? [
             enrData._verdict && enrData._verdict !== "Unknown" && { label: "Verdict", value: `${enrData._verdict === "Malicious" ? "🔴" : enrData._verdict === "Suspicious" ? "🟡" : "🟢"} ${enrData._verdict}`, color: enrData._verdict === "Malicious" ? "#ff4d6d" : enrData._verdict === "Suspicious" ? "#fbbf24" : "#00ff9c" },
-            enrData.whoisASN?.asn && { label: "ASN", value: enrData.whoisASN.asn },
+            (enrData.whoisASN?.asnOrg || enrData.whoisASN?.asn) && { label: "ASN", value: enrData.whoisASN.asnOrg || enrData.whoisASN.asn },
             enrData.whoisASN?.country && { label: "Country", value: enrData.whoisASN.country },
             enrData.otx?.pulses && { label: "OTX Pulses", value: enrData.otx.pulses },
             enrData.urlscan?.brands?.length && { label: "Impersonates", value: `🎭 ${enrData.urlscan.brands[0]}`, color: "#ff4d6d" },
@@ -10055,7 +10138,12 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
               )}
 
               {/* Connected via — names the relationship(s) that link this node
-                  into the graph, since the canvas itself only shows color. */}
+                  into the graph, since the canvas itself only shows color.
+                  Grouped by relationship kind (+ direction for "dropped",
+                  since parent vs child matters there) rather than one row per
+                  edge — a node with 5 contacted IPs gets one "Contacted via"
+                  headline with all 5 listed under it, not the label repeated
+                  5 times. Full values shown (no truncation), wrapping as needed. */}
               {(() => {
                 const links = model.edges
                   .filter((e) => e.kind !== "asn" && (e.a === selected.id || e.b === selected.id))
@@ -10067,18 +10155,35 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
                     return { kind: e.kind, label: meta?.label || e.kind, color: meta?.color || "#8aa0ad", other: other?.label || otherId, isSource };
                   });
                 if (!links.length) return null;
+                const groups = [];
+                const byKey = {};
+                links.forEach((l) => {
+                  const key = l.kind === "dropped" ? `dropped:${l.isSource}` : l.kind;
+                  if (!byKey[key]) {
+                    byKey[key] = {
+                      label: l.kind === "dropped" ? (l.isSource ? "Dropped" : "Dropped by") : `${l.label} via`,
+                      color: l.color, items: [],
+                    };
+                    groups.push(byKey[key]);
+                  }
+                  byKey[key].items.push(l.other);
+                });
                 return (
-                  <div className="mb-2.5 rounded-lg px-2.5 py-2 flex flex-col gap-1"
+                  <div className="mb-2.5 rounded-lg px-2.5 py-2 flex flex-col gap-2"
                     style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(120,160,180,0.15)" }}>
-                    <div className="text-[9px] uppercase tracking-widest font-bold mb-0.5" style={{ color: "#5d7382" }}>Connected via</div>
-                    {links.map((l, i) => (
-                      <div key={i} className="flex items-center gap-1.5 text-[10px]">
-                        <span style={{ width: 8, height: 2, background: l.color, flexShrink: 0 }} />
-                        <span style={{ color: l.color, fontWeight: 700 }}>{l.label}</span>
-                        <span style={{ color: "#5d7382" }}>
-                          {l.kind === "dropped" ? (l.isSource ? "dropped" : "dropped by") : "↔"}
-                        </span>
-                        <span className="truncate" style={{ color: "#c8d6dd" }}>{l.other}</span>
+                    <div className="text-[9px] uppercase tracking-widest font-bold" style={{ color: "#5d7382" }}>Connected via</div>
+                    {groups.map((g, i) => (
+                      <div key={i} className="flex flex-col gap-1">
+                        <div className="flex items-center gap-1.5 text-[10px]">
+                          <span style={{ width: 8, height: 2, background: g.color, flexShrink: 0 }} />
+                          <span style={{ color: g.color, fontWeight: 700 }}>{g.label}</span>
+                          <span style={{ color: "#5d7382" }}>({g.items.length})</span>
+                        </div>
+                        <div className="flex flex-col gap-0.5" style={{ paddingLeft: 14 }}>
+                          {g.items.map((item, j) => (
+                            <span key={j} className="text-[10px] break-all" style={{ color: "#c8d6dd" }}>{item}</span>
+                          ))}
+                        </div>
                       </div>
                     ))}
                   </div>
