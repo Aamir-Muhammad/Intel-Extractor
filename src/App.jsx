@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v133";
+const APP_VERSION = "v134";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -2205,7 +2205,16 @@ export default function App() {
   const [jsonText, setJsonText] = useState("");
   const [rawText, setRawText] = useState("");
   const [iocData, setIocData] = useState(null);
-  const [originData, setOriginData] = useState(null);           // cat → { value: "api"|"eng"|"both" }
+  const [originData, setOriginData] = useState(null);           // cat → { value: "api"|"eng"|"both"|"pivot:x"|"article:N"|"custom" }
+  // Ordered list of every source merged into the current result set — index 0
+  // is always the very first article/source, which the AI summary/report
+  // keep referring to even after more sources are added on top of it.
+  const [articleSources, setArticleSources] = useState([]);     // [{ label: "Article 1", url }]
+  const [showAddArticle, setShowAddArticle] = useState(false);
+  const [showAddCustom, setShowAddCustom] = useState(false);
+  const [addArticleUrl, setAddArticleUrl] = useState("");
+  const [addArticleLoading, setAddArticleLoading] = useState(false);
+  const [addCustomText, setAddCustomText] = useState("");
   const [registryDetails, setRegistryDetails] = useState([]);   // [{ key, valueName?, valueType?, data? }]
   const [meta, setMeta] = useState(null);                       // { title, description, url, tags[] }
   const [aiSummary, setAiSummary] = useState(null);             // { headline, summary, recommendations[] }
@@ -4699,6 +4708,44 @@ export default function App() {
     setAiScanState("idle"); setAiScanCounts(null); setAiScanError("");
     setRetryCount(0); setCooldown(0); setRawArticle(""); setArticleClean(""); setDefangAll(false);
     setReferences([]); setMergedHashes({}); setShowMerged(false);
+    setArticleSources([]); setShowAddArticle(false); setShowAddCustom(false); setAddArticleUrl(""); setAddCustomText("");
+  };
+
+  // Merges newly-parsed IOC data into the existing result set instead of
+  // replacing it — used by "Add Another Article" and "Add Custom IOCs" so
+  // scanning a second source doesn't wipe out the first. Only genuinely NEW
+  // values get tagged with sourceLabel for provenance; a value already
+  // present keeps whatever origin it already had.
+  const mergeIntoResults = (newData, newOrigin, sourceLabel, newDetails = []) => {
+    const { data: wd, refs: wr } = applyWhitelistAndRefs(newData || {});
+    const normKey = (cat, v) => {
+      let n = String(v).trim().replace(/\/+$/, "");
+      if (cat === "URL" || cat === "DOMAIN") n = n.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+      return n.toLowerCase();
+    };
+    setIocData((prev) => {
+      const merged = { ...(prev || {}) };
+      Object.entries(wd).forEach(([cat, arr]) => {
+        const existing = merged[cat] || [];
+        const existingNorm = new Set(existing.map((v) => normKey(cat, v)));
+        const additions = arr.filter((v) => !existingNorm.has(normKey(cat, v)));
+        if (additions.length) merged[cat] = [...existing, ...additions];
+      });
+      const ordered = {};
+      ORDER.forEach((k) => { if (merged[k]?.length) ordered[k] = merged[k]; });
+      Object.keys(merged).forEach((k) => { if (!ordered[k] && merged[k]?.length) ordered[k] = merged[k]; });
+      return ordered;
+    });
+    setOriginData((prev) => {
+      const next = { ...(prev || {}) };
+      Object.entries(newOrigin || {}).forEach(([cat, valMap]) => {
+        if (!next[cat]) next[cat] = {};
+        Object.keys(valMap).forEach((v) => { if (next[cat][v] === undefined) next[cat][v] = sourceLabel; });
+      });
+      return next;
+    });
+    if (wr?.length) setReferences((prev) => [...(prev || []), ...wr]);
+    if (newDetails?.length) setRegistryDetails((prev) => [...(prev || []), ...newDetails]);
   };
 
   const goHome = () => {
@@ -4721,14 +4768,20 @@ export default function App() {
   // stale if read in the same tick as a just-fired setUrl(). Guarded with a
   // strict string check so this can never accidentally receive a DOM event
   // object from a bare `onClick={runFetch}` handler.
-  const runFetch = async (overrideUrl) => {
-    resetResults();
+  // opts.merge: true when called from "Add Another Article" — skips the
+  // reset, merges the new source's IOCs into the existing set instead of
+  // replacing them, and never touches the primary URL input or the
+  // AI-summary article text (which always stays pinned to the first source).
+  const runFetch = async (overrideUrl, opts = {}) => {
+    const merge = !!opts.merge;
+    if (merge) setAddArticleLoading(true);
+    else resetResults();
     setLoading(true);
     // Auto-prepend https:// if scheme missing
     let fetchUrl = (typeof overrideUrl === "string" ? overrideUrl : url).trim();
     if (fetchUrl && !/^https?:\/\//i.test(fetchUrl)) {
       fetchUrl = "https://" + fetchUrl;
-      setUrl(fetchUrl);
+      if (!merge) setUrl(fetchUrl);
     }
 
     const apiP = fetch(`${WORKER_BASE}/parse`, {
@@ -4845,8 +4898,9 @@ export default function App() {
           pRes.status === "rejected" ? (pRes.reason?.message || "page fetch failed") : "no page IOCs",
         ].join("; ");
         setError(`Could not fetch this URL (${why}). The site may use anti-scraping protection or require JavaScript. Download the page manually (Save As → PDF/HTML) and use the Upload File tab.`);
-        setMode("upload");
+        if (!merge) setMode("upload");
         setLoading(false);
+        if (merge) setAddArticleLoading(false);
         return;
       }
     }
@@ -4876,6 +4930,27 @@ export default function App() {
       usedDetails = engDetails;
     }
 
+    if (merge) {
+      // Additional article — merge in, tag new IOCs by article number, and
+      // never touch the primary source's meta/article text (AI summary/
+      // report always refer to the first article regardless of how many
+      // more get added on top). articleSources.length is captured from this
+      // call's own closure, stable for the whole async function.
+      const label = `Article ${articleSources.length + 1}`;
+      const tagged = {};
+      Object.entries(origin).forEach(([c, valMap]) => {
+        tagged[c] = {};
+        Object.keys(valMap).forEach((v) => { tagged[c][v] = `article:${label}`; });
+      });
+      mergeIntoResults(data, tagged, `article:${label}`, usedDetails);
+      setArticleSources((prev) => [...prev, { label, url: fetchUrl }]);
+      setAddArticleLoading(false);
+      setShowAddArticle(false);
+      setAddArticleUrl("");
+      setLoading(false);
+      return;
+    }
+
     setRegistryDetails(usedDetails);
     { const { data: wd, refs: wr } = applyWhitelistAndRefs(data); setIocData(wd); setReferences(wr); }
     setOriginData(origin);
@@ -4883,6 +4958,7 @@ export default function App() {
     setSourceUrl(fetchUrl);
     if (articleText) setRawArticle(articleText);
     if (articleBody) setArticleClean(articleBody);
+    setArticleSources([{ label: "Article 1", url: fetchUrl }]);
     setLoading(false);
     const _iocCount = Object.values(data || {}).reduce((s, arr) => s + (Array.isArray(arr) ? arr.length : 0), 0);
   };
@@ -5005,6 +5081,24 @@ export default function App() {
     Object.entries(ex.data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "eng"; }); });
     { const { data: wd, refs: wr } = applyWhitelistAndRefs(ex.data); setIocData(wd); setReferences(wr); } setOriginData(origin); setRegistryDetails(ex.registryDetails);
     setSourceUrl("(raw paste)");
+  };
+
+  // "Add Custom IOCs" — same local extraction engine as Paste IOCs, but
+  // merges into the existing result set instead of replacing it. Runs even
+  // when there are no results yet, so it doubles as a quick-start option.
+  const addCustomIocs = () => {
+    const ex = extractIocs(addCustomText);
+    if (!Object.keys(ex.data).length) {
+      setError("No recognizable IOCs found in the pasted text.");
+      return;
+    }
+    const origin = {};
+    Object.entries(ex.data).forEach(([c, arr]) => { origin[c] = {}; arr.forEach((v) => { origin[c][v] = "custom"; }); });
+    mergeIntoResults(ex.data, origin, "custom", ex.registryDetails);
+    if (!sourceUrl) setSourceUrl("(custom IOCs)");
+    setAddCustomText("");
+    setShowAddCustom(false);
+    setError("");
   };
 
 
@@ -6863,7 +6957,7 @@ export default function App() {
           </div>
         </div>
 
-        {total > 0 && (
+        {total > 0 && (<>
         <div className="flex items-center gap-3 mb-4 py-3 flex-wrap" style={{ borderBottom: "1px solid rgba(120,160,180,0.08)" }}>
           <span className="text-3xl font-medium tabular-nums" style={{ color: "#00ff9c", letterSpacing: "-1px" }}>{total}</span>
           <span className="text-[10px] uppercase" style={{ color: "#5d7382", letterSpacing: "1.5px" }}>indicators</span>
@@ -6891,6 +6985,27 @@ export default function App() {
               }}>
               <ShieldOff size={15} /> {defangAll ? "Defanged" : "Defang"}
             </button>
+            <button onClick={() => { setShowAddArticle((v) => !v); setShowAddCustom(false); }}
+              title="Fetch another article and merge its IOCs into these results, without losing what's already here"
+              className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold"
+              style={{
+                color: showAddArticle ? "#04111a" : "#d99a4e",
+                backgroundColor: showAddArticle ? "#d99a4e" : "rgba(217,154,78,0.14)",
+                border: `1px solid rgba(217,154,78,${showAddArticle ? "1" : "0.55"})`,
+              }}>
+              <Globe size={15} /> Add Article
+            </button>
+            <button onClick={() => { setShowAddCustom((v) => !v); setShowAddArticle(false); }}
+              title="Paste additional IOCs and merge them into these results"
+              className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold"
+              style={{
+                color: showAddCustom ? "#04111a" : "#7c9cff",
+                backgroundColor: showAddCustom ? "#7c9cff" : "rgba(124,156,255,0.14)",
+                border: `1px solid rgba(124,156,255,${showAddCustom ? "1" : "0.55"})`,
+              }}>
+              <Wand2 size={15} /> Add IOCs
+            </button>
+            <div className="shrink-0" style={{ width: "1px", height: "28px", background: "rgba(120,160,180,0.15)" }}></div>
             <GButton onClick={exportAllCSV} disabled={!total} color="#00ff9c" icon={<Download size={15} />}>CSV</GButton>
             <GButton onClick={exportAllXLSX} disabled={!total} color="#00e5ff" icon={<Download size={15} />}>XLSX</GButton>
             <button onClick={() => setReportOpen(true)} disabled={!total}
@@ -6908,7 +7023,59 @@ export default function App() {
             </button>
           </div>
         </div>
+
+        {articleSources.length > 1 && (
+          <div className="flex items-center gap-1.5 flex-wrap mb-3 -mt-2 text-[10px]" style={{ color: "#5d7382" }}>
+            <span className="uppercase" style={{ letterSpacing: "1px" }}>Sources:</span>
+            {articleSources.map((s, i) => (
+              <span key={i} className="rounded-full px-2 py-0.5" title={s.url}
+                style={{ color: i === 0 ? "#d99a4e" : "#7c9cff", backgroundColor: i === 0 ? "rgba(217,154,78,0.10)" : "rgba(124,156,255,0.10)", border: `1px solid ${i === 0 ? "rgba(217,154,78,0.3)" : "rgba(124,156,255,0.3)"}` }}>
+                {s.label}{i === 0 ? " (AI summary source)" : ""}
+              </span>
+            ))}
+          </div>
         )}
+
+        {showAddArticle && (
+          <div className="rounded-xl p-4 mb-4 flex flex-col gap-2" style={{ background: "rgba(217,154,78,0.06)", border: "1px solid rgba(217,154,78,0.3)" }}>
+            <div className="text-xs font-bold flex items-center gap-1.5" style={{ color: "#d99a4e" }}><Globe size={14} /> Add Another Article</div>
+            <div className="text-[11px]" style={{ color: "#8aa0ad" }}>Fetches and merges a second article's IOCs into the current results. The AI summary keeps referring to {articleSources[0]?.label || "Article 1"}.</div>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input
+                value={addArticleUrl}
+                onChange={(e) => setAddArticleUrl(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && addArticleUrl && !addArticleLoading && runFetch(addArticleUrl, { merge: true })}
+                placeholder="https://another-threat-report.example/article"
+                className="flex-1 rounded-lg px-3 py-2.5 text-sm outline-none"
+                style={{ backgroundColor: "rgba(0,0,0,0.45)", border: "1px solid rgba(120,160,180,0.22)", color: "#dff" }}
+              />
+              <GButton onClick={() => runFetch(addArticleUrl, { merge: true })} disabled={!addArticleUrl || addArticleLoading} color="#d99a4e" solid
+                icon={addArticleLoading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}>
+                {addArticleLoading ? "Fetching…" : "Fetch & Merge"}
+              </GButton>
+            </div>
+          </div>
+        )}
+
+        {showAddCustom && (
+          <div className="rounded-xl p-4 mb-4 flex flex-col gap-2" style={{ background: "rgba(124,156,255,0.06)", border: "1px solid rgba(124,156,255,0.3)" }}>
+            <div className="text-xs font-bold flex items-center gap-1.5" style={{ color: "#7c9cff" }}><Wand2 size={14} /> Add Custom IOCs</div>
+            <div className="text-[11px]" style={{ color: "#8aa0ad" }}>Paste any text — same engine as Paste IOCs — and merge what it finds into the current results instead of replacing them.</div>
+            <textarea
+              value={addCustomText}
+              onChange={(e) => setAddCustomText(e.target.value)}
+              placeholder="Paste extra IOCs — IPs, domains, hashes, URLs, defanged or not…"
+              rows={4}
+              className="w-full rounded-lg px-3 py-2.5 text-sm outline-none resize-y"
+              style={{ backgroundColor: "rgba(0,0,0,0.45)", border: "1px solid rgba(120,160,180,0.22)", color: "#dff" }}
+            />
+            <div className="flex items-center gap-2">
+              <GButton onClick={addCustomIocs} disabled={!addCustomText.trim()} color="#7c9cff" solid icon={<Wand2 size={16} />}>Add to Results</GButton>
+              {addCustomText && <GButton onClick={() => setAddCustomText("")} color="#94a3b8" icon={<Trash2 size={15} />}>Clear</GButton>}
+            </div>
+          </div>
+        )}
+        </>)}
 
         <div className="rounded-xl p-4 mb-5" style={panel}>
           <div className="flex flex-wrap mb-3" style={{ borderBottom: "1px solid rgba(217,154,78,0.16)" }}>
@@ -7630,6 +7797,21 @@ export default function App() {
                               <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle"
                                 style={{ color: "#22d3ee", backgroundColor: "rgba(34,211,238,0.12)", border: "1px solid rgba(34,211,238,0.3)" }}>
                                 Pivot: {originData[cat][arr[i]].slice(6)}
+                              </span>
+                            )}
+                            {/* Source provenance — only shown once more than one source has been
+                                merged in (Add Another Article / Add Custom IOCs); a single-source
+                                session has nothing ambiguous to label. */}
+                            {articleSources.length > 1 && originData?.[cat]?.[arr[i]]?.startsWith?.("article:") && (
+                              <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle" title="Which merged-in article this indicator came from"
+                                style={{ color: "#7c9cff", backgroundColor: "rgba(124,156,255,0.12)", border: "1px solid rgba(124,156,255,0.3)" }}>
+                                📰 {originData[cat][arr[i]].slice(8)}
+                              </span>
+                            )}
+                            {originData?.[cat]?.[arr[i]] === "custom" && (
+                              <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle" title="Manually added via Add Custom IOCs"
+                                style={{ color: "#a3e635", backgroundColor: "rgba(163,230,53,0.12)", border: "1px solid rgba(163,230,53,0.3)" }}>
+                                ✍️ Custom
                               </span>
                             )}
                             {enr?.data?.domainReg?.state === "deleted" && (
