@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v132";
+const APP_VERSION = "v133";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -3004,7 +3004,7 @@ export default function App() {
             // VT had a record for this hash (vAttr exists) but nothing notable
             // came back — say so explicitly rather than showing nothing, so
             // "checked, unremarkable" isn't confused with "never checked".
-            vt.noNotableData = !(vt.threatLabel || vt.capabilities.length || vt.sigmaHits || vt.yaraHits.length || vt.signatureVerified || vt.executionParents || vt.contactedDomains || vt.contactedIPs || vt.detectionStats.malicious || vt.detectionStats.suspicious);
+            vt.noNotableData = !(vt.threatLabel || vt.capabilities.length || vt.sigmaHits || vt.yaraHits.length || vt.signatureVerified || vt.executionParents || vt.contactedDomains || vt.contactedIPs || vt.detectionStats.malicious || vt.detectionStats.suspicious || vt.detectionStats.harmless);
             results.virustotal = vt;
           }
         } catch (e) { console.warn("Enrich VirusTotal failed:", e.message); }
@@ -3954,7 +3954,7 @@ export default function App() {
               if (Array.isArray(commFiles) && commFiles.length) vt.communicatingFiles = commFiles.map((f) => f.id).filter(Boolean).slice(0, 20);
               if (Array.isArray(dlFiles) && dlFiles.length) vt.downloadedFiles = dlFiles.map((f) => f.id).filter(Boolean).slice(0, 20);
               if (Array.isArray(subs) && subs.length) vt.subdomains = subs.map((s) => s.id).filter(Boolean).slice(0, 20);
-              vt.noNotableData = !(vt.detectionStats.malicious || vt.detectionStats.suspicious || vt.categories.length || vt.communicatingFiles || vt.downloadedFiles);
+              vt.noNotableData = !(vt.detectionStats.malicious || vt.detectionStats.suspicious || vt.detectionStats.harmless || vt.categories.length || vt.communicatingFiles || vt.downloadedFiles);
               results.virustotal = vt;
             }
           } catch (e) { console.warn("Enrich VirusTotal (domain) failed:", e.message); }
@@ -3991,7 +3991,7 @@ export default function App() {
               };
               const commFiles = vj?.data?.relationships?.communicating_files?.data;
               if (Array.isArray(commFiles) && commFiles.length) vt.communicatingFiles = commFiles.map((f) => f.id).filter(Boolean).slice(0, 20);
-              vt.noNotableData = !(vt.detectionStats.malicious || vt.detectionStats.suspicious || vt.tags.length || vt.communicatingFiles);
+              vt.noNotableData = !(vt.detectionStats.malicious || vt.detectionStats.suspicious || vt.detectionStats.harmless || vt.tags.length || vt.communicatingFiles);
               results.virustotal = vt;
             }
           } catch (e) { console.warn("Enrich VirusTotal (IP) failed:", e.message); }
@@ -4091,6 +4091,14 @@ export default function App() {
       else if (results.urlscan?.brands && results.urlscan.brands.length) verdict = "Suspicious";
 
       // ── TIER 2 — confirmed-clean / whitelist ─────────────────────────
+      // VirusTotal explicit clean consensus — several engines actively voting
+      // harmless (not just "undetected"/unrated, which just means nobody has
+      // an opinion) is real evidence of cleanliness. Checked first in this
+      // tier — when VT was actually called, its verdict is weighted above
+      // the other whitelist signals below it, per explicit design intent.
+      else if ((results.virustotal?.detectionStats?.harmless || 0) >= 5
+        && (results.virustotal?.detectionStats?.malicious || 0) === 0
+        && (results.virustotal?.detectionStats?.suspicious || 0) === 0) verdict = "Whitelisted";
       else if (results.otx?.whitelisted === true) verdict = "Whitelisted";
       // Kaspersky green: for a HASH it means the file is in Kaspersky's known-clean
       // DB (reliable — file hashes are immutable). For a DOMAIN/URL/IP, green only
@@ -8077,138 +8085,6 @@ export default function App() {
                               </>
                             ))}
 
-                            {/* ── VIRUSTOTAL INTEL (pivot/context only — never feeds verdict) ── */}
-                            {!isCondensed && hasVT && cat === "DOMAIN" && secRow("VT Intel", (
-                              <>
-                                  {d.virustotal.noNotableData && (
-                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#8aa0ad", backgroundColor: "rgba(138,160,173,0.08)", border: "1px solid rgba(138,160,173,0.25)" }}
-                                      title="VirusTotal has a record for this domain but returned no detections, categorization, or file-relationship pivots">
-                                      ⚪ VirusTotal · Unknown
-                                    </span>
-                                  )}
-                                  {(d.virustotal.detectionStats.malicious > 0 || d.virustotal.detectionStats.suspicious > 0) && (
-                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.10)", border: "1px solid rgba(255,77,109,0.3)" }}
-                                      title="VirusTotal multi-vendor detection ratio — feeds the verdict (5+ malicious = Malicious, 1+ malicious or 3+ suspicious = Suspicious)">
-                                      VT · {d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious}/{d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious + d.virustotal.detectionStats.harmless + d.virustotal.detectionStats.undetected} engines flagged
-                                    </span>
-                                  )}
-                                  {d.virustotal.categories.length > 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
-                                      📁 {d.virustotal.categories.join(", ")}
-                                    </span>
-                                  )}
-                                  {d.virustotal.popularityRank && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#00ff9c", backgroundColor: "rgba(0,255,156,0.06)", border: "1px solid rgba(0,255,156,0.25)" }}
-                                      title="Lower rank = more popular — a counter-signal against this being a throwaway malicious domain">
-                                      📈 {d.virustotal.popularityRank.source} rank #{d.virustotal.popularityRank.rank.toLocaleString()}
-                                    </span>
-                                  )}
-                                  {d.virustotal.reputation != null && d.virustotal.reputation !== 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{
-                                      color: d.virustotal.reputation < 0 ? "#fbbf24" : "#8aa0ad",
-                                      backgroundColor: d.virustotal.reputation < 0 ? "rgba(251,191,36,0.10)" : "rgba(148,163,184,0.06)",
-                                      border: `1px solid ${d.virustotal.reputation < 0 ? "rgba(251,191,36,0.35)" : "rgba(148,163,184,0.2)"}`,
-                                    }} title="VirusTotal community reputation score — negative means the community has flagged it more than voted for it">
-                                      Reputation: {d.virustotal.reputation > 0 ? "+" : ""}{d.virustotal.reputation}
-                                    </span>
-                                  )}
-                                  {(d.virustotal.communicatingFiles?.length > 0 || d.virustotal.downloadedFiles?.length > 0) && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#c084fc", backgroundColor: "rgba(192,132,252,0.10)", border: "1px solid rgba(192,132,252,0.3)" }}
-                                      title="Pivotable in ThreatGraph">
-                                      {d.virustotal.downloadedFiles?.length > 0 ? `⬇️ ${d.virustotal.downloadedFiles.length} downloaded file${d.virustotal.downloadedFiles.length !== 1 ? "s" : ""}` : ""}
-                                      {d.virustotal.downloadedFiles?.length > 0 && d.virustotal.communicatingFiles?.length > 0 ? " · " : ""}
-                                      {d.virustotal.communicatingFiles?.length > 0 ? `📡 ${d.virustotal.communicatingFiles.length} communicating file${d.virustotal.communicatingFiles.length !== 1 ? "s" : ""}` : ""}
-                                    </span>
-                                  )}
-                                  {d.virustotal.subdomains?.length > 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#7c9cff", backgroundColor: "rgba(124,156,255,0.08)", border: "1px solid rgba(124,156,255,0.3)" }}>
-                                      🌐 {d.virustotal.subdomains.length} subdomain{d.virustotal.subdomains.length !== 1 ? "s" : ""}
-                                    </span>
-                                  )}
-                              </>
-                            ))}
-                            {!isCondensed && hasVT && ["IPV4","IPV6"].includes(cat) && secRow("VT Intel", (
-                              <>
-                                  {d.virustotal.noNotableData && (
-                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#8aa0ad", backgroundColor: "rgba(138,160,173,0.08)", border: "1px solid rgba(138,160,173,0.25)" }}
-                                      title="VirusTotal has a record for this IP but returned no detections, tags, or communicating-file pivots">
-                                      ⚪ VirusTotal · Unknown
-                                    </span>
-                                  )}
-                                  {(d.virustotal.detectionStats.malicious > 0 || d.virustotal.detectionStats.suspicious > 0) && (
-                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.10)", border: "1px solid rgba(255,77,109,0.3)" }}
-                                      title="VirusTotal multi-vendor detection ratio — feeds the verdict (5+ malicious = Malicious, 1+ malicious or 3+ suspicious = Suspicious)">
-                                      VT · {d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious}/{d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious + d.virustotal.detectionStats.harmless + d.virustotal.detectionStats.undetected} engines flagged
-                                    </span>
-                                  )}
-                                  {d.virustotal.tags?.length > 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
-                                      🏷️ {d.virustotal.tags.join(", ")}
-                                    </span>
-                                  )}
-                                  {d.virustotal.reputation != null && d.virustotal.reputation !== 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{
-                                      color: d.virustotal.reputation < 0 ? "#fbbf24" : "#8aa0ad",
-                                      backgroundColor: d.virustotal.reputation < 0 ? "rgba(251,191,36,0.10)" : "rgba(148,163,184,0.06)",
-                                      border: `1px solid ${d.virustotal.reputation < 0 ? "rgba(251,191,36,0.35)" : "rgba(148,163,184,0.2)"}`,
-                                    }} title="VirusTotal community reputation score — negative means the community has flagged it more than voted for it">
-                                      Reputation: {d.virustotal.reputation > 0 ? "+" : ""}{d.virustotal.reputation}
-                                    </span>
-                                  )}
-                                  {d.virustotal.communicatingFiles?.length > 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#c084fc", backgroundColor: "rgba(192,132,252,0.10)", border: "1px solid rgba(192,132,252,0.3)" }}
-                                      title="Pivotable in ThreatGraph">
-                                      📡 {d.virustotal.communicatingFiles.length} communicating file{d.virustotal.communicatingFiles.length !== 1 ? "s" : ""}
-                                    </span>
-                                  )}
-                              </>
-                            ))}
-                            {!isCondensed && hasVT && !["DOMAIN","IPV4","IPV6"].includes(cat) && secRow("VT Intel", (
-                              <>
-                                  {d.virustotal.noNotableData && (
-                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#8aa0ad", backgroundColor: "rgba(138,160,173,0.08)", border: "1px solid rgba(138,160,173,0.25)" }}
-                                      title="VirusTotal has a record for this hash but returned no classification, capabilities, Sigma/YARA matches, or contacted infrastructure">
-                                      ⚪ VirusTotal · Unknown
-                                    </span>
-                                  )}
-                                  {(d.virustotal.detectionStats?.malicious > 0 || d.virustotal.detectionStats?.suspicious > 0) && (
-                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.10)", border: "1px solid rgba(255,77,109,0.3)" }}
-                                      title="VirusTotal multi-vendor detection ratio — feeds the verdict (5+ malicious = Malicious, 1+ malicious or 3+ suspicious = Suspicious)">
-                                      VT · {d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious}/{d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious + d.virustotal.detectionStats.harmless + d.virustotal.detectionStats.undetected} engines flagged
-                                    </span>
-                                  )}
-                                  {(d.virustotal.threatLabel || d.virustotal.threatCategory.length > 0) && (
-                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#c084fc", backgroundColor: "rgba(192,132,252,0.10)", border: "1px solid rgba(192,132,252,0.3)" }}
-                                      title="VirusTotal community threat classification — context only, does not drive the verdict">
-                                      VT · {d.virustotal.threatLabel || d.virustotal.threatCategory.join(", ")}
-                                      {d.virustotal.timesSubmitted != null ? ` · Submitted ${d.virustotal.timesSubmitted}×` : ""}
-                                      {d.virustotal.firstSubmission ? ` · First seen ${d.virustotal.firstSubmission}` : ""}
-                                    </span>
-                                  )}
-                                  {d.virustotal.capabilities.length > 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
-                                      ⚙️ {d.virustotal.capabilities.join(", ")}
-                                    </span>
-                                  )}
-                                  {(d.virustotal.sigmaHits > 0 || d.virustotal.yaraHits.length > 0) && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#7c9cff", backgroundColor: "rgba(124,156,255,0.08)", border: "1px solid rgba(124,156,255,0.3)" }}>
-                                      {d.virustotal.sigmaHits > 0 ? `Σ ${d.virustotal.sigmaHits} Sigma match${d.virustotal.sigmaHits !== 1 ? "es" : ""}` : ""}
-                                      {d.virustotal.sigmaHits > 0 && d.virustotal.yaraHits.length > 0 ? " · " : ""}
-                                      {d.virustotal.yaraHits.length > 0 ? `YARA: ${d.virustotal.yaraHits.join(", ")}` : ""}
-                                    </span>
-                                  )}
-                                  {d.virustotal.signatureVerified && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{
-                                      color: d.virustotal.signatureVerified === "Signed" ? "#8aa0ad" : "#fbbf24",
-                                      backgroundColor: d.virustotal.signatureVerified === "Signed" ? "rgba(148,163,184,0.06)" : "rgba(251,191,36,0.10)",
-                                      border: `1px solid ${d.virustotal.signatureVerified === "Signed" ? "rgba(148,163,184,0.2)" : "rgba(251,191,36,0.35)"}`,
-                                    }} title="VirusTotal Sigcheck/codesign verification — informational only">
-                                      ✍️ {d.virustotal.signatureVerified}{d.virustotal.signatureSigners ? ` · ${d.virustotal.signatureSigners}` : ""}
-                                    </span>
-                                  )}
-                              </>
-                            ))}
-
                             {/* ── ROCKY RACCOON (process behavioral intel — FILE_NAME only, context only) ── */}
                             {!isCondensed && hasRockyRaccoon && secRow("Process Intel", (
                               <>
@@ -8243,9 +8119,96 @@ export default function App() {
                               </>
                             ))}
 
-                            {/* ── REPUTATION ── */}
-                            {!isCondensed && (hasOtx || hasAbuse || hasValidin || (hasKaspersky && !isHash) || d._verdict === "Unknown") && secRow("Reputation", (
+                            {/* ── REPUTATION (VT Intel merged in here — VT is weighted above the
+                                other engines below it when it was actually called, see the
+                                verdict cascade's Tier 2 clean-consensus check) ── */}
+                            {!isCondensed && (hasVT || hasOtx || hasAbuse || hasValidin || (hasKaspersky && !isHash) || d._verdict === "Unknown") && secRow("Reputation", (
                               <>
+                                  {hasVT && d.virustotal.detectionStats?.harmless >= 5 && !d.virustotal.detectionStats?.malicious && !d.virustotal.detectionStats?.suspicious && (
+                                    <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#00ff9c", backgroundColor: "rgba(0,255,156,0.12)", border: "1px solid rgba(0,255,156,0.35)" }}
+                                      title="VirusTotal — several engines actively voted this harmless, with none flagging malicious/suspicious. Weighted above the other signals below.">
+                                      🟢 VirusTotal · Clean ({d.virustotal.detectionStats.harmless}/{d.virustotal.detectionStats.harmless + d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious + d.virustotal.detectionStats.undetected})
+                                    </span>
+                                  )}
+                                  {hasVT && d.virustotal.noNotableData && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#8aa0ad", backgroundColor: "rgba(138,160,173,0.08)", border: "1px solid rgba(138,160,173,0.25)" }}
+                                      title="VirusTotal has a record for this indicator but returned no detections, harmless votes, categorization, or pivots">
+                                      ⚪ VirusTotal · Unknown
+                                    </span>
+                                  )}
+                                  {hasVT && (d.virustotal.detectionStats?.malicious > 0 || d.virustotal.detectionStats?.suspicious > 0) && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.10)", border: "1px solid rgba(255,77,109,0.3)" }}
+                                      title="VirusTotal multi-vendor detection ratio — feeds the verdict (5+ malicious = Malicious, 1+ malicious or 3+ suspicious = Suspicious)">
+                                      VT · {d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious}/{d.virustotal.detectionStats.malicious + d.virustotal.detectionStats.suspicious + d.virustotal.detectionStats.harmless + d.virustotal.detectionStats.undetected} engines flagged
+                                    </span>
+                                  )}
+                                  {hasVT && cat === "DOMAIN" && d.virustotal.categories?.length > 0 && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
+                                      📁 {d.virustotal.categories.join(", ")}
+                                    </span>
+                                  )}
+                                  {hasVT && cat === "DOMAIN" && d.virustotal.popularityRank && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#00ff9c", backgroundColor: "rgba(0,255,156,0.06)", border: "1px solid rgba(0,255,156,0.25)" }}
+                                      title="Lower rank = more popular — a counter-signal against this being a throwaway malicious domain">
+                                      📈 {d.virustotal.popularityRank.source} rank #{d.virustotal.popularityRank.rank.toLocaleString()}
+                                    </span>
+                                  )}
+                                  {hasVT && cat === "DOMAIN" && d.virustotal.subdomains?.length > 0 && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#7c9cff", backgroundColor: "rgba(124,156,255,0.08)", border: "1px solid rgba(124,156,255,0.3)" }}>
+                                      🌐 {d.virustotal.subdomains.length} subdomain{d.virustotal.subdomains.length !== 1 ? "s" : ""}
+                                    </span>
+                                  )}
+                                  {hasVT && ["IPV4","IPV6"].includes(cat) && d.virustotal.tags?.length > 0 && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
+                                      🏷️ {d.virustotal.tags.join(", ")}
+                                    </span>
+                                  )}
+                                  {hasVT && !["DOMAIN","IPV4","IPV6"].includes(cat) && (d.virustotal.threatLabel || d.virustotal.threatCategory?.length > 0) && (
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#c084fc", backgroundColor: "rgba(192,132,252,0.10)", border: "1px solid rgba(192,132,252,0.3)" }}
+                                      title="VirusTotal community threat classification — context only, does not drive the verdict">
+                                      VT · {d.virustotal.threatLabel || d.virustotal.threatCategory.join(", ")}
+                                      {d.virustotal.timesSubmitted != null ? ` · Submitted ${d.virustotal.timesSubmitted}×` : ""}
+                                      {d.virustotal.firstSubmission ? ` · First seen ${d.virustotal.firstSubmission}` : ""}
+                                    </span>
+                                  )}
+                                  {hasVT && !["DOMAIN","IPV4","IPV6"].includes(cat) && d.virustotal.capabilities?.length > 0 && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
+                                      ⚙️ {d.virustotal.capabilities.join(", ")}
+                                    </span>
+                                  )}
+                                  {hasVT && !["DOMAIN","IPV4","IPV6"].includes(cat) && (d.virustotal.sigmaHits > 0 || d.virustotal.yaraHits?.length > 0) && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#7c9cff", backgroundColor: "rgba(124,156,255,0.08)", border: "1px solid rgba(124,156,255,0.3)" }}>
+                                      {d.virustotal.sigmaHits > 0 ? `Σ ${d.virustotal.sigmaHits} Sigma match${d.virustotal.sigmaHits !== 1 ? "es" : ""}` : ""}
+                                      {d.virustotal.sigmaHits > 0 && d.virustotal.yaraHits?.length > 0 ? " · " : ""}
+                                      {d.virustotal.yaraHits?.length > 0 ? `YARA: ${d.virustotal.yaraHits.join(", ")}` : ""}
+                                    </span>
+                                  )}
+                                  {hasVT && !["DOMAIN","IPV4","IPV6"].includes(cat) && d.virustotal.signatureVerified && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{
+                                      color: d.virustotal.signatureVerified === "Signed" ? "#8aa0ad" : "#fbbf24",
+                                      backgroundColor: d.virustotal.signatureVerified === "Signed" ? "rgba(148,163,184,0.06)" : "rgba(251,191,36,0.10)",
+                                      border: `1px solid ${d.virustotal.signatureVerified === "Signed" ? "rgba(148,163,184,0.2)" : "rgba(251,191,36,0.35)"}`,
+                                    }} title="VirusTotal Sigcheck/codesign verification — informational only">
+                                      ✍️ {d.virustotal.signatureVerified}{d.virustotal.signatureSigners ? ` · ${d.virustotal.signatureSigners}` : ""}
+                                    </span>
+                                  )}
+                                  {(hasVT ? d.virustotal.communicatingFiles?.length > 0 || d.virustotal.downloadedFiles?.length > 0 : false) && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#c084fc", backgroundColor: "rgba(192,132,252,0.10)", border: "1px solid rgba(192,132,252,0.3)" }}
+                                      title="Pivotable in ThreatGraph">
+                                      {d.virustotal.downloadedFiles?.length > 0 ? `⬇️ ${d.virustotal.downloadedFiles.length} downloaded file${d.virustotal.downloadedFiles.length !== 1 ? "s" : ""}` : ""}
+                                      {d.virustotal.downloadedFiles?.length > 0 && d.virustotal.communicatingFiles?.length > 0 ? " · " : ""}
+                                      {d.virustotal.communicatingFiles?.length > 0 ? `📡 ${d.virustotal.communicatingFiles.length} communicating file${d.virustotal.communicatingFiles.length !== 1 ? "s" : ""}` : ""}
+                                    </span>
+                                  )}
+                                  {d.virustotal?.reputation != null && d.virustotal.reputation !== 0 && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{
+                                      color: d.virustotal.reputation < 0 ? "#fbbf24" : "#8aa0ad",
+                                      backgroundColor: d.virustotal.reputation < 0 ? "rgba(251,191,36,0.10)" : "rgba(148,163,184,0.06)",
+                                      border: `1px solid ${d.virustotal.reputation < 0 ? "rgba(251,191,36,0.35)" : "rgba(148,163,184,0.2)"}`,
+                                    }} title="VirusTotal community reputation score — negative means the community has flagged it more than voted for it">
+                                      Reputation: {d.virustotal.reputation > 0 ? "+" : ""}{d.virustotal.reputation}
+                                    </span>
+                                  )}
                                   {d._verdict === "Unknown" && d.domainReg?.state !== "deleted" && (
                                     <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#5d7382", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.2)" }}>
                                       {d.virustotal ? "⚪ Unknown" : "⚪ Unknown - Check VirusTotal"}
