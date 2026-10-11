@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v139";
+const APP_VERSION = "v140";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -6316,60 +6316,33 @@ export default function App() {
   // Radial SVG rendering of shared-pivot (bridge) nodes.
   // Only shows nodes where 2+ primary IOCs connect through them.
   const buildSharedPivotSVG = (data) => {
-    // Reconstruct primary IOCs and derived-node connections
-    const primaries = new Map(); // norm(id) → { cat, val, id }
-    data.entries.forEach(([cat, arr]) => {
-      arr.forEach(v => primaries.set(String(v).toLowerCase(), { cat, val: v, id: v }));
+    // Same model as the on-screen ThreatGraph (every pivot source — passive DNS,
+    // urlscan, VirusTotal, Hybrid Analysis, Tri.age, … — not a hand-copied subset).
+    const iocObj = {};
+    data.entries.forEach(([cat, arr]) => { iocObj[cat] = arr; });
+    const gm = buildGraphModel(iocObj, data.enrichCache);
+    const gById = new Map(gm.nodes.map(n => [n.id, n]));
+    const nbrs = new Map(); // nodeId -> Set(primary node ids it connects to)
+    const link = (x, y) => { if (!nbrs.has(x)) nbrs.set(x, new Set()); nbrs.get(x).add(y); };
+    gm.edges.forEach(e => {
+      if (e.kind === "asn") return; // shared-ASN grouping isn't a pivot
+      const A = gById.get(e.a), B = gById.get(e.b);
+      if (!A || !B) return;
+      if (!A.derived) link(e.b, e.a);
+      if (!B.derived) link(e.a, e.b);
     });
-    // Bridge candidates: derived nodes reached by ≥2 primaries
-    const bridgeCount = new Map(); // pivotVal → Set(primaryIds)
-    const pivotCat = new Map();    // pivotVal → cat
-    data.entries.forEach(([cat, arr]) => {
-      arr.forEach(v => {
-        const d = data.enrichCache[`${cat}::${v}`]?.data;
-        if (!d) return;
-        const trackPivot = (pv, pc) => {
-          if (!pv || primaries.has(String(pv).toLowerCase())) {
-            // If pv is itself a primary, this is a bridge between two primaries too
-            const key = String(pv).toLowerCase();
-            if (!bridgeCount.has(key)) bridgeCount.set(key, new Set());
-            bridgeCount.get(key).add(String(v).toLowerCase());
-            if (!pivotCat.has(key)) pivotCat.set(key, pc);
-            return;
-          }
-          const key = String(pv).toLowerCase();
-          if (!bridgeCount.has(key)) bridgeCount.set(key, new Set());
-          bridgeCount.get(key).add(String(v).toLowerCase());
-          if (!pivotCat.has(key)) pivotCat.set(key, pc);
-        };
-        if (d.urlscan?.servingIP) trackPivot(d.urlscan.servingIP, ipCat(d.urlscan.servingIP));
-        (d.urlscan?.contactedIPs || []).forEach(ip => trackPivot(ip, ipCat(ip)));
-        (d.urlscan?.contactedDomains || []).forEach(dm => trackPivot(dm, "DOMAIN"));
-        (d.urlscan?.files || []).forEach(f => { if (f.sha256) trackPivot(f.sha256, "SHA256"); });
-        (d.hybridAnalysis?.hosts || []).forEach(h => trackPivot(h, ipCat(h)));
-        (d.hybridAnalysis?.domains || []).forEach(dm => trackPivot(dm, "DOMAIN"));
-        (d.hybridAnalysis?.compromised || []).forEach(h => {
-          const isIP = isIPv4(h) || h.includes(":");
-          trackPivot(h, isIP ? ipCat(h) : "DOMAIN");
-        });
-        (d.hybridAnalysis?.submitContext || []).forEach(sc => trackPivot(sc, "URL"));
-        (d.hybridAnalysis?.relatedSHA256s || []).forEach(sh => trackPivot(sh, "SHA256"));
-        (d.triage?.c2Urls || []).forEach(c2 => {
-          if (typeof c2 !== "string") return;
-          if (c2.startsWith("domain:")) trackPivot(c2.slice(7), "DOMAIN");
-          else if (c2.startsWith("ip:")) trackPivot(c2.slice(3), ipCat(c2.slice(3)));
-          else trackPivot(c2, "URL");
-        });
-      });
-    });
-    // Keep only true bridges: reached by ≥2 distinct primaries
-    const bridges = [...bridgeCount.entries()]
-      .filter(([, srcSet]) => srcSet.size >= 2)
-      .map(([pivotVal, srcSet]) => ({
-        pivotVal,
-        cat: pivotCat.get(pivotVal),
-        sources: [...srcSet].map(id => primaries.get(id)).filter(Boolean),
-      }));
+    const bridges = gm.nodes
+      .filter(n => n.bridge)
+      .map(n => ({
+        key: n.id,
+        pivotVal: (n.derived && /^[a-f0-9]{32,}$/i.test(n.id)) ? n.id : String(n.label || n.id),
+        cat: n.cat,
+        sources: [...(nbrs.get(n.id) || [])].map(id => gById.get(id)).filter(Boolean).map(p => ({ cat: p.cat, val: p.label, id: p.id })),
+      }))
+      .filter(b => b.sources.length >= 2);
+    // Primary IOCs by lowercased value — the layout code below looks nodes up this way.
+    const primaries = new Map();
+    gm.nodes.filter(n => !n.derived).forEach(n => primaries.set(String(n.label || n.id).toLowerCase(), { cat: n.cat, val: n.label || n.id, id: n.label || n.id }));
 
     if (bridges.length === 0) return null;
 
@@ -6388,7 +6361,7 @@ export default function App() {
     const bridgePos = new Map();
     bridges.forEach((b, i) => {
       const angle = (i / nBridges) * 2 * Math.PI - Math.PI / 2;
-      bridgePos.set(b.pivotVal, { x: cx + Math.cos(angle) * bridgeRingR, y: cy + Math.sin(angle) * bridgeRingR, angle });
+      bridgePos.set(b.key, { x: cx + Math.cos(angle) * bridgeRingR, y: cy + Math.sin(angle) * bridgeRingR, angle });
     });
     const primaryPos = new Map();
     primariesArr.forEach((p, i) => {
@@ -6399,7 +6372,7 @@ export default function App() {
     // Edges
     let edges = "";
     bridges.forEach(b => {
-      const bp = bridgePos.get(b.pivotVal);
+      const bp = bridgePos.get(b.key);
       b.sources.forEach(s => {
         const pp = primaryPos.get(String(s.val).toLowerCase());
         if (!pp) return;
@@ -6417,7 +6390,7 @@ export default function App() {
     // Bridge nodes (gold, larger)
     let bridgeNodes = "";
     bridges.forEach(b => {
-      const bp = bridgePos.get(b.pivotVal);
+      const bp = bridgePos.get(b.key);
       const labelX = bp.x + Math.cos(bp.angle) * (bridgeNodeR + labelOffset);
       const labelY = bp.y + Math.sin(bp.angle) * (bridgeNodeR + labelOffset);
       const anchor = Math.cos(bp.angle) > 0.1 ? "start" : Math.cos(bp.angle) < -0.1 ? "end" : "middle";
@@ -10553,6 +10526,341 @@ const isSharedInfraAsn = (asnRaw, orgRaw) => {
   return false;
 };
 
+// Graph model: primary IOC nodes + every derived pivot node/edge the enrichment
+// reveals, with bridge detection (a node reached by 2+ primary IOCs). Pure function —
+// used by the on-screen ThreatGraph AND the report's Shared-Pivot graph so the two
+// can never disagree about what is shared.
+const buildGraphModel = (iocData, enrichCache) => {
+  if (!iocData) return { nodes: [], edges: [], stats: { nodes: 0, edges: 0, derived: 0 } };
+  const nodes = new Map(); // id -> node
+  const edges = [];
+  const norm = (v) => String(v).toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+
+  const verdictOf = (cat, val) => enrichCache[`${cat}::${val}`]?.data?._verdict || null;
+  const addNode = (id, label, cat, derived, verdict) => {
+    const key = norm(id);
+    if (nodes.has(key)) {
+      // Upgrade a derived node to a real one if it also appears as an IOC
+      if (!derived) { const n = nodes.get(key); n.derived = false; if (verdict) n.verdict = verdict; }
+      return nodes.get(key);
+    }
+    const n = {
+      id: key, label: label || id, cat, derived: !!derived,
+      verdict: verdict || null,
+      x: (Math.random() - 0.5) * 200, y: (Math.random() - 0.5) * 200,
+      vx: 0, vy: 0,
+      r: derived ? 7 : 11,
+    };
+    nodes.set(key, n);
+    return n;
+  };
+  const addEdge = (aId, bId, kind, color) => {
+    const a = norm(aId), b = norm(bId);
+    if (a === b || !nodes.has(a) || !nodes.has(b)) return;
+    edges.push({ a, b, kind, color: color || "rgba(120,160,180,0.35)" });
+  };
+
+  // Categories that don't represent network/file infrastructure and add no
+  // value as graph nodes (MITRE techniques, CVEs, YARA rules, etc.).
+  const GRAPH_SKIP_CATS = new Set(["MITRE_ATTACK", "CVE", "YARA"]);
+
+  // 1. Primary IOC nodes
+  Object.entries(iocData).forEach(([cat, arr]) => {
+    if (!Array.isArray(arr)) return;
+    if (GRAPH_SKIP_CATS.has(cat)) return;
+    arr.forEach((val) => addNode(val, val, cat, false, verdictOf(cat, val)));
+  });
+
+  // 2. Derived nodes + edges from enrichment
+  Object.entries(iocData).forEach(([cat, arr]) => {
+    if (GRAPH_SKIP_CATS.has(cat)) return;
+    if (!Array.isArray(arr)) return;
+    arr.forEach((val) => {
+      const d = enrichCache[`${cat}::${val}`]?.data;
+      if (!d) return;
+      const srcId = norm(val);
+
+      // Serving IP (strong: same box)
+      if (d.urlscan?.servingIP && norm(d.urlscan.servingIP) !== srcId) {
+        const ipNode = addNode(d.urlscan.servingIP, d.urlscan.servingIP, ipCat(d.urlscan.servingIP), true, null);
+        if (d.urlscan.servingASNName) ipNode.asn = d.urlscan.servingASNName;
+        addEdge(val, d.urlscan.servingIP, "serves", "rgba(0,229,255,0.5)");
+      }
+
+      // Passive DNS — current resolutions only. Historical ones can point at
+      // infrastructure long since reassigned to an unrelated party; auto-pivoting
+      // on them risks a false bridge. Still visible for manual pivot in the card.
+      (d.otxPDNS?.records || []).forEach((r) => {
+        if (!r.current) return;
+        const target = cat === "DOMAIN" ? r.address : r.hostname;
+        if (!target) return;
+        const tcat = cat === "DOMAIN" ? ipCat(target) : "DOMAIN";
+        addNode(target, target, tcat, true, null);
+        addEdge(val, target, "resolved", "rgba(45,212,191,0.4)");
+      });
+
+      // Hosted files (strong: same payload)
+      (d.urlscan?.files || []).forEach((f) => {
+        if (f.sha256) {
+          addNode(f.sha256, f.filename ? `${f.filename}` : f.sha256.slice(0, 12) + "…", "SHA256", true, null);
+          addEdge(val, f.sha256, "hosts", "rgba(255,77,109,0.45)");
+        }
+      });
+
+      // Scanned URLs on this host
+      (d.urlscan?.scannedUrls || []).forEach((su) => {
+        const u = typeof su === "string" ? su : su.url;
+        if (!u) return;
+        const un = norm(u);
+        if (un === srcId) return;
+        const ucat = un.includes("/") ? "URL" : "DOMAIN";
+        addNode(u, u, ucat, true, null);
+        addEdge(val, u, "scanned", "rgba(124,156,255,0.3)");
+      });
+
+      // Contacted IPs (urlscan result detail — infra the page talked to)
+      (d.urlscan?.contactedIPs || []).forEach((ip) => {
+        if (norm(ip) === srcId) return;
+        const n = addNode(ip, ip, ipCat(ip), true, null);
+        if (n) n.contacted = true;
+        addEdge(val, ip, "contacted", "rgba(251,146,60,0.4)");
+      });
+
+      // Contacted domains (CDN/analytics already filtered upstream)
+      (d.urlscan?.contactedDomains || []).forEach((dom) => {
+        if (norm(dom) === srcId) return;
+        const n = addNode(dom, dom, "DOMAIN", true, null);
+        if (n) n.contacted = true;
+        addEdge(val, dom, "contacted", "rgba(251,146,60,0.4)");
+      });
+
+      // Loaded-resource hashes (scripts/payloads pulled during the scan)
+      (d.urlscan?.resourceHashes || []).forEach((h) => {
+        if (!h || typeof h !== "string" || h.length < 32) return;
+        addNode(h, h.slice(0, 12) + "…", "SHA256", true, null);
+        addEdge(val, h, "loads", "rgba(255,77,109,0.35)");
+      });
+
+      // Tri.age C2 URLs — extracted from behavioral analysis of this hash.
+      // These are the command-and-control endpoints the malware phoned home to.
+      // High-value derived nodes: domain:evil.com, ip:1.2.3.4, or bare URLs.
+      (d.triage?.c2Urls || []).forEach((c2) => {
+        if (!c2) return;
+        const raw = String(c2);
+        if (raw.startsWith("domain:")) {
+          const dom = raw.slice(7).toLowerCase();
+          if (!dom) return;
+          const n = addNode(dom, dom, "DOMAIN", true, "Malicious");
+          if (n) n.c2 = true;
+          addEdge(val, dom, "c2", "rgba(255,77,109,0.6)");
+        } else if (raw.startsWith("ip:")) {
+          const ip = raw.slice(3);
+          if (!ip) return;
+          const n = addNode(ip, ip, ipCat(ip), true, "Malicious");
+          if (n) n.c2 = true;
+          addEdge(val, ip, "c2", "rgba(255,77,109,0.6)");
+        } else {
+          // Bare URL
+          try {
+            const u = new URL(raw.includes("://") ? raw : "https://" + raw);
+            const n = addNode(raw, u.hostname, "URL", true, "Malicious");
+            if (n) n.c2 = true;
+            addEdge(val, raw, "c2", "rgba(255,77,109,0.6)");
+          } catch { /* skip malformed */ }
+        }
+      });
+
+      // Hybrid Analysis behavioral pivots — sandbox-observed infrastructure.
+      // submit_context is high-value: the URL the sample was downloaded from
+      // (creates the download-chain: URL → SHA256, and if the URL's IP is
+      // already an IOC, the shared-pivot logic auto-bridges IP → URL → SHA256).
+      // hosts / domains / compromised_hosts = contacted infra during detonation.
+      (d.hybridAnalysis?.submitContext || []).forEach((sc) => {
+        if (!sc || typeof sc !== "string") return;
+        try {
+          const u = new URL(sc.includes("://") ? sc : "http://" + sc);
+          const host = u.hostname;
+          // URL node (SHA256 → URL — the URL that dropped/served this sample)
+          addNode(sc, sc, "URL", true, "Malicious");
+          addEdge(val, sc, "downloaded_from", "rgba(255,77,109,0.55)");
+          // Auto-derive host node (URL → IP/DOMAIN) so it can bridge with other IOCs.
+          // Classify by whether hostname is IPv4 or a domain.
+          const isIP = isIPv4(host) || host.includes(":");
+          const hostCat = isIP ? ipCat(host) : "DOMAIN";
+          if (norm(host) !== norm(sc)) {
+            addNode(host, host, hostCat, true, null);
+            addEdge(sc, host, "hosted_on", "rgba(0,229,255,0.4)");
+          }
+        } catch { /* skip malformed */ }
+      });
+      // HA contacted hosts (IPs the sample talked to during detonation)
+      (d.hybridAnalysis?.hosts || []).forEach((ip) => {
+        if (!ip || typeof ip !== "string") return;
+        if (norm(ip) === srcId) return;
+        const n = addNode(ip, ip, ipCat(ip), true, null);
+        if (n) n.contacted = true;
+        addEdge(val, ip, "contacted", "rgba(251,146,60,0.4)");
+      });
+      // HA contacted domains (domains resolved during detonation)
+      (d.hybridAnalysis?.domains || []).forEach((dom) => {
+        if (!dom || typeof dom !== "string") return;
+        if (norm(dom) === srcId) return;
+        const n = addNode(dom, dom, "DOMAIN", true, null);
+        if (n) n.contacted = true;
+        addEdge(val, dom, "contacted", "rgba(251,146,60,0.4)");
+      });
+      // HA compromised hosts — C2/attacker-controlled infra confirmed by HA
+      (d.hybridAnalysis?.compromised || []).forEach((host) => {
+        if (!host || typeof host !== "string") return;
+        if (norm(host) === srcId) return;
+        const isIP = isIPv4(host) || host.includes(":");
+        const hcat = isIP ? ipCat(host) : "DOMAIN";
+        const n = addNode(host, host, hcat, true, "Malicious");
+        if (n) n.c2 = true;
+        addEdge(val, host, "c2", "rgba(255,77,109,0.6)");
+      });
+      // HA related SHA256s from imp_hash/ssdeep/authentihash/domain/ip pivots
+      // — samples that share code lineage or infrastructure with this IOC.
+      (d.hybridAnalysis?.relatedSHA256s || []).forEach((rh) => {
+        if (!rh || typeof rh !== "string") return;
+        if (norm(rh) === srcId) return;
+        addNode(rh, rh.slice(0, 12) + "…", "SHA256", true, null);
+        addEdge(val, rh, "related", "rgba(255,77,109,0.35)");
+      });
+      // VirusTotal execution parents — files that, when run, produced/dropped
+      // this sample. Directional lineage edge (parent → child), distinct from
+      // the network-contact edges above.
+      (d.virustotal?.executionParents || []).forEach((sha) => {
+        if (!sha || typeof sha !== "string") return;
+        if (norm(sha) === srcId) return;
+        addNode(sha, sha.slice(0, 12) + "…", "SHA256", true, null);
+        addEdge(sha, val, "dropped", "rgba(192,132,252,0.45)");
+      });
+      // VirusTotal contacted domains/IPs — sandbox-observed infrastructure.
+      (d.virustotal?.contactedDomains || []).forEach((dom) => {
+        if (!dom || typeof dom !== "string") return;
+        if (norm(dom) === srcId) return;
+        const n = addNode(dom, dom, "DOMAIN", true, null);
+        if (n) n.contacted = true;
+        addEdge(val, dom, "contacted", "rgba(251,146,60,0.4)");
+      });
+      (d.virustotal?.contactedIPs || []).forEach((ip) => {
+        if (!ip || typeof ip !== "string") return;
+        if (norm(ip) === srcId) return;
+        const n = addNode(ip, ip, ipCat(ip), true, null);
+        if (n) n.contacted = true;
+        addEdge(val, ip, "contacted", "rgba(251,146,60,0.4)");
+      });
+      // VirusTotal Domain lookups — files served BY this domain (hosts, same
+      // direction as urlscan's served-files edge above) vs files that merely
+      // talked TO this domain over the network (contacted, file→domain since
+      // the file is the one initiating contact) — distinct relationships.
+      (d.virustotal?.downloadedFiles || []).forEach((sha) => {
+        if (!sha || typeof sha !== "string") return;
+        if (norm(sha) === srcId) return;
+        addNode(sha, sha.slice(0, 12) + "…", "SHA256", true, null);
+        addEdge(val, sha, "hosts", "rgba(255,77,109,0.45)");
+      });
+      (d.virustotal?.communicatingFiles || []).forEach((sha) => {
+        if (!sha || typeof sha !== "string") return;
+        if (norm(sha) === srcId) return;
+        addNode(sha, sha.slice(0, 12) + "…", "SHA256", true, null);
+        addEdge(sha, val, "contacted", "rgba(251,146,60,0.4)");
+      });
+      (d.virustotal?.subdomains || []).forEach((sub) => {
+        if (!sub || typeof sub !== "string") return;
+        if (norm(sub) === srcId) return;
+        addNode(sub, sub, "DOMAIN", true, null);
+        addEdge(val, sub, "subdomain", "rgba(124,156,255,0.35)");
+      });
+    });
+  });
+
+  // 3. Shared-ASN grouping edges (faint — infrastructure signal). Skips
+  // major CDN/cloud ASNs (see SHARED_INFRA_ASNS) — co-location there is
+  // never a meaningful pivot, only smaller/specific hosting ASNs are.
+  const asnGroups = {};
+  nodes.forEach((n) => {
+    const d = enrichCache[`${n.cat}::${n.id}`]?.data;
+    const asn = d?.whoisASN?.asn || d?.urlscan?.servingASN || n.asn;
+    const org = d?.whoisASN?.asnOrg || d?.urlscan?.servingASNName || n.asn;
+    if (asn && !isSharedInfraAsn(asn, org)) { (asnGroups[asn] = asnGroups[asn] || []).push(n.id); }
+  });
+  Object.values(asnGroups).forEach((ids) => {
+    if (ids.length < 2 || ids.length > 8) return; // skip singletons and huge shared hosts
+    for (let i = 0; i < ids.length - 1; i++) addEdge(ids[i], ids[i + 1], "asn", "rgba(167,139,250,0.18)");
+  });
+
+  const nodeArr = Array.from(nodes.values());
+
+  // Mark "bridge" nodes: infrastructure shared between 2+ distinct primary
+  // IOCs (e.g. an IP that both abc.com and xyz.com resolve to). These are the
+  // most valuable pivots in a graph, so we flag them for standout coloring.
+  const primaryNeighbors = {}; // nodeId -> Set of primary IOC ids connected to it
+  const primaryIds = new Set(nodeArr.filter((n) => !n.derived).map((n) => n.id));
+  edges.forEach((e) => {
+    if (e.kind === "asn") return; // ASN grouping edges don't count as pivots
+    const aPrim = primaryIds.has(e.a), bPrim = primaryIds.has(e.b);
+    if (aPrim && !bPrim) { (primaryNeighbors[e.b] = primaryNeighbors[e.b] || new Set()).add(e.a); }
+    if (bPrim && !aPrim) { (primaryNeighbors[e.a] = primaryNeighbors[e.a] || new Set()).add(e.b); }
+    // primary-to-primary direct link also makes both bridges
+    if (aPrim && bPrim) {
+      (primaryNeighbors[e.a] = primaryNeighbors[e.a] || new Set()).add(e.b);
+      (primaryNeighbors[e.b] = primaryNeighbors[e.b] || new Set()).add(e.a);
+    }
+  });
+  nodeArr.forEach((n) => {
+    n.bridge = (primaryNeighbors[n.id]?.size || 0) >= 2;
+  });
+  // Flag edges touching a bridge node so they can be drawn to stand out.
+  edges.forEach((e) => {
+    const aB = nodeArr.find((n) => n.id === e.a)?.bridge;
+    const bB = nodeArr.find((n) => n.id === e.b)?.bridge;
+    e.toBridge = !!(aB || bB) && e.kind !== "asn";
+  });
+
+  const bridgeCount = nodeArr.filter((n) => n.bridge).length;
+  // Orphans: nodes with no real (non-asn) connections — islands.
+  const connected = new Set();
+  edges.forEach((e) => { if (e.kind !== "asn") { connected.add(e.a); connected.add(e.b); } });
+  nodeArr.forEach((n) => { n.orphan = !connected.has(n.id); });
+
+  // Degree (real, non-asn connections) — hub infrastructure should read as
+  // more important at a glance, before a single edge is traced by eye.
+  const degreeMap = {};
+  edges.forEach((e) => {
+    if (e.kind === "asn") return;
+    degreeMap[e.a] = (degreeMap[e.a] || 0) + 1;
+    degreeMap[e.b] = (degreeMap[e.b] || 0) + 1;
+  });
+  nodeArr.forEach((n) => {
+    n.degree = degreeMap[n.id] || 0;
+    n.r = (n.derived ? 7 : 11) + Math.min(n.degree * 0.6, 6); // capped bonus, hubs still read but never dominate
+  });
+
+  // Execution-chain (dropper → payload) and C2 links — the two most
+  // narratively significant relationship kinds, called out explicitly for
+  // the auto-summary headline and the kill-chain edge styling.
+  const dropperEdges = edges.filter((e) => e.kind === "dropped");
+  const c2Edges = edges.filter((e) => e.kind === "c2");
+  const nodeById = new Map(nodeArr.map((n) => [n.id, n]));
+
+  // Which relationship kinds actually appear in this graph — drives the
+  // legend, so it only ever lists kinds a user can actually see right now.
+  const edgeKindsPresent = [...new Set(edges.filter((e) => e.kind !== "asn").map((e) => e.kind))];
+
+  // Per-type counts for the slicer (only categories actually present).
+  const typeCountMap = {};
+  nodeArr.forEach((n) => { typeCountMap[n.cat] = (typeCountMap[n.cat] || 0) + 1; });
+  const typeCounts = Object.entries(typeCountMap).sort((a, b) => b[1] - a[1]);
+  return {
+    nodes: nodeArr, edges, typeCounts, edgeKindsPresent,
+    dropperChains: dropperEdges.map((e) => ({ parent: nodeById.get(e.a)?.label || e.a, child: nodeById.get(e.b)?.label || e.b })),
+    c2Links: c2Edges.map((e) => ({ from: nodeById.get(e.a)?.label || e.a, to: nodeById.get(e.b)?.label || e.b })),
+    stats: { nodes: nodeArr.length, edges: edges.length, derived: nodeArr.filter((n) => n.derived).length, bridges: bridgeCount, orphans: nodeArr.filter((n) => n.orphan).length },
+  };
+};
+
 function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addPivotIOC, isPivotAdded, removeIoc, anyEnriched, hashCollapseAnims = [] }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
@@ -10579,336 +10887,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
   const [searchMatchIdx, setSearchMatchIdx] = useState(0);
 
   // ---- Build the graph model from IOCs + enrichment ----
-  const model = useMemo(() => {
-    if (!iocData) return { nodes: [], edges: [], stats: { nodes: 0, edges: 0, derived: 0 } };
-    const nodes = new Map(); // id -> node
-    const edges = [];
-    const norm = (v) => String(v).toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
-
-    const verdictOf = (cat, val) => enrichCache[`${cat}::${val}`]?.data?._verdict || null;
-    const addNode = (id, label, cat, derived, verdict) => {
-      const key = norm(id);
-      if (nodes.has(key)) {
-        // Upgrade a derived node to a real one if it also appears as an IOC
-        if (!derived) { const n = nodes.get(key); n.derived = false; if (verdict) n.verdict = verdict; }
-        return nodes.get(key);
-      }
-      const n = {
-        id: key, label: label || id, cat, derived: !!derived,
-        verdict: verdict || null,
-        x: (Math.random() - 0.5) * 200, y: (Math.random() - 0.5) * 200,
-        vx: 0, vy: 0,
-        r: derived ? 7 : 11,
-      };
-      nodes.set(key, n);
-      return n;
-    };
-    const addEdge = (aId, bId, kind, color) => {
-      const a = norm(aId), b = norm(bId);
-      if (a === b || !nodes.has(a) || !nodes.has(b)) return;
-      edges.push({ a, b, kind, color: color || "rgba(120,160,180,0.35)" });
-    };
-
-    // Categories that don't represent network/file infrastructure and add no
-    // value as graph nodes (MITRE techniques, CVEs, YARA rules, etc.).
-    const GRAPH_SKIP_CATS = new Set(["MITRE_ATTACK", "CVE", "YARA"]);
-
-    // 1. Primary IOC nodes
-    Object.entries(iocData).forEach(([cat, arr]) => {
-      if (!Array.isArray(arr)) return;
-      if (GRAPH_SKIP_CATS.has(cat)) return;
-      arr.forEach((val) => addNode(val, val, cat, false, verdictOf(cat, val)));
-    });
-
-    // 2. Derived nodes + edges from enrichment
-    Object.entries(iocData).forEach(([cat, arr]) => {
-      if (GRAPH_SKIP_CATS.has(cat)) return;
-      if (!Array.isArray(arr)) return;
-      arr.forEach((val) => {
-        const d = enrichCache[`${cat}::${val}`]?.data;
-        if (!d) return;
-        const srcId = norm(val);
-
-        // Serving IP (strong: same box)
-        if (d.urlscan?.servingIP && norm(d.urlscan.servingIP) !== srcId) {
-          const ipNode = addNode(d.urlscan.servingIP, d.urlscan.servingIP, ipCat(d.urlscan.servingIP), true, null);
-          if (d.urlscan.servingASNName) ipNode.asn = d.urlscan.servingASNName;
-          addEdge(val, d.urlscan.servingIP, "serves", "rgba(0,229,255,0.5)");
-        }
-
-        // Passive DNS — current resolutions only. Historical ones can point at
-        // infrastructure long since reassigned to an unrelated party; auto-pivoting
-        // on them risks a false bridge. Still visible for manual pivot in the card.
-        (d.otxPDNS?.records || []).forEach((r) => {
-          if (!r.current) return;
-          const target = cat === "DOMAIN" ? r.address : r.hostname;
-          if (!target) return;
-          const tcat = cat === "DOMAIN" ? ipCat(target) : "DOMAIN";
-          addNode(target, target, tcat, true, null);
-          addEdge(val, target, "resolved", "rgba(45,212,191,0.4)");
-        });
-
-        // Hosted files (strong: same payload)
-        (d.urlscan?.files || []).forEach((f) => {
-          if (f.sha256) {
-            addNode(f.sha256, f.filename ? `${f.filename}` : f.sha256.slice(0, 12) + "…", "SHA256", true, null);
-            addEdge(val, f.sha256, "hosts", "rgba(255,77,109,0.45)");
-          }
-        });
-
-        // Scanned URLs on this host
-        (d.urlscan?.scannedUrls || []).forEach((su) => {
-          const u = typeof su === "string" ? su : su.url;
-          if (!u) return;
-          const un = norm(u);
-          if (un === srcId) return;
-          const ucat = un.includes("/") ? "URL" : "DOMAIN";
-          addNode(u, u, ucat, true, null);
-          addEdge(val, u, "scanned", "rgba(124,156,255,0.3)");
-        });
-
-        // Contacted IPs (urlscan result detail — infra the page talked to)
-        (d.urlscan?.contactedIPs || []).forEach((ip) => {
-          if (norm(ip) === srcId) return;
-          const n = addNode(ip, ip, ipCat(ip), true, null);
-          if (n) n.contacted = true;
-          addEdge(val, ip, "contacted", "rgba(251,146,60,0.4)");
-        });
-
-        // Contacted domains (CDN/analytics already filtered upstream)
-        (d.urlscan?.contactedDomains || []).forEach((dom) => {
-          if (norm(dom) === srcId) return;
-          const n = addNode(dom, dom, "DOMAIN", true, null);
-          if (n) n.contacted = true;
-          addEdge(val, dom, "contacted", "rgba(251,146,60,0.4)");
-        });
-
-        // Loaded-resource hashes (scripts/payloads pulled during the scan)
-        (d.urlscan?.resourceHashes || []).forEach((h) => {
-          if (!h || typeof h !== "string" || h.length < 32) return;
-          addNode(h, h.slice(0, 12) + "…", "SHA256", true, null);
-          addEdge(val, h, "loads", "rgba(255,77,109,0.35)");
-        });
-
-        // Tri.age C2 URLs — extracted from behavioral analysis of this hash.
-        // These are the command-and-control endpoints the malware phoned home to.
-        // High-value derived nodes: domain:evil.com, ip:1.2.3.4, or bare URLs.
-        (d.triage?.c2Urls || []).forEach((c2) => {
-          if (!c2) return;
-          const raw = String(c2);
-          if (raw.startsWith("domain:")) {
-            const dom = raw.slice(7).toLowerCase();
-            if (!dom) return;
-            const n = addNode(dom, dom, "DOMAIN", true, "Malicious");
-            if (n) n.c2 = true;
-            addEdge(val, dom, "c2", "rgba(255,77,109,0.6)");
-          } else if (raw.startsWith("ip:")) {
-            const ip = raw.slice(3);
-            if (!ip) return;
-            const n = addNode(ip, ip, ipCat(ip), true, "Malicious");
-            if (n) n.c2 = true;
-            addEdge(val, ip, "c2", "rgba(255,77,109,0.6)");
-          } else {
-            // Bare URL
-            try {
-              const u = new URL(raw.includes("://") ? raw : "https://" + raw);
-              const n = addNode(raw, u.hostname, "URL", true, "Malicious");
-              if (n) n.c2 = true;
-              addEdge(val, raw, "c2", "rgba(255,77,109,0.6)");
-            } catch { /* skip malformed */ }
-          }
-        });
-
-        // Hybrid Analysis behavioral pivots — sandbox-observed infrastructure.
-        // submit_context is high-value: the URL the sample was downloaded from
-        // (creates the download-chain: URL → SHA256, and if the URL's IP is
-        // already an IOC, the shared-pivot logic auto-bridges IP → URL → SHA256).
-        // hosts / domains / compromised_hosts = contacted infra during detonation.
-        (d.hybridAnalysis?.submitContext || []).forEach((sc) => {
-          if (!sc || typeof sc !== "string") return;
-          try {
-            const u = new URL(sc.includes("://") ? sc : "http://" + sc);
-            const host = u.hostname;
-            // URL node (SHA256 → URL — the URL that dropped/served this sample)
-            addNode(sc, sc, "URL", true, "Malicious");
-            addEdge(val, sc, "downloaded_from", "rgba(255,77,109,0.55)");
-            // Auto-derive host node (URL → IP/DOMAIN) so it can bridge with other IOCs.
-            // Classify by whether hostname is IPv4 or a domain.
-            const isIP = isIPv4(host) || host.includes(":");
-            const hostCat = isIP ? ipCat(host) : "DOMAIN";
-            if (norm(host) !== norm(sc)) {
-              addNode(host, host, hostCat, true, null);
-              addEdge(sc, host, "hosted_on", "rgba(0,229,255,0.4)");
-            }
-          } catch { /* skip malformed */ }
-        });
-        // HA contacted hosts (IPs the sample talked to during detonation)
-        (d.hybridAnalysis?.hosts || []).forEach((ip) => {
-          if (!ip || typeof ip !== "string") return;
-          if (norm(ip) === srcId) return;
-          const n = addNode(ip, ip, ipCat(ip), true, null);
-          if (n) n.contacted = true;
-          addEdge(val, ip, "contacted", "rgba(251,146,60,0.4)");
-        });
-        // HA contacted domains (domains resolved during detonation)
-        (d.hybridAnalysis?.domains || []).forEach((dom) => {
-          if (!dom || typeof dom !== "string") return;
-          if (norm(dom) === srcId) return;
-          const n = addNode(dom, dom, "DOMAIN", true, null);
-          if (n) n.contacted = true;
-          addEdge(val, dom, "contacted", "rgba(251,146,60,0.4)");
-        });
-        // HA compromised hosts — C2/attacker-controlled infra confirmed by HA
-        (d.hybridAnalysis?.compromised || []).forEach((host) => {
-          if (!host || typeof host !== "string") return;
-          if (norm(host) === srcId) return;
-          const isIP = isIPv4(host) || host.includes(":");
-          const hcat = isIP ? ipCat(host) : "DOMAIN";
-          const n = addNode(host, host, hcat, true, "Malicious");
-          if (n) n.c2 = true;
-          addEdge(val, host, "c2", "rgba(255,77,109,0.6)");
-        });
-        // HA related SHA256s from imp_hash/ssdeep/authentihash/domain/ip pivots
-        // — samples that share code lineage or infrastructure with this IOC.
-        (d.hybridAnalysis?.relatedSHA256s || []).forEach((rh) => {
-          if (!rh || typeof rh !== "string") return;
-          if (norm(rh) === srcId) return;
-          addNode(rh, rh.slice(0, 12) + "…", "SHA256", true, null);
-          addEdge(val, rh, "related", "rgba(255,77,109,0.35)");
-        });
-        // VirusTotal execution parents — files that, when run, produced/dropped
-        // this sample. Directional lineage edge (parent → child), distinct from
-        // the network-contact edges above.
-        (d.virustotal?.executionParents || []).forEach((sha) => {
-          if (!sha || typeof sha !== "string") return;
-          if (norm(sha) === srcId) return;
-          addNode(sha, sha.slice(0, 12) + "…", "SHA256", true, null);
-          addEdge(sha, val, "dropped", "rgba(192,132,252,0.45)");
-        });
-        // VirusTotal contacted domains/IPs — sandbox-observed infrastructure.
-        (d.virustotal?.contactedDomains || []).forEach((dom) => {
-          if (!dom || typeof dom !== "string") return;
-          if (norm(dom) === srcId) return;
-          const n = addNode(dom, dom, "DOMAIN", true, null);
-          if (n) n.contacted = true;
-          addEdge(val, dom, "contacted", "rgba(251,146,60,0.4)");
-        });
-        (d.virustotal?.contactedIPs || []).forEach((ip) => {
-          if (!ip || typeof ip !== "string") return;
-          if (norm(ip) === srcId) return;
-          const n = addNode(ip, ip, ipCat(ip), true, null);
-          if (n) n.contacted = true;
-          addEdge(val, ip, "contacted", "rgba(251,146,60,0.4)");
-        });
-        // VirusTotal Domain lookups — files served BY this domain (hosts, same
-        // direction as urlscan's served-files edge above) vs files that merely
-        // talked TO this domain over the network (contacted, file→domain since
-        // the file is the one initiating contact) — distinct relationships.
-        (d.virustotal?.downloadedFiles || []).forEach((sha) => {
-          if (!sha || typeof sha !== "string") return;
-          if (norm(sha) === srcId) return;
-          addNode(sha, sha.slice(0, 12) + "…", "SHA256", true, null);
-          addEdge(val, sha, "hosts", "rgba(255,77,109,0.45)");
-        });
-        (d.virustotal?.communicatingFiles || []).forEach((sha) => {
-          if (!sha || typeof sha !== "string") return;
-          if (norm(sha) === srcId) return;
-          addNode(sha, sha.slice(0, 12) + "…", "SHA256", true, null);
-          addEdge(sha, val, "contacted", "rgba(251,146,60,0.4)");
-        });
-        (d.virustotal?.subdomains || []).forEach((sub) => {
-          if (!sub || typeof sub !== "string") return;
-          if (norm(sub) === srcId) return;
-          addNode(sub, sub, "DOMAIN", true, null);
-          addEdge(val, sub, "subdomain", "rgba(124,156,255,0.35)");
-        });
-      });
-    });
-
-    // 3. Shared-ASN grouping edges (faint — infrastructure signal). Skips
-    // major CDN/cloud ASNs (see SHARED_INFRA_ASNS) — co-location there is
-    // never a meaningful pivot, only smaller/specific hosting ASNs are.
-    const asnGroups = {};
-    nodes.forEach((n) => {
-      const d = enrichCache[`${n.cat}::${n.id}`]?.data;
-      const asn = d?.whoisASN?.asn || d?.urlscan?.servingASN || n.asn;
-      const org = d?.whoisASN?.asnOrg || d?.urlscan?.servingASNName || n.asn;
-      if (asn && !isSharedInfraAsn(asn, org)) { (asnGroups[asn] = asnGroups[asn] || []).push(n.id); }
-    });
-    Object.values(asnGroups).forEach((ids) => {
-      if (ids.length < 2 || ids.length > 8) return; // skip singletons and huge shared hosts
-      for (let i = 0; i < ids.length - 1; i++) addEdge(ids[i], ids[i + 1], "asn", "rgba(167,139,250,0.18)");
-    });
-
-    const nodeArr = Array.from(nodes.values());
-
-    // Mark "bridge" nodes: infrastructure shared between 2+ distinct primary
-    // IOCs (e.g. an IP that both abc.com and xyz.com resolve to). These are the
-    // most valuable pivots in a graph, so we flag them for standout coloring.
-    const primaryNeighbors = {}; // nodeId -> Set of primary IOC ids connected to it
-    const primaryIds = new Set(nodeArr.filter((n) => !n.derived).map((n) => n.id));
-    edges.forEach((e) => {
-      if (e.kind === "asn") return; // ASN grouping edges don't count as pivots
-      const aPrim = primaryIds.has(e.a), bPrim = primaryIds.has(e.b);
-      if (aPrim && !bPrim) { (primaryNeighbors[e.b] = primaryNeighbors[e.b] || new Set()).add(e.a); }
-      if (bPrim && !aPrim) { (primaryNeighbors[e.a] = primaryNeighbors[e.a] || new Set()).add(e.b); }
-      // primary-to-primary direct link also makes both bridges
-      if (aPrim && bPrim) {
-        (primaryNeighbors[e.a] = primaryNeighbors[e.a] || new Set()).add(e.b);
-        (primaryNeighbors[e.b] = primaryNeighbors[e.b] || new Set()).add(e.a);
-      }
-    });
-    nodeArr.forEach((n) => {
-      n.bridge = (primaryNeighbors[n.id]?.size || 0) >= 2;
-    });
-    // Flag edges touching a bridge node so they can be drawn to stand out.
-    edges.forEach((e) => {
-      const aB = nodeArr.find((n) => n.id === e.a)?.bridge;
-      const bB = nodeArr.find((n) => n.id === e.b)?.bridge;
-      e.toBridge = !!(aB || bB) && e.kind !== "asn";
-    });
-
-    const bridgeCount = nodeArr.filter((n) => n.bridge).length;
-    // Orphans: nodes with no real (non-asn) connections — islands.
-    const connected = new Set();
-    edges.forEach((e) => { if (e.kind !== "asn") { connected.add(e.a); connected.add(e.b); } });
-    nodeArr.forEach((n) => { n.orphan = !connected.has(n.id); });
-
-    // Degree (real, non-asn connections) — hub infrastructure should read as
-    // more important at a glance, before a single edge is traced by eye.
-    const degreeMap = {};
-    edges.forEach((e) => {
-      if (e.kind === "asn") return;
-      degreeMap[e.a] = (degreeMap[e.a] || 0) + 1;
-      degreeMap[e.b] = (degreeMap[e.b] || 0) + 1;
-    });
-    nodeArr.forEach((n) => {
-      n.degree = degreeMap[n.id] || 0;
-      n.r = (n.derived ? 7 : 11) + Math.min(n.degree * 0.6, 6); // capped bonus, hubs still read but never dominate
-    });
-
-    // Execution-chain (dropper → payload) and C2 links — the two most
-    // narratively significant relationship kinds, called out explicitly for
-    // the auto-summary headline and the kill-chain edge styling.
-    const dropperEdges = edges.filter((e) => e.kind === "dropped");
-    const c2Edges = edges.filter((e) => e.kind === "c2");
-    const nodeById = new Map(nodeArr.map((n) => [n.id, n]));
-
-    // Which relationship kinds actually appear in this graph — drives the
-    // legend, so it only ever lists kinds a user can actually see right now.
-    const edgeKindsPresent = [...new Set(edges.filter((e) => e.kind !== "asn").map((e) => e.kind))];
-
-    // Per-type counts for the slicer (only categories actually present).
-    const typeCountMap = {};
-    nodeArr.forEach((n) => { typeCountMap[n.cat] = (typeCountMap[n.cat] || 0) + 1; });
-    const typeCounts = Object.entries(typeCountMap).sort((a, b) => b[1] - a[1]);
-    return {
-      nodes: nodeArr, edges, typeCounts, edgeKindsPresent,
-      dropperChains: dropperEdges.map((e) => ({ parent: nodeById.get(e.a)?.label || e.a, child: nodeById.get(e.b)?.label || e.b })),
-      c2Links: c2Edges.map((e) => ({ from: nodeById.get(e.a)?.label || e.a, to: nodeById.get(e.b)?.label || e.b })),
-      stats: { nodes: nodeArr.length, edges: edges.length, derived: nodeArr.filter((n) => n.derived).length, bridges: bridgeCount, orphans: nodeArr.filter((n) => n.orphan).length },
-    };
-  }, [iocData, enrichCache]);
+  const model = useMemo(() => buildGraphModel(iocData, enrichCache), [iocData, enrichCache]);
 
   // Seed physics state when model changes. Preserve positions of nodes that
   // already exist (incremental layout) so the graph doesn't re-explode on every
