@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v137";
+const APP_VERSION = "v138";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -736,6 +736,377 @@ const parseWhoisJsonContacts = (wj) => {
   if (rg && (rg.email || rg.phone)) contacts.push({ role: "abuse", name: "", org: "", address: "", phone: rg.phone || "", email: rg.email || "" });
   const nameservers = Array.isArray(wj.nameserver) ? wj.nameserver : Array.isArray(wj.nameservers) ? wj.nameservers : [];
   return buildDomainContacts({ contacts, registrar, nameservers, dnssec: null, privacyHint: null, source: "whoisjson" });
+};
+
+// ============================================================
+//  Intel-audit helpers — parsers for response sections that used to be
+//  discarded, plus fidelity-ranked merging so a fact that several engines
+//  report (file name, size, signer, ASN, hostnames, ATT&CK ids…) is shown
+//  ONCE, from the most authoritative source.
+// ============================================================
+const uniqCI = (arr) => {
+  const seen = new Set(); const out = [];
+  for (const v of arr || []) {
+    const s = String(v ?? "").trim();
+    if (!s) continue;
+    const k = s.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k); out.push(s);
+  }
+  return out;
+};
+const famKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+// "2026-09-01 00:00:00" / ISO / epoch seconds → "2026-09-01"
+const isoDay = (v) => {
+  if (v == null || v === "") return null;
+  if (typeof v === "number") { const d = new Date(v < 1e12 ? v * 1000 : v); return isNaN(d) ? null : d.toISOString().split("T")[0]; }
+  const s = String(v);
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  const d = new Date(s);
+  return isNaN(d) ? null : d.toISOString().split("T")[0];
+};
+const fmtBytes = (n) => {
+  if (typeof n !== "number" || !isFinite(n) || n < 0) return null;
+  return n >= 1048576 ? `${(n / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.round(n / 1024))}KB`;
+};
+const hostOfUrl = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return String(u || "").slice(0, 40); } };
+
+// OTX general response → per-pulse report detail + aggregated actors/families/industries.
+const parseOtxPulseDetail = (j) => {
+  const pulses = Array.isArray(j?.pulse_info?.pulses) ? j.pulse_info.pulses : [];
+  const nm = (x) => (typeof x === "string" ? x : (x?.display_name || x?.name || x?.id || ""));
+  const list = pulses.slice()
+    .sort((a, b) => String(b.modified || b.created || "").localeCompare(String(a.modified || a.created || "")))
+    .slice(0, 5)
+    .map((p) => ({
+      id: p.id || null,
+      name: p.name || "",
+      author: p.author_name || p.author?.username || null,
+      created: isoDay(p.created),
+      modified: isoDay(p.modified),
+      adversary: p.adversary ? String(p.adversary) : null,
+      families: uniqCI((Array.isArray(p.malware_families) ? p.malware_families : []).map(nm)).slice(0, 4),
+      attack: uniqCI((Array.isArray(p.attack_ids) ? p.attack_ids : []).map((a) => (typeof a === "string" ? a : (a?.id || ""))).filter((x) => /^T\d{4}/i.test(x))).slice(0, 8),
+      industries: uniqCI(Array.isArray(p.industries) ? p.industries : []).slice(0, 3),
+      ref: (Array.isArray(p.references) ? p.references.find((r) => /^https?:\/\//i.test(r)) : null) || null,
+    }))
+    .filter((p) => p.name);
+  const rel = j?.pulse_info?.related || {};
+  const pick = (k) => uniqCI([
+    ...(Array.isArray(rel.alienvault?.[k]) ? rel.alienvault[k] : []),
+    ...(Array.isArray(rel.other?.[k]) ? rel.other[k] : []),
+  ].map(nm));
+  const adversaries = uniqCI([...pick("adversary"), ...list.map((p) => p.adversary)]).slice(0, 6);
+  const families = uniqCI([...pick("malware_families"), ...list.flatMap((p) => p.families)]).slice(0, 8);
+  const industries = uniqCI([...pick("industries"), ...list.flatMap((p) => p.industries)]).slice(0, 6);
+  const validationDetail = (Array.isArray(j?.validation) ? j.validation : [])
+    .map((v) => (typeof v === "string" ? { source: v, message: "" } : { source: v?.source || v?.name || "", message: v?.message || "" }))
+    .filter((v) => v.source || v.message).slice(0, 3);
+  const falsePositive = (Array.isArray(j?.false_positive) ? j.false_positive : [])
+    .map((f) => (typeof f === "string" ? f : [f?.assessment, f?.assessment_date ? isoDay(f.assessment_date) : null].filter(Boolean).join(" · ")))
+    .filter(Boolean).slice(0, 2);
+  return { pulseList: list, related: { adversaries, families, industries }, validationDetail, falsePositive };
+};
+
+// VT domain / IP object → network-side extras (only fields not already stored).
+const parseVtNetworkExtras = (vAttr) => {
+  const out = {};
+  const flagged = Object.values(vAttr.last_analysis_results && typeof vAttr.last_analysis_results === "object" ? vAttr.last_analysis_results : {})
+    .filter((r) => r && (r.category === "malicious" || r.category === "suspicious"))
+    .map((r) => ({ engine: r.engine_name || r.method || "", category: r.category, result: r.result || "" }))
+    .filter((r) => r.engine);
+  if (flagged.length) out.engineFlags = flagged.sort((a, b) => (a.category === b.category ? 0 : a.category === "malicious" ? -1 : 1)).slice(0, 12);
+  const tv = vAttr.total_votes;
+  if (tv && typeof tv === "object" && (tv.harmless || tv.malicious)) out.votes = { harmless: tv.harmless || 0, malicious: tv.malicious || 0 };
+  if (typeof vAttr.registrar === "string" && vAttr.registrar) out.registrar = vAttr.registrar;
+  if (vAttr.creation_date) out.creationDate = isoDay(vAttr.creation_date);
+  if (Array.isArray(vAttr.tags) && vAttr.tags.length) out.domTags = vAttr.tags.slice(0, 6);
+  if (vAttr.as_owner) out.asOwner = String(vAttr.as_owner);
+  if (vAttr.asn != null) out.asn = vAttr.asn;
+  if (vAttr.network) out.network = String(vAttr.network);
+  if (vAttr.jarm) out.jarm = String(vAttr.jarm);
+  const recs = Array.isArray(vAttr.last_dns_records) ? vAttr.last_dns_records : [];
+  if (recs.length) {
+    const byType = (t) => recs.filter((r) => String(r.type).toUpperCase() === t);
+    out.dns = {
+      mx: byType("MX").map((r) => ({ host: String(r.value || "").toLowerCase().replace(/\.$/, ""), priority: r.priority ?? null })).filter((r) => r.host).slice(0, 5),
+      txt: byType("TXT").map((r) => String(r.value || "").replace(/^"|"$/g, "").slice(0, 200)).filter(Boolean).slice(0, 8),
+      aCount: byType("A").length + byType("AAAA").length,
+    };
+  }
+  const c = vAttr.last_https_certificate;
+  if (c && typeof c === "object") {
+    const san = c.extensions?.subject_alternative_name;
+    out.cert = {
+      issuer: c.issuer?.O || c.issuer?.CN || null,
+      subject: c.subject?.CN || null,
+      notBefore: isoDay(c.validity?.not_before),
+      notAfter: isoDay(c.validity?.not_after),
+      san: Array.isArray(san) ? san.slice(0, 12) : [],
+    };
+  }
+  return out;
+};
+
+// VT file object → identity / detection extras.
+const parseVtFileExtras = (vAttr) => {
+  const out = {};
+  const names = uniqCI([vAttr.meaningful_name, ...(Array.isArray(vAttr.names) ? vAttr.names : [])]).slice(0, 5);
+  if (names.length) out.names = names;
+  if (vAttr.type_description) out.typeDescription = String(vAttr.type_description);
+  if (typeof vAttr.size === "number") out.size = vAttr.size;
+  const ts = vAttr.pe_info?.timestamp ?? vAttr.creation_date;
+  if (ts) out.peTimestamp = isoDay(ts);
+  if (vAttr.pe_info?.imphash) out.imphash = String(vAttr.pe_info.imphash);
+  if (vAttr.ssdeep) out.ssdeep = String(vAttr.ssdeep);
+  if (vAttr.tlsh) out.tlsh = String(vAttr.tlsh);
+  if (vAttr.authentihash) out.authentihash = String(vAttr.authentihash);
+  const flagged = Object.values(vAttr.last_analysis_results && typeof vAttr.last_analysis_results === "object" ? vAttr.last_analysis_results : {})
+    .filter((r) => r && (r.category === "malicious" || r.category === "suspicious") && r.result)
+    .map((r) => ({ engine: r.engine_name || r.method || "", category: r.category, result: String(r.result) }))
+    .filter((r) => r.engine);
+  if (flagged.length) {
+    // Well-known vendors first: their names are what analysts search on.
+    const PRIORITY = ["Microsoft", "Kaspersky", "CrowdStrike", "ESET-NOD32", "Symantec", "Sophos", "TrendMicro", "BitDefender", "Fortinet", "Avast", "McAfee", "Malwarebytes", "SentinelOne", "Elastic", "PaloAlto", "Google"];
+    const rank = (e) => { const i = PRIORITY.findIndex((p) => e.toLowerCase().startsWith(p.toLowerCase())); return i === -1 ? 99 : i; };
+    out.engineFlags = flagged.sort((a, b) => rank(a.engine) - rank(b.engine)).slice(0, 12);
+  }
+  const sb = vAttr.sandbox_verdicts;
+  if (sb && typeof sb === "object") {
+    const rows = Object.entries(sb)
+      .map(([k, v]) => ({ sandbox: v?.sandbox_name || k, category: v?.category || "", names: uniqCI([...(v?.malware_names || []), ...(v?.malware_classification || [])]).slice(0, 3) }))
+      .filter((r) => r.category === "malicious" || r.category === "suspicious");
+    if (rows.length) out.sandboxVerdicts = rows.slice(0, 5);
+  }
+  const sg = Array.isArray(vAttr.sigma_analysis_results) ? vAttr.sigma_analysis_results : [];
+  if (sg.length) {
+    const sev = { critical: 0, high: 1, medium: 2, low: 3, informational: 4 };
+    out.sigma = sg.map((s) => ({ title: s.rule_title || s.rule_id || "", level: String(s.rule_level || "").toLowerCase() }))
+      .filter((s) => s.title).sort((a, b) => (sev[a.level] ?? 5) - (sev[b.level] ?? 5)).slice(0, 5);
+  }
+  const yr = Array.isArray(vAttr.crowdsourced_yara_results) ? vAttr.crowdsourced_yara_results : [];
+  if (yr.length) out.yaraDetail = yr.map((y) => ({ rule: y.rule_name || "", ruleset: y.ruleset_name || "", source: y.source || "" })).filter((y) => y.rule).slice(0, 5);
+  const ids = Array.isArray(vAttr.crowdsourced_ids_results) ? vAttr.crowdsourced_ids_results : [];
+  if (ids.length) out.ids = ids.map((i) => ({ msg: i.rule_msg || "", severity: i.alert_severity || "" })).filter((i) => i.msg).slice(0, 3);
+  const tv = vAttr.total_votes;
+  if (tv && typeof tv === "object" && (tv.harmless || tv.malicious)) out.votes = { harmless: tv.harmless || 0, malicious: tv.malicious || 0 };
+  if (Array.isArray(vAttr.tags) && vAttr.tags.length) out.fileTags = vAttr.tags.slice(0, 8);
+  return out;
+};
+
+// NVD CVE object → compact severity / weakness / affected / reference brief.
+const parseNvdBrief = (vuln) => {
+  const m = vuln.metrics || {};
+  const entry = (m.cvssMetricV40 || m.cvssMetricV31 || m.cvssMetricV30 || m.cvssMetricV2 || [])[0];
+  const cd = entry?.cvssData || {};
+  const cwes = uniqCI((vuln.weaknesses || []).flatMap((w) => (w.description || []).map((x) => x.value)).filter((v) => /^CWE-\d+$/.test(v))).slice(0, 4);
+  const products = [];
+  const seen = new Set();
+  for (const cfg of vuln.configurations || []) {
+    for (const node of cfg.nodes || []) {
+      for (const cm of node.cpeMatch || []) {
+        if (!cm.vulnerable) continue;
+        const p = String(cm.criteria || "").split(":");
+        if (p.length < 6) continue;
+        const [, , part, vendor, product, version] = p;
+        if (part === "o" && /firmware$/i.test(product)) continue; // hardware noise (e.g. hundreds of Siemens models)
+        const bound = cm.versionEndExcluding ? `< ${cm.versionEndExcluding}` : cm.versionEndIncluding ? `≤ ${cm.versionEndIncluding}` : (version && version !== "*" && version !== "-" ? version : "");
+        const label = `${vendor} ${product}${bound ? " " + bound : ""}`.replace(/_/g, " ");
+        const k = label.toLowerCase();
+        if (seen.has(k)) continue;
+        seen.add(k); products.push(label);
+        if (products.length >= 6) break;
+      }
+      if (products.length >= 6) break;
+    }
+    if (products.length >= 6) break;
+  }
+  const groups = { patch: [], advisory: [], exploit: [], mitigation: [] };
+  const seenUrl = new Set();
+  for (const r of vuln.references || []) {
+    if (!r.url || seenUrl.has(r.url)) continue;
+    const tags = r.tags || [];
+    const g = tags.includes("Patch") ? "patch" : tags.includes("Exploit") ? "exploit" : tags.includes("Mitigation") ? "mitigation" : tags.includes("Vendor Advisory") ? "advisory" : null;
+    if (!g || groups[g].length >= 3) continue;
+    seenUrl.add(r.url);
+    groups[g].push({ url: r.url, host: hostOfUrl(r.url) });
+  }
+  return {
+    modified: isoDay(vuln.lastModified),
+    status: vuln.vulnStatus || null,
+    vector: cd.vectorString || null,
+    attackVector: cd.attackVector || cd.accessVector || null,
+    complexity: cd.attackComplexity || cd.accessComplexity || null,
+    privileges: cd.privilegesRequired || cd.authentication || null,
+    userInteraction: cd.userInteraction || null,
+    scope: cd.scope || null,
+    exploitability: typeof entry?.exploitabilityScore === "number" ? entry.exploitabilityScore : null,
+    impact: typeof entry?.impactScore === "number" ? entry.impactScore : null,
+    cwes, products,
+    refs: groups,
+    kevName: vuln.cisaVulnerabilityName || null,
+    kevAction: vuln.cisaRequiredAction || null,
+  };
+};
+
+// Which engines drove the verdict, and which disagree. Mirrors the cascade's
+// signals without changing it — explanation only.
+const deriveVerdictSignals = (d, cat) => {
+  const S = [];
+  const add = (polarity, engine, text, weight) => S.push({ polarity, engine, text, weight });
+  const isHash = ["MD5", "SHA1", "SHA256", "SHA512"].includes(cat);
+  if (d.crowdstrike?.status === "malicious") add("mal", "CrowdStrike Falcon ML", "flagged malicious", 6);
+  if (cat === "CVE" && d.cisaKev?.listed) add("mal", "CISA KEV", "actively exploited in the wild", 6);
+  if (cat === "CVE" && (d.epss?.score || 0) >= 50) add("susp", "EPSS", `${d.epss.score}% 30-day exploitation probability`, 2);
+  if (d.kaspersky?.zone === "red") add("mal", "Kaspersky", "Red zone", 4);
+  else if (d.kaspersky?.zone === "yellow") add("susp", "Kaspersky", "Yellow zone", 2);
+  else if (d.kaspersky?.zone === "green" && isHash) add("clean", "Kaspersky", "known-clean file", 3);
+  if (d.threatfox) add("mal", "ThreatFox", `${d.threatfox.malware}${d.threatfox.port ? `:${d.threatfox.port}` : ""}`, 5);
+  if (d.urlhaus?.status === "online") add("mal", "URLhaus", "serving malware right now", 5);
+  else if (d.urlhaus) add("susp", "URLhaus", "previously served malware (offline)", 2);
+  if (d.phishtank?.verified && d.phishtank?.valid) add("mal", "PhishTank", "verified phishing", 5);
+  const st = d.virustotal?.detectionStats;
+  if (st) {
+    const total = st.malicious + st.suspicious + st.harmless + st.undetected;
+    if (st.malicious >= 5) add("mal", "VirusTotal", `${st.malicious}/${total} engines malicious`, 4);
+    else if (st.malicious >= 1 || st.suspicious >= 3) add("susp", "VirusTotal", `${st.malicious + st.suspicious}/${total} engines flagged`, 2);
+    else if (st.harmless >= 5 && !st.malicious && !st.suspicious) add("clean", "VirusTotal", `clean consensus (${st.harmless}/${total})`, 3);
+  }
+  if (d.malwarebazaar) {
+    if (d.malwarebazaar.family && d.malwarebazaar.family !== "unknown") add("mal", "MalwareBazaar", d.malwarebazaar.family, 4);
+    else add("susp", "MalwareBazaar", "sample on file, no family attributed", 2);
+  }
+  if (d.triage?.score === 10) add("mal", "Tri.age", "behavioral score 10/10", 4);
+  else if ((d.triage?.score || 0) >= 5) add("susp", "Tri.age", `behavioral score ${d.triage.score}/10`, 2);
+  const ha = d.hybridAnalysis;
+  if (ha && (ha.verdict === "malicious" || (ha.threatScore || 0) >= 70)) add("mal", "Hybrid Analysis", ha.threatScore != null ? `threat score ${ha.threatScore}/100` : "malicious", 3);
+  else if (ha && (ha.verdict === "suspicious" || (ha.threatScore || 0) >= 30)) add("susp", "Hybrid Analysis", ha.threatScore != null ? `threat score ${ha.threatScore}/100` : "suspicious", 2);
+  if (d.urlscan?.overallMalicious) add("mal", "urlscan.io", "scan verdict malicious", 3);
+  if (d.urlscan?.brands?.length) add("susp", "urlscan.io", `impersonates ${d.urlscan.brands.slice(0, 2).join(", ")}`, 3);
+  if (d.otx?.whitelisted === true) add("clean", "OTX", "whitelisted indicator", 3);
+  if (d.otx?.validation) add("susp", "OTX", d.otx.validation, 2);
+  if ((d.otx?.pulses || 0) >= 9) add("mal", "OTX", `${d.otx.pulses} threat reports reference it`, 2);
+  else if ((d.otx?.pulses || 0) > 0) add("susp", "OTX", `${d.otx.pulses} threat report${d.otx.pulses !== 1 ? "s" : ""}`, 1);
+  if ((d.abuseipdb?.score || 0) >= 80) add("mal", "AbuseIPDB", `${d.abuseipdb.score}% abuse confidence`, 3);
+  else if ((d.abuseipdb?.score || 0) >= 25) add("susp", "AbuseIPDB", `${d.abuseipdb.score}% abuse confidence`, 2);
+  if ((d.sansIsc?.attacks || 0) >= 5) add("susp", "SANS ISC", `${d.sansIsc.attacks} reported attacks`, 1);
+  if (d.circl?.legit) add("clean", "CIRCL", "known-legitimate file (NSRL / community)", 3);
+  if (d.domainReg?.status && /hold|withheld|pendingdelete|redemption/i.test(d.domainReg.status)) add("susp", "Registry", d.domainReg.status, 2);
+  if (d.validin?.verdict === "malicious" || (d.validin?.maliciousCount || 0) > 0) add("mal", "Validin", "malicious annotations", 2);
+  else if (d.validin?.verdict === "suspicious") add("susp", "Validin", "suspicious", 1);
+  return S;
+};
+
+const VT_GENERIC_LABEL = new Set(["trojan","virus","worm","backdoor","malware","ransomware","spyware","adware","downloader","dropper","stealer","miner","pua","pup","heur","generic","win32","win64","msil","w32","w64","unwanted","riskware","hacktool","tool","application","script","exploit","banker","rootkit","loader","botnet","infostealer","keylogger","packed","suspicious","unsafe","behavior","agent","gen","variant","malicious","threat","file","other","unknown","cve"]);
+// Same family named by several engines → one entry listing every source.
+const deriveFamilyConsensus = (d) => {
+  const map = new Map();
+  const add = (name, src) => {
+    const s = String(name || "").trim();
+    const k = famKey(s);
+    if (!s || k.length < 3 || k === "unknown" || VT_GENERIC_LABEL.has(k)) return;
+    const e = map.get(k) || { name: s, sources: new Set() };
+    e.sources.add(src); map.set(k, e);
+  };
+  add(d.threatfox?.malware, "ThreatFox");
+  (d.threatfox?.families || []).forEach((f) => add(f, "ThreatFox"));
+  if (d.malwarebazaar?.family && d.malwarebazaar.family !== "unknown") add(d.malwarebazaar.family, "MalwareBazaar");
+  add(d.hybridAnalysis?.family, "Hybrid Analysis");
+  String(d.hybridAnalysis?.families || "").split(",").forEach((f) => add(f, "Hybrid Analysis"));
+  (d.triage?.families || []).forEach((f) => add(f, "Tri.age"));
+  if (d.triage?.config?.family) add(d.triage.config.family, "Tri.age");
+  String(d.virustotal?.threatLabel || "").split(/[./\s]+/).forEach((t) => add(t, "VirusTotal"));
+  (d.otx?.related?.families || []).forEach((f) => add(f, "OTX"));
+  return [...map.values()].map((e) => ({ name: e.name, sources: [...e.sources] })).sort((a, b) => b.sources.length - a.sources.length).slice(0, 5);
+};
+
+// Popular / shared infrastructure — the false-positive guard.
+const deriveRiskContext = (d) => {
+  const reasons = [];
+  const ranks = [];
+  if (d.urlscan?.umbrellaRank) ranks.push({ source: "Cisco Umbrella", rank: d.urlscan.umbrellaRank });
+  if (d.virustotal?.popularityRank?.rank) ranks.push({ source: d.virustotal.popularityRank.source, rank: d.virustotal.popularityRank.rank });
+  const best = ranks.sort((a, b) => a.rank - b.rank)[0] || null;
+  if (best && best.rank <= 100000) reasons.push(`Highly ranked domain — ${best.source} #${best.rank.toLocaleString()}`);
+  if (d.otx?.whitelisted === true) reasons.push("OTX whitelisted");
+  if (d.circl?.legit) reasons.push("Known-legitimate file (CIRCL / NSRL)");
+  if (d.whoisASN?.anycast) reasons.push("Anycast address — shared by many hosts, geolocation unreliable");
+  return { reasons, best, strong: !!(best && best.rank <= 10000) || d.otx?.whitelisted === true || !!d.circl?.legit };
+};
+
+// One File Identity: names ranked by how many engines agree, one type/size/signer.
+const mergeFileIdentity = (d) => {
+  const vt = d.virustotal || {}, mb = d.malwarebazaar || {}, ha = d.hybridAnalysis || {}, kp = d.kaspersky || {}, ci = d.circl || {}, tr = d.triage || {};
+  const votes = new Map();
+  const addName = (n, src) => {
+    const s = String(n || "").trim();
+    if (!s || s.length > 200 || s === "—") return;
+    const k = s.toLowerCase();
+    const e = votes.get(k) || { name: s, sources: new Set() };
+    e.sources.add(src); votes.set(k, e);
+  };
+  (vt.names || []).forEach((n) => addName(n, "VirusTotal"));
+  addName(mb.fileName, "MalwareBazaar"); addName(ha.fileName, "Hybrid Analysis"); addName(tr.filename, "Tri.age"); addName(ci.fileName, "CIRCL");
+  const names = [...votes.values()].map((e) => ({ name: e.name, sources: [...e.sources] })).sort((a, b) => b.sources.length - a.sources.length).slice(0, 5);
+  const type = vt.typeDescription || (mb.type && mb.type !== "—" ? mb.type : null) || ha.fileType || ci.mimetype || null;
+  const size = (vt.size != null ? fmtBytes(vt.size) : null) || mb.size || ha.fileSize || kp.size || ci.fileSize || null;
+  const hashes = {
+    imphash: { value: ha.impHash || vt.imphash || mb.imphash || null, cat: "IMPHASH" },
+    ssdeep: { value: ha.ssdeepHash || vt.ssdeep || mb.ssdeep || null, cat: "SSDEEP" },
+    authentihash: { value: ha.authentiHash || vt.authentihash || null, cat: "AUTHENTIHASH" },
+    tlsh: { value: vt.tlsh || mb.tlsh || null, cat: null },
+  };
+  let signer = null;
+  if (vt.signatureVerified) signer = { status: vt.signatureVerified, who: vt.signatureSigners || null, source: "VirusTotal" };
+  else if (mb.codeSign) signer = { status: "Signed", who: mb.codeSign.subject || null, issuer: mb.codeSign.issuer || null, source: "MalwareBazaar" };
+  else if (kp.signer) signer = { status: "Signed", who: kp.signer, source: "Kaspersky" };
+  const product = kp.productName || ci.productName || null;
+  const compiled = vt.peTimestamp || null;
+  const hasAny = names.length || type || size || signer || product || compiled || Object.values(hashes).some((h) => h.value);
+  return { names, type, size, hashes, signer, product, compiled, hasAny: !!hasAny, origin: mb.originCountry || null };
+};
+
+// ATT&CK technique IDs reported by several engines → one list.
+const mergeAttack = (d) => {
+  const map = new Map();
+  const add = (id, name, src) => {
+    const k = String(id || "").toUpperCase().trim();
+    if (!/^T\d{4}(\.\d{3})?$/.test(k)) return;
+    const e = map.get(k) || { id: k, name: "", sources: new Set() };
+    if (name && !e.name) e.name = name;
+    e.sources.add(src); map.set(k, e);
+  };
+  (d.hybridAnalysis?.mitreDetail || []).forEach((m) => add(m.id, m.name, "Hybrid Analysis"));
+  (d.triage?.ttps || []).forEach((t) => add(t, "", "Tri.age"));
+  return [...map.values()].map((e) => ({ id: e.id, name: e.name, sources: [...e.sources] })).sort((a, b) => b.sources.length - a.sources.length || a.id.localeCompare(b.id)).slice(0, 14);
+};
+
+// One IP profile: ASN/owner/route/type/abuse/hostnames from the best source each.
+const buildNetworkProfile = (d) => {
+  const g = d.whoisASN || {}, s = d.sansIsc || {}, a = d.abuseipdb || {}, sh = d.shodan || {}, u = d.urlscan || {}, v = d.virustotal || {};
+  const norm = (x) => String(x || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  let asn = null, asnName = null, asnSrc = null;
+  if (g.asn) { asn = g.asn; asnName = g.asnName || g.asnOrg || null; asnSrc = "IPLocate"; }
+  else if (s.asn) { asn = `AS${s.asn}`; asnName = s.asName || null; asnSrc = "SANS ISC"; }
+  else if (v.asn != null) { asn = `AS${v.asn}`; asnName = v.asOwner || null; asnSrc = "VirusTotal"; }
+  else if (u.servingASN) { asn = String(u.servingASN); asnName = u.servingASNName || null; asnSrc = "urlscan.io"; }
+  const owner = g.company && norm(g.company) !== norm(asnName) ? g.company : null;
+  const route = g.route || s.network || v.network || null;
+  const flags = uniqCI([...(g.flags || []), a.isTor ? "Tor" : ""]);
+  const abuse = g.abuse && (g.abuse.email || g.abuse.phone || g.abuse.name)
+    ? { ...g.abuse, source: "IPLocate (RDAP)" }
+    : (s.abuseContact ? { email: s.abuseContact, source: "SANS ISC" } : null);
+  const hostnames = uniqCI([u.ptr, ...(sh.hostnames || []), ...(a.hostnames || [])]).slice(0, 6);
+  const ispDiffers = a.isp && norm(a.isp) !== norm(asnName) && norm(a.isp) !== norm(owner) && !norm(asnName).includes(norm(a.isp)) && !norm(a.isp).includes(norm(asnName));
+  return {
+    asn, asnName, asnSrc, owner, route, netname: g.netname || null, rir: g.rir || null,
+    type: g.asnType || g.companyType || null,
+    hostingProvider: g.hostingProvider || null,
+    usage: !g.asnType && a.usageType ? a.usageType : null,
+    isp: ispDiffers ? a.isp : null,
+    flags, abuse, hostnames, anycast: !!g.anycast,
+    has: !!(asn || owner || route || abuse || hostnames.length || g.asnType || flags.length),
+  };
 };
 
 // ============================================================
@@ -2598,6 +2969,9 @@ export default function App() {
       _apiLog.push({ api, status: r.status, ms: Date.now() - _apiT0 });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const text = await r.text();
+      // Debug aid: the last raw payload per engine+value is kept in memory so a
+      // response can be inspected from the console (copy(JSON.stringify(__IE_RAW))).
+      try { (window.__IE_RAW = window.__IE_RAW || {})[`${api}${otxSection ? ":" + otxSection : ""}::${body.value}`] = text.length > 250000 ? text.slice(0, 250000) : text; } catch { /* ignore */ }
       try { return JSON.parse(text); } catch {
         throw new Error(text.slice(0, 100));
       }
@@ -2616,6 +2990,8 @@ export default function App() {
             dateAdded: kevj.dateAdded || null,
             dueDate: kevj.dueDate || null,
             ransomwareUse: kevj.ransomwareUse && kevj.ransomwareUse !== "Unknown" ? kevj.ransomwareUse : null,
+            vendorProject: kevj.vendorProject || null,
+            product: kevj.product || null,
           };
         }
       } catch (e) { console.warn("Enrich CISA KEV failed:", e.message); }
@@ -2646,6 +3022,7 @@ export default function App() {
             severity: cvssData?.baseSeverity || cvssEntry?.baseSeverity || null,
             description: desc,
             published: vuln.published ? vuln.published.split("T")[0] : null,
+            ...parseNvdBrief(vuln),
           };
         }
       } catch (e) { console.warn("Enrich NVD failed:", e.message); }
@@ -2675,6 +3052,7 @@ export default function App() {
               submitted: tj.submitted ? tj.submitted.split("T")[0] : null,
               completed: tj.completed ? tj.completed.split("T")[0] : null,
               c2Urls: tj.c2Urls || [], triageUrl: tj.triageUrl,
+              ttps: tj.ttps || [], signatures: tj.signatures || [], config: tj.config || null,
             };
             // Pre-cache the Triage result for the SHA256 key
             setEnrichCache((c) => ({
@@ -2852,6 +3230,14 @@ export default function App() {
             if (!isRealMatch) {
               console.warn(`ThreatFox returned unrelated ioc "${d.ioc}" for query "${value}" — discarding as a false match`);
             } else {
+              // Port is part of the ioc string ("1.2.3.4:443") — a C2 port is
+              // directly huntable. Every record for this exact IOC is considered,
+              // not just data[0], so conflicting/multiple families aren't hidden.
+              const portM = iocLower.startsWith(`${valueLower}:`) ? iocLower.slice(valueLower.length + 1).match(/^\d{1,5}/) : null;
+              const exactRecs = j.data.filter((r) => {
+                const il = String(r.ioc || "").toLowerCase();
+                return il === valueLower || il.startsWith(`${valueLower}:`) || il.startsWith(`${valueLower}/`);
+              });
               results.threatfox = {
                 malware: d.malware_printable || d.malware || "—",
                 threat: d.threat_type_desc || d.threat_type || "—",
@@ -2859,6 +3245,14 @@ export default function App() {
                 first: d.first_seen ? d.first_seen.split(" ")[0] : null,
                 last: d.last_seen ? d.last_seen.split(" ")[0] : null,
                 tags: Array.isArray(d.tags) ? d.tags.filter((t) => t && !GENERIC_TAGS.has(t.toLowerCase())).slice(0, 4).join(", ") : null,
+                port: portM ? portM[0] : null,
+                families: uniqCI(exactRecs.map((r) => r.malware_printable || r.malware)).slice(0, 4),
+                aliases: d.malware_alias ? String(d.malware_alias).split(",").map((x) => x.trim()).filter(Boolean).slice(0, 4) : [],
+                malpedia: d.malware_malpedia || null,
+                reference: d.reference || null,
+                reporter: d.reporter || null,
+                recordCount: exactRecs.length,
+                link: d.id ? `https://threatfox.abuse.ch/ioc/${d.id}/` : null,
               };
             }
           }
@@ -2874,12 +3268,17 @@ export default function App() {
             const offline = j.urls.filter((u) => u.url_status === "offline").length;
             // Extract earliest/latest dates from URL entries
             const uhDates = j.urls.map((u) => u.dateadded).filter(Boolean).sort();
+            const bl = j.blacklists && typeof j.blacklists === "object" ? j.blacklists : {};
+            const blListed = Object.entries(bl).filter(([, v]) => v && v !== "not listed").map(([k, v]) => `${k.replace(/_/g, " ")}: ${v}`);
             results.urlhaus = {
               urls_total: j.urls.length, online, offline,
               status: online > 0 ? "online" : "offline",
               tags: [...new Set(j.urls.flatMap((u) => u.tags || []).filter((t) => t && !GENERIC_TAGS.has(t.toLowerCase())))].slice(0, 4).join(", ") || null,
               first: uhDates.length ? uhDates[0].split(" ")[0] : null,
               last: uhDates.length > 1 ? uhDates[uhDates.length - 1].split(" ")[0] : null,
+              blacklists: blListed,
+              topUrls: j.urls.slice().sort((a, b) => (a.url_status === "online" ? 0 : 1) - (b.url_status === "online" ? 0 : 1)).slice(0, 4)
+                .map((u) => ({ url: u.url, status: u.url_status, threat: u.threat || null, added: u.dateadded ? String(u.dateadded).split(" ")[0] : null })),
             };
           }
         } catch (e) { console.warn("Enrich URLhaus failed:", e.message); }
@@ -2897,6 +3296,11 @@ export default function App() {
               payloads: Array.isArray(j.payloads) ? j.payloads.length : 0,
               first: j.date_added ? j.date_added.split(" ")[0] : null,
               last: j.last_online ? j.last_online.split(" ")[0] : null,
+              blacklists: Object.entries(j.blacklists && typeof j.blacklists === "object" ? j.blacklists : {}).filter(([, v]) => v && v !== "not listed").map(([k, v]) => `${k.replace(/_/g, " ")}: ${v}`),
+              payloadList: (Array.isArray(j.payloads) ? j.payloads : []).slice(0, 4).map((p) => ({
+                filename: p.filename || null, fileType: p.file_type || null, sha256: p.response_sha256 || null,
+                signature: p.signature || null, vtPercent: p.virustotal?.percent ?? null,
+              })).filter((p) => p.sha256),
             };
           }
         } catch (e) { console.warn("Enrich URLhaus URL failed:", e.message); }
@@ -2988,6 +3392,13 @@ export default function App() {
               detections: detections.length ? detections.join(" | ") : null,
               fileName: d.file_name || null,
               codeSign,
+              yara: (Array.isArray(d.yara_rules) ? d.yara_rules : []).map((y) => y?.rule_name).filter(Boolean).slice(0, 5),
+              clamav: (Array.isArray(d.intelligence?.clamav) ? d.intelligence.clamav : []).filter(Boolean).slice(0, 4),
+              originCountry: d.origin_country || null,
+              reporter: d.reporter || null,
+              imphash: d.imphash || null,
+              ssdeep: d.ssdeep || null,
+              tlsh: d.tlsh || null,
             };
             // Canonical SHA256 from MalwareBazaar — case-insensitive
             const mbSHA256 = d.sha256_hash || d.SHA256 || null;
@@ -3076,6 +3487,7 @@ export default function App() {
                 completed: tj.completed ? tj.completed.split("T")[0] : null,
                 c2Urls: tj.c2Urls || [],
                 triageUrl: tj.triageUrl,
+                ttps: tj.ttps || [], signatures: tj.signatures || [], config: tj.config || null,
               };
               // Canonical SHA256 from Tri.age — case-insensitive
               const tSHA256 = tj.sha256 || tj.SHA256 || null;
@@ -3145,6 +3557,8 @@ export default function App() {
             if (cIPs.length) {
               vt.contactedIPs = cIPs.map((p) => p.id).filter(Boolean).slice(0, 20);
             }
+            // Identity / per-vendor / rule detail that used to be dropped.
+            Object.assign(vt, parseVtFileExtras(vAttr));
             // VT had a record for this hash (vAttr exists) but nothing notable
             // came back — say so explicitly rather than showing nothing, so
             // "checked, unremarkable" isn't confused with "never checked".
@@ -3198,6 +3612,7 @@ export default function App() {
               tags: tags.length ? tags.join(", ") : null,
               classifTags: classifTags.length ? classifTags.join(", ") : null,
               mitreAttacks: mitreAttacks.length ? mitreAttacks : null,
+              mitreDetail: Array.isArray(best.mitre_attcks) ? best.mitre_attcks.map((m) => ({ id: m?.attck_id || "", name: m?.technique || "" })).filter((m) => m.id).slice(0, 12) : [],
               domains: domains.length ? domains : null,
               hosts: hosts.length ? hosts : null,
               compromised: compromised.length ? compromised : null,
@@ -3268,6 +3683,7 @@ export default function App() {
                 tags: tags.length ? tags.join(", ") : null,
                 classifTags: classifTags.length ? classifTags.join(", ") : null,
                 mitreAttacks: mitreAttacks.length ? mitreAttacks : null,
+              mitreDetail: Array.isArray(best.mitre_attcks) ? best.mitre_attcks.map((m) => ({ id: m?.attck_id || "", name: m?.technique || "" })).filter((m) => m.id).slice(0, 12) : [],
                 domains: domains.length ? domains : null,
                 hosts: hosts.length ? hosts : null,
                 compromised: compromised.length ? compromised : null,
@@ -3413,6 +3829,7 @@ export default function App() {
               whitelisted: j.whitelisted ?? null,
               validation: valFlags.length ? valFlags.join(", ") : null,
               parentDomain: j._parentFallback || null,
+              ...parseOtxPulseDetail(j),
             };
           }
         } catch (e) { console.warn("Enrich OTX failed:", e.message); }
@@ -3521,6 +3938,28 @@ export default function App() {
               city: g.city || null,
               region: g.region || null,
               privacy: privacyFlags.length ? privacyFlags.join(", ") : null,
+              // Previously dropped — same response, no extra call.
+              asnName: g.asn?.name || null,
+              asnType: g.asn?.type || null,
+              route: g.asn?.route || null,
+              netname: g.asn?.netname || null,
+              rir: g.asn?.rir || null,
+              company: g.company?.name || null,
+              companyType: g.company?.type || null,
+              hostingProvider: g.hosting?.provider || null,
+              anycast: !!g.is_anycast,
+              timezone: g.time_zone || null,
+              flags: [
+                ...privacyFlags,
+                ...(g.privacy?.is_abuser ? ["Known Abuser"] : []),
+                ...(g.privacy?.is_anonymous ? ["Anonymizer"] : []),
+                ...(g.privacy?.is_icloud_relay ? ["iCloud Relay"] : []),
+                ...(g.privacy?.is_bogon ? ["Bogon"] : []),
+              ],
+              abuse: g.abuse && typeof g.abuse === "object" ? {
+                name: g.abuse.name || null, email: g.abuse.email || null, phone: g.abuse.phone || null,
+                address: g.abuse.address || null, network: g.abuse.network || null,
+              } : null,
             };
           }
         } catch (e) { console.warn("Enrich IPLocate failed:", e.message); }
@@ -3564,13 +4003,23 @@ export default function App() {
         try {
           const sj = await callEnrich("sans_isc");
           const ipInfo = sj?.ip;
-          if (ipInfo && (ipInfo.count || ipInfo.attacks)) {
+          const sansFeeds = ipInfo && ipInfo.threatfeeds && typeof ipInfo.threatfeeds === "object"
+            ? Object.entries(ipInfo.threatfeeds).map(([name, v]) => ({ name, first: v?.firstseen || null, last: v?.lastseen || null }))
+            : [];
+          if (ipInfo && (ipInfo.count || ipInfo.attacks || sansFeeds.length)) {
             results.sansIsc = {
               attacks: parseInt(ipInfo.attacks, 10) || 0,
               count: parseInt(ipInfo.count, 10) || 0,
               minDate: ipInfo.mindate || null,
               maxDate: ipInfo.maxdate || null,
-              threatFeeds: ipInfo.threatfeeds ? Object.keys(ipInfo.threatfeeds) : [],
+              threatFeeds: sansFeeds.map((f) => f.name),
+              feeds: sansFeeds,
+              asn: ipInfo.as || null,
+              asName: ipInfo.asname || null,
+              network: ipInfo.network || null,
+              abuseContact: ipInfo.asabusecontact || null,
+              maxRisk: ipInfo.maxrisk ?? null,
+              comment: ipInfo.comment || null,
             };
           }
         } catch (e) { console.warn("Enrich SANS ISC failed:", e.message); }
@@ -3708,6 +4157,16 @@ export default function App() {
                 // the whole card down to a single "non-routable" line.
                 isPublic: typeof d.isPublic === "boolean" ? d.isPublic : null,
                 categories: categories.length ? categories.join(", ") : null,
+                distinctReporters: typeof d.numDistinctUsers === "number" ? d.numDistinctUsers : null,
+                isWhitelisted: d.isWhitelisted === true,
+                isTor: d.isTor === true,
+                hostnames: Array.isArray(d.hostnames) ? d.hostnames.filter(Boolean).slice(0, 4) : [],
+                // verbose=1 includes report comments — the analyst-readable "what did it do".
+                recentReports: Array.isArray(d.reports)
+                  ? d.reports.filter((r) => r && r.comment).slice().sort((a, b) => String(b.reportedAt || "").localeCompare(String(a.reportedAt || ""))).slice(0, 3)
+                      .map((r) => ({ date: r.reportedAt ? String(r.reportedAt).split("T")[0] : null, comment: String(r.comment).replace(/\s+/g, " ").slice(0, 180),
+                        categories: (r.categories || []).slice(0, 3), cc: r.reporterCountryCode || null }))
+                  : [],
               };
             }
           }
@@ -3841,6 +4300,23 @@ export default function App() {
               })(),
             };
 
+            // Fields already present in the search hit (no extra call) that were
+            // previously dropped: rDNS, Cisco Umbrella popularity rank, HTTP status,
+            // MIME, language, cert lifetime and request/IP/country counts.
+            if (isPrimaryTarget) {
+              const pg = latest.page || {};
+              const st = latest.stats || {};
+              Object.assign(results.urlscan, {
+                ptr: pg.ptr || null,
+                umbrellaRank: typeof pg.umbrellaRank === "number" ? pg.umbrellaRank : null,
+                httpStatus: pg.status || null,
+                mimeType: pg.mimeType || null,
+                language: pg.language || null,
+                tlsValidDays: typeof pg.tlsValidDays === "number" ? pg.tlsValidDays : null,
+                scanStats: (st.requests != null || st.uniqIPs != null) ? { requests: st.requests ?? null, uniqIPs: st.uniqIPs ?? null, uniqCountries: st.uniqCountries ?? null } : null,
+              });
+            }
+
             // ---- Deep result fetch: contacted infra, brand impersonation, loaded resources ----
             // The search API omits these; fetch the latest scan's full document.
             // Only when the latest scan is actually ABOUT our host — otherwise we'd
@@ -3915,6 +4391,27 @@ export default function App() {
                 results.urlscan.contactedIPs = contactedIPs.length ? contactedIPs : null;
                 results.urlscan.contactedDomains = contactedDomains.length ? contactedDomains : null;
                 results.urlscan.resourceHashes = resourceHashes.length ? resourceHashes : null;
+                // Technology fingerprint (Wappalyzer), engine/community verdicts, redirect chain.
+                const techRaw = Array.isArray(detail.meta?.processors?.wappa?.data) ? detail.meta.processors.wappa.data : [];
+                const tech = techRaw.map((w) => ({ app: w?.app || "", cats: (w?.categories || []).map((c) => c?.name).filter(Boolean).slice(0, 2) })).filter((w) => w.app).slice(0, 10);
+                results.urlscan.tech = tech.length ? tech : null;
+                const engV = detail.verdicts?.engines;
+                results.urlscan.engineVerdict = engV && typeof engV.enginesTotal === "number" && engV.enginesTotal > 0
+                  ? { malicious: engV.maliciousTotal ?? (Array.isArray(engV.malicious) ? engV.malicious.length : 0), total: engV.enginesTotal } : null;
+                const comV = detail.verdicts?.community;
+                results.urlscan.communityVotes = comV && (comV.votesTotal || 0) > 0
+                  ? { malicious: comV.votesMalicious || 0, benign: comV.votesBenign || 0, total: comV.votesTotal } : null;
+                const certList = Array.isArray(detail.lists?.certificates) ? detail.lists.certificates : [];
+                results.urlscan.tlsSubject = certList[0]?.subjectName || null;
+                results.urlscan.tlsValidTo = certList[0]?.validTo ? isoDay(certList[0].validTo) : null;
+                const chain = [];
+                (Array.isArray(detail.data?.requests) ? detail.data.requests : []).slice(0, 60).forEach((rq) => {
+                  const from = rq?.request?.redirectResponse?.url;
+                  const to = rq?.request?.request?.url;
+                  if (from && to) { if (!chain.length) chain.push(from); chain.push(to); }
+                });
+                const chainU = chain.filter((u, i) => i === 0 || u !== chain[i - 1]).slice(0, 6);
+                results.urlscan.redirectChain = chainU.length > 1 ? chainU : null;
               }
             } catch (e) { console.warn("urlscan result detail failed:", e.message); }
             } // end if (isPrimaryTarget)
@@ -4134,8 +4631,19 @@ export default function App() {
               if (Array.isArray(commFiles) && commFiles.length) vt.communicatingFiles = commFiles.map((f) => f.id).filter(Boolean).slice(0, 20);
               if (Array.isArray(dlFiles) && dlFiles.length) vt.downloadedFiles = dlFiles.map((f) => f.id).filter(Boolean).slice(0, 20);
               if (Array.isArray(subs) && subs.length) vt.subdomains = subs.map((s) => s.id).filter(Boolean).slice(0, 20);
+              Object.assign(vt, parseVtNetworkExtras(vAttr));
               vt.noNotableData = !(vt.detectionStats.malicious || vt.detectionStats.suspicious || vt.detectionStats.harmless || vt.categories.length || vt.communicatingFiles || vt.downloadedFiles);
               results.virustotal = vt;
+              // Registrar from VT only fills the gap when RDAP/WhoisJSON had none.
+              if (vt.registrar && !results.domainContacts?.registrar?.name) {
+                results.domainContacts = {
+                  contacts: [], nameservers: [], dnssec: null, proxy: null, redacted: false,
+                  ...(results.domainContacts || {}),
+                  registrar: { name: vt.registrar, ianaId: "", url: "" },
+                  source: results.domainContacts?.source || "virustotal",
+                  domain: registrableDomain(value),
+                };
+              }
             }
           } catch (e) { console.warn("Enrich VirusTotal (domain) failed:", e.message); }
           setPartial();
@@ -4171,6 +4679,7 @@ export default function App() {
               };
               const commFiles = vj?.data?.relationships?.communicating_files?.data;
               if (Array.isArray(commFiles) && commFiles.length) vt.communicatingFiles = commFiles.map((f) => f.id).filter(Boolean).slice(0, 20);
+              Object.assign(vt, parseVtNetworkExtras(vAttr));
               vt.noNotableData = !(vt.detectionStats.malicious || vt.detectionStats.suspicious || vt.detectionStats.harmless || vt.tags.length || vt.communicatingFiles);
               results.virustotal = vt;
             }
@@ -4186,6 +4695,7 @@ export default function App() {
         // Tri.age submission and VT's first-submission date are both a
         // reasonable "first known" proxy when no earlier ITW sighting exists.
         results.triage?.submitted, results.virustotal?.firstSubmission,
+        results.kaspersky?.firstSeen, results.sansIsc?.minDate,
       ].filter(Boolean).sort();
       const allLasts = [
         results.threatfox?.last, results.urlhaus?.last,
@@ -4196,6 +4706,7 @@ export default function App() {
         // Tri.age's analysis-completed date and VT's last-submission date —
         // both fold into the same consolidated Last Seen, not a separate chip.
         results.triage?.completed, results.virustotal?.lastSubmission,
+        results.kaspersky?.lastSeen, results.sansIsc?.maxDate,
       ].filter(Boolean).sort();
       if (allFirsts.length || allLasts.length) {
         const firstDate = allFirsts.length ? allFirsts[0] : null;
@@ -5359,12 +5870,18 @@ export default function App() {
       ha_downloaded:     e.hybridAnalysis?.submitContext?.join(" | ") || "",
       // Domain registration
       domain_age:        e.domainReg?.ageDays != null ? smartAge(e.domainReg.ageDays) : "",
-      domain_registered: e.domainReg?.registered || "",
+      domain_registered: e.domainReg?.date || "",
       domain_status:     e.domainReg?.status || "",
       domain_registrar:  e.domainContacts?.registrar?.name || "",
       domain_registrant: (() => { const r = e.domainContacts?.contacts?.find((c) => c.role === "registrant"); return r ? [r.org || r.name, r.email, r.phone, r.address].filter(Boolean).join(" | ") : (e.domainContacts?.proxy ? `Privacy-protected (${e.domainContacts.proxy})` : ""); })(),
       domain_abuse:      (() => { const a = e.domainContacts?.contacts?.find((c) => c.role === "abuse"); return a ? [a.email, a.phone].filter(Boolean).join(" | ") : ""; })(),
       domain_nameservers: e.domainContacts?.nameservers?.join(", ") || "",
+      // Network & Ownership (IPs) and attribution context
+      asn_type:          e.whoisASN?.asnType || "",
+      network_route:     e.whoisASN?.route || e.sansIsc?.network || "",
+      ip_abuse_contact:  [e.whoisASN?.abuse?.email || e.sansIsc?.abuseContact, e.whoisASN?.abuse?.phone].filter(Boolean).join(" | "),
+      threat_actors:     (e.otx?.related?.adversaries || []).join(", "),
+      malware_family:    deriveFamilyConsensus(e).map((f) => f.name).join(", "),
       // SANS ISC / DShield
       sansisc_attacks:   e.sansIsc?.attacks ?? "",
       sansisc_feeds:     e.sansIsc?.threatFeeds?.join(", ") || "",
@@ -5408,6 +5925,7 @@ export default function App() {
     // Domain
     "Domain Age","Domain Registered","Domain Status",
     "Domain Registrar","Domain Registrant","Domain Abuse Contact","Domain Nameservers",
+    "ASN Type","Network Route","IP Abuse Contact","Threat Actors (OTX)","Malware Family (consensus)",
     // SANS ISC / DShield
     "SANS ISC Attacks","SANS ISC Threat Feeds",
     // CVE — CISA KEV / EPSS / NVD
@@ -5442,6 +5960,8 @@ export default function App() {
       "Domain Status": r.domain_status,
       "Domain Registrar": r.domain_registrar, "Domain Registrant": r.domain_registrant,
       "Domain Abuse Contact": r.domain_abuse, "Domain Nameservers": r.domain_nameservers,
+      "ASN Type": r.asn_type, "Network Route": r.network_route, "IP Abuse Contact": r.ip_abuse_contact,
+      "Threat Actors (OTX)": r.threat_actors, "Malware Family (consensus)": r.malware_family,
       "SANS ISC Attacks": r.sansisc_attacks, "SANS ISC Threat Feeds": r.sansisc_feeds,
       "CISA KEV": r.cisa_kev, "EPSS Score": r.epss_score,
       "NVD CVSS": r.nvd_cvss, "NVD Description": r.nvd_description,
@@ -8214,11 +8734,34 @@ export default function App() {
                           const hasPivotIP = hasUrlscan && d.urlscan.servingIP && d.urlscan.servingIP !== arr[i];
                           const isCondensed = isRowCollapsed;
                           // Compact row: bold label on the left, chips flowing right
-                          const secRow = (label, children) => (
+                          const secRow = (label, children, hint) => (
                             <div className="flex items-start gap-2 py-0.5">
-                              <span className="text-[9px] uppercase tracking-widest font-black shrink-0 pt-0.5" style={{ color: "#8aa0ad", width: "104px", letterSpacing: "1.5px" }}>{label}</span>
+                              <span className="shrink-0 pt-0.5" style={{ width: "104px" }}>
+                                <span className="block text-[9px] uppercase tracking-widest font-black" style={{ color: "#8aa0ad", letterSpacing: "1.5px" }}>{label}</span>
+                                {hint && <span className="block text-[8px] leading-tight mt-0.5" style={{ color: "#5d7382" }}>{hint}</span>}
+                              </span>
                               <div className="flex flex-wrap gap-1 flex-1 min-w-0">{children}</div>
                             </div>
+                          );
+                          // Shared building blocks for the evidence panels below.
+                          const pill = (color) => ({ color, backgroundColor: `${color}14`, border: `1px solid ${color}40` });
+                          const accent = (color) => ({ background: `${color}0d`, borderLeft: `3px solid ${color}`, borderRadius: 6 });
+                          const kvRow = (label, content, k) => content ? (
+                            <div key={k || label} className="flex items-start gap-2 py-0.5">
+                              <span className="shrink-0 text-[9px] uppercase tracking-wider font-bold pt-0.5" style={{ color: "#6b8494", width: 92 }}>{label}</span>
+                              <span className="min-w-0 flex-1 flex flex-wrap items-center gap-1" style={{ color: "#cfe0e8" }}>{content}</span>
+                            </div>
+                          ) : null;
+                          const copyChip = (val, ck, opts = {}) => (
+                            <button key={ck} onClick={() => copyText(val, `${eKey}::cp::${ck}`)} title="Click to copy"
+                              className="rounded px-1.5 py-0.5 text-left"
+                              style={{ ...pill(opts.color || "#94a3b8"), cursor: "pointer", fontFamily: opts.mono ? "monospace" : "inherit", wordBreak: "break-all" }}>
+                              {copied === `${eKey}::cp::${ck}` ? "Copied!" : val}
+                            </button>
+                          );
+                          const extLink = (href, text, color) => (
+                            <a key={href} href={href} target="_blank" rel="noreferrer noopener" className="rounded px-1.5 py-0.5"
+                              style={{ ...pill(color || "#38bdf8"), textDecoration: "none" }}>{text} ↗</a>
                           );
                           return (
                           <div className="ml-4 mb-1.5 text-[10px]">
@@ -8234,8 +8777,75 @@ export default function App() {
                                 </button>
                               </div>
                             )}
+                            {/* ── WHY THIS VERDICT (deciding engines, conflicts, family consensus, FP-risk) ── */}
+                            {!isCondensed && (() => {
+                              const sig = deriveVerdictSignals(d, cat);
+                              const polOf = { Malicious: "mal", Suspicious: "susp", Whitelisted: "clean" }[d._verdict];
+                              const drivers = polOf ? sig.filter((x) => x.polarity === polOf).sort((a, b) => b.weight - a.weight) : [];
+                              const against = polOf === "clean" ? sig.filter((x) => x.polarity !== "clean") : polOf ? sig.filter((x) => x.polarity === "clean") : [];
+                              const family = deriveFamilyConsensus(d);
+                              const risk = deriveRiskContext(d);
+                              const flaggedBad = d._verdict === "Malicious" || d._verdict === "Suspicious";
+                              const vc = d._verdict === "Malicious" ? "#ff4d6d" : d._verdict === "Suspicious" ? "#fbbf24" : d._verdict === "Whitelisted" ? "#00ff9c" : "#8aa0ad";
+                              const dr = d.domainReg;
+                              const vtCertDays = d.virustotal?.cert?.notBefore ? Math.floor((Date.now() - new Date(d.virustotal.cert.notBefore).getTime()) / 86400000) : null;
+                              const certAge = d.urlscan?.tlsAgeDays ?? (vtCertDays != null && !isNaN(vtCertDays) ? vtCertDays : null);
+                              const fresh = isDomUrl && !isIpAsDomain && dr?.state === "active" && dr.ageDays != null && dr.ageDays < 90 && certAge != null && certAge < 30
+                                ? `Domain ${smartAge(dr.ageDays)} old · TLS certificate ${smartAge(certAge)} old` : null;
+                              if (!drivers.length && !family.length && !risk.reasons.length && !fresh) return null;
+                              return secRow("Why This Verdict", (
+                                <div className="w-full rounded-md p-2 flex flex-col gap-1.5" style={accent(vc)}>
+                                  {drivers.length > 0 && (
+                                    <div className="flex flex-wrap items-center gap-1">
+                                      <span className="rounded px-1.5 py-0.5 font-bold" style={pill(vc)}>{d._verdict === "Malicious" ? "🔴" : d._verdict === "Suspicious" ? "🟡" : "🟢"} {d._verdict}</span>
+                                      <span style={{ color: "#8aa0ad" }}>decided by</span>
+                                      {drivers.slice(0, 5).map((x, i) => (
+                                        <span key={i} className="rounded px-1.5 py-0.5" style={pill(vc)}><b>{x.engine}</b> · {x.text}</span>
+                                      ))}
+                                    </div>
+                                  )}
+                                  {against.length > 0 && (
+                                    <div className="flex flex-wrap items-center gap-1">
+                                      <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#f59e0b")}>⚠ Conflicting signals</span>
+                                      {against.slice(0, 4).map((x, i) => (
+                                        <span key={i} className="rounded px-1.5 py-0.5" style={pill(x.polarity === "clean" ? "#4ade80" : "#fbbf24")}><b>{x.engine}</b> · {x.text}</span>
+                                      ))}
+                                      <span style={{ color: "#8aa0ad" }}>— verify before acting</span>
+                                    </div>
+                                  )}
+                                  {family.length > 0 && (
+                                    <div className="flex flex-wrap items-center gap-1">
+                                      <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#c084fc")}>🧬 Malware family</span>
+                                      {family.map((f) => (
+                                        <span key={f.name} className="rounded px-1.5 py-0.5" style={pill("#c084fc")}>
+                                          <b>{f.name}</b> <span style={{ color: "#8aa0ad" }}>· {f.sources.join(", ")}</span>
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
+                                  {risk.reasons.length > 0 && (
+                                    <div className="flex flex-wrap items-center gap-1">
+                                      <span className="rounded px-1.5 py-0.5 font-bold" style={pill(flaggedBad ? "#f59e0b" : "#38bdf8")}>🌐 Shared / popular infrastructure</span>
+                                      {risk.reasons.map((r) => <span key={r} className="rounded px-1.5 py-0.5" style={pill("#38bdf8")}>{r}</span>)}
+                                      <span style={{ color: flaggedBad ? "#fbbf24" : "#8aa0ad" }}>
+                                        {flaggedBad
+                                          ? "— flagged despite this: could be a compromised site or an abused legitimate service — verify before blocking outright"
+                                          : "— blocking this indicator outright may cause collateral damage"}
+                                      </span>
+                                    </div>
+                                  )}
+                                  {fresh && (
+                                    <div className="flex flex-wrap items-center gap-1">
+                                      <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#ff4d6d")}>🆕 Freshly stood-up infrastructure</span>
+                                      <span style={{ color: "#cfe0e8" }}>{fresh}</span>
+                                      <span style={{ color: "#8aa0ad" }}>— typical of phishing / C2 kits</span>
+                                    </div>
+                                  )}
+                                </div>
+                              ), "Deciding engines · conflicts · risk context");
+                            })()}
                             {/* ── VERDICT & IDENTITY ── */}
-                            {!isCondensed && cat === "CVE" && (hasCisaKev || hasEpss || hasNvd) && secRow("Vulnerability Intel", (
+                            {!isCondensed && cat === "CVE" && (hasCisaKev || hasEpss || hasNvd) && secRow("Vulnerability Brief", (
                               <>
                                   {hasCisaKev && d.cisaKev.listed && (
                                     <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.15)", border: "1px solid rgba(255,77,109,0.4)" }}
@@ -8266,15 +8876,45 @@ export default function App() {
                                       }} title="NVD (National Vulnerability Database) — severity is shown as context only and does not by itself drive the verdict">
                                         NVD · CVSS {d.nvd.cvss ?? "—"}{d.nvd.severity ? ` (${d.nvd.severity})` : ""}{d.nvd.published ? ` · Published ${d.nvd.published}` : ""}
                                       </span>
-                                      {d.nvd.description && (
-                                        <span className="rounded-full px-2 py-0.5 text-[10px]" style={{ color: "#7f95a3", backgroundColor: "rgba(148,163,184,0.04)", border: "1px solid rgba(148,163,184,0.15)" }}>
-                                          {d.nvd.description.length > 220 ? d.nvd.description.slice(0, 220) + "…" : d.nvd.description}
+                                      {(d.nvd.kevName || d.nvd.description) && (
+                                        <span className="rounded-md px-2 py-1 text-[10px] leading-snug" style={{ color: "#9fb3bd", backgroundColor: "rgba(148,163,184,0.05)", border: "1px solid rgba(148,163,184,0.15)" }}>
+                                          {d.nvd.kevName && <b style={{ color: "#eafcff" }}>{d.nvd.kevName}{d.cisaKev?.vendorProject || d.cisaKev?.product ? ` — ${[d.cisaKev.vendorProject, d.cisaKev.product].filter(Boolean).join(" ")}` : ""}. </b>}
+                                          {d.nvd.description ? (d.nvd.description.length > 380 ? d.nvd.description.slice(0, 380) + "…" : d.nvd.description) : ""}
                                         </span>
                                       )}
                                     </span>
                                   )}
+                                  {hasNvd && (d.nvd.attackVector || d.nvd.complexity || d.nvd.privileges) && (() => {
+                                    const n = d.nvd;
+                                    const up = (x) => String(x || "").toUpperCase();
+                                    const remote = up(n.attackVector) === "NETWORK" && up(n.complexity) === "LOW" && (up(n.privileges) === "NONE") && (!n.userInteraction || up(n.userInteraction) === "NONE");
+                                    const title = (x) => { const t = String(x || ""); return t.charAt(0) + t.slice(1).toLowerCase(); };
+                                    return (
+                                      <div className="w-full rounded-md p-2 mt-0.5" style={accent(remote ? "#ff4d6d" : "#7c9cff")}>
+                                        <div className="flex flex-wrap items-center gap-1">
+                                          {remote && <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#ff4d6d")}>⚡ Remotely exploitable · no authentication · no user interaction</span>}
+                                          {n.attackVector && <span className="rounded px-1.5 py-0.5" style={pill("#7c9cff")}>Attack vector: {title(n.attackVector)}</span>}
+                                          {n.complexity && <span className="rounded px-1.5 py-0.5" style={pill("#7c9cff")}>Complexity: {title(n.complexity)}</span>}
+                                          {n.privileges && <span className="rounded px-1.5 py-0.5" style={pill("#7c9cff")}>Privileges: {title(n.privileges)}</span>}
+                                          {n.userInteraction && <span className="rounded px-1.5 py-0.5" style={pill("#7c9cff")}>User interaction: {title(n.userInteraction)}</span>}
+                                          {n.scope && <span className="rounded px-1.5 py-0.5" style={pill("#7c9cff")}>Scope: {title(n.scope)}</span>}
+                                          {n.exploitability != null && <span className="rounded px-1.5 py-0.5" style={pill("#94a3b8")} title="NVD exploitability sub-score">Exploitability {n.exploitability}</span>}
+                                          {n.impact != null && <span className="rounded px-1.5 py-0.5" style={pill("#94a3b8")} title="NVD impact sub-score">Impact {n.impact}</span>}
+                                          {n.vector && copyChip(n.vector, "cvss-vector", { mono: true, color: "#94a3b8" })}
+                                        </div>
+                                        {n.cwes?.length > 0 && kvRow("Weakness", n.cwes.map((w) => extLink(`https://cwe.mitre.org/data/definitions/${w.replace("CWE-", "")}.html`, w, "#c084fc")), "cwe")}
+                                        {(n.products?.length > 0 || d.cisaKev?.product) && kvRow("Affected", (n.products?.length ? n.products : [[d.cisaKev.vendorProject, d.cisaKev.product].filter(Boolean).join(" ")]).map((pName) => <span key={pName} className="rounded px-1.5 py-0.5" style={pill("#fbbf24")}>{pName}</span>), "affected")}
+                                        {n.kevAction && kvRow("Required action", <span className="text-[10px] leading-snug" style={{ color: "#ffb4b4" }}>{n.kevAction.length > 300 ? n.kevAction.slice(0, 300) + "…" : n.kevAction}</span>, "action")}
+                                        {n.refs?.patch?.length > 0 && kvRow("Patch / fix", n.refs.patch.map((r) => extLink(r.url, r.host, "#00ff9c")), "patch")}
+                                        {n.refs?.advisory?.length > 0 && kvRow("Vendor advisory", n.refs.advisory.map((r) => extLink(r.url, r.host, "#38bdf8")), "adv")}
+                                        {n.refs?.mitigation?.length > 0 && kvRow("Mitigation", n.refs.mitigation.map((r) => extLink(r.url, r.host, "#fbbf24")), "mit")}
+                                        {n.refs?.exploit?.length > 0 && kvRow("Public exploit", n.refs.exploit.map((r) => extLink(r.url, r.host, "#ff4d6d")), "exp")}
+                                        {(n.status || n.modified) && kvRow("Record", <span style={{ color: "#8aa0ad" }}>{n.status || ""}{n.modified ? ` · last modified ${fmtDate(n.modified)}` : ""}</span>, "rec")}
+                                      </div>
+                                    );
+                                  })()}
                               </>
-                            ))}
+                            ), "Exploitation · severity · affected · fixes")}
                             {!isCondensed && (hasVerdict || hasCrowdstrike || hasThreatfox || hasMalBaz || hasUrlhaus || hasPhishtank || hasCircl || (hasKaspersky && isHash)) && secRow("Verdict & Identity", (
                               <>
                                   {hasCrowdstrike && (
@@ -8296,17 +8936,60 @@ export default function App() {
                                     </span>
                                   )}
                                   {hasThreatfox && (
-                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.12)", border: "1px solid rgba(255,77,109,0.3)" }}>
-                                      ThreatFox · {d.threatfox.malware} · {d.threatfox.threat}{d.threatfox.confidence ? ` · ${d.threatfox.confidence}%` : ""}{d.threatfox.tags ? ` · ${d.threatfox.tags}` : ""}
+                                    <span className="flex flex-col gap-0.5">
+                                      <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(255,77,109,0.12)", border: "1px solid rgba(255,77,109,0.3)" }}>
+                                        ThreatFox · {d.threatfox.malware}{d.threatfox.port ? <> · <b>C2 port {d.threatfox.port}</b></> : ""} · {d.threatfox.threat}{d.threatfox.confidence ? ` · ${d.threatfox.confidence}%` : ""}{d.threatfox.tags ? ` · ${d.threatfox.tags}` : ""}
+                                        {d.threatfox.link && <>{" · "}<a href={d.threatfox.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a></>}
+                                      </span>
+                                      {(d.threatfox.aliases?.length > 0 || d.threatfox.families?.length > 1 || d.threatfox.recordCount > 1 || d.threatfox.reference || d.threatfox.malpedia || d.threatfox.reporter) && (
+                                        <span className="rounded-full px-2 py-0.5 text-[9px] flex flex-wrap items-center gap-x-2" style={{ color: "#ff8a9b", backgroundColor: "rgba(255,77,109,0.06)", border: "1px solid rgba(255,77,109,0.2)" }}>
+                                          {d.threatfox.families?.length > 1 && <span>⚠ {d.threatfox.families.length} different families reported: {d.threatfox.families.join(", ")}</span>}
+                                          {d.threatfox.recordCount > 1 && <span>{d.threatfox.recordCount} records</span>}
+                                          {d.threatfox.aliases?.length > 0 && <span>aka {d.threatfox.aliases.join(", ")}</span>}
+                                          {d.threatfox.reporter && <span>reported by {d.threatfox.reporter}</span>}
+                                          {d.threatfox.reference && <a href={d.threatfox.reference} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>Reference ↗</a>}
+                                          {d.threatfox.malpedia && <a href={d.threatfox.malpedia} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>Malpedia ↗</a>}
+                                        </span>
+                                      )}
                                     </span>
                                   )}
                                   {hasUrlhaus && (
-                                    <span className="rounded-full px-2 py-0.5" style={{
-                                      color: d.urlhaus.status === "online" ? "#ff4d6d" : "#fbbf24",
-                                      backgroundColor: d.urlhaus.status === "online" ? "rgba(255,77,109,0.12)" : "rgba(251,191,36,0.12)",
-                                      border: `1px solid ${d.urlhaus.status === "online" ? "rgba(255,77,109,0.3)" : "rgba(251,191,36,0.3)"}`,
-                                    }}>
-                                      URLhaus · {d.urlhaus.status === "online" ? "🔴 Online" : "⚫ Offline"}{d.urlhaus.urls_total ? ` · ${d.urlhaus.urls_total} URLs` : ""}{d.urlhaus.tags ? ` · ${d.urlhaus.tags}` : ""}
+                                    <span className="flex flex-col gap-0.5">
+                                      <span className="rounded-full px-2 py-0.5" style={{
+                                        color: d.urlhaus.status === "online" ? "#ff4d6d" : "#fbbf24",
+                                        backgroundColor: d.urlhaus.status === "online" ? "rgba(255,77,109,0.12)" : "rgba(251,191,36,0.12)",
+                                        border: `1px solid ${d.urlhaus.status === "online" ? "rgba(255,77,109,0.3)" : "rgba(251,191,36,0.3)"}`,
+                                      }}>
+                                        URLhaus · {d.urlhaus.status === "online" ? "🔴 Online" : "⚫ Offline"}{d.urlhaus.urls_total ? ` · ${d.urlhaus.urls_total} URLs${d.urlhaus.online != null ? ` (${d.urlhaus.online} online)` : ""}` : ""}{d.urlhaus.tags ? ` · ${d.urlhaus.tags}` : ""}
+                                      </span>
+                                      {d.urlhaus.blacklists?.length > 0 && (
+                                        <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#ff8a9b", backgroundColor: "rgba(255,77,109,0.06)", border: "1px solid rgba(255,77,109,0.2)" }}
+                                          title="Host-level reputation lists returned alongside the URLhaus record">
+                                          🚫 Blocklisted: {d.urlhaus.blacklists.join(" · ")}
+                                        </span>
+                                      )}
+                                      {d.urlhaus.topUrls?.length > 0 && (
+                                        <span className="rounded-md px-2 py-1 text-[9px] flex flex-col gap-0.5" style={{ color: "#9fb3bd", backgroundColor: "rgba(148,163,184,0.04)", border: "1px solid rgba(148,163,184,0.15)" }}>
+                                          {d.urlhaus.topUrls.map((u) => (
+                                            <span key={u.url} className="break-all" style={{ fontFamily: "monospace" }}>
+                                              {u.status === "online" ? "🔴" : "⚫"} {defang(u.url)}{u.threat ? ` · ${u.threat.replace(/_/g, " ")}` : ""}{u.added ? ` · ${u.added}` : ""}
+                                            </span>
+                                          ))}
+                                        </span>
+                                      )}
+                                      {d.urlhaus.payloadList?.length > 0 && (
+                                        <span className="rounded-md px-2 py-1 text-[9px] flex flex-col gap-0.5" style={{ color: "#9fb3bd", backgroundColor: "rgba(148,163,184,0.04)", border: "1px solid rgba(148,163,184,0.15)" }}>
+                                          {d.urlhaus.payloadList.map((p) => (
+                                            <span key={p.sha256} className="flex flex-wrap items-center gap-1">
+                                              <span>📦 {p.filename || "payload"}{p.fileType ? ` (${p.fileType})` : ""}{p.signature ? ` · ${p.signature}` : ""}{p.vtPercent != null ? ` · VT ${p.vtPercent}%` : ""}</span>
+                                              <span style={{ fontFamily: "monospace", color: "#7f95a3" }}>{p.sha256.slice(0, 16)}…</span>
+                                              {isPivotAdded("SHA256", p.sha256)
+                                                ? <span className="rounded px-1 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c" }}>Added</span>
+                                                : <button onClick={() => addPivotIOC("SHA256", p.sha256, `URLhaus payload of ${arr[i]}`)} className="rounded px-1 font-bold" style={{ color: "#04111a", backgroundColor: "#22d3ee", cursor: "pointer", border: "none" }}>+ Add as IOC</button>}
+                                            </span>
+                                          ))}
+                                        </span>
+                                      )}
                                     </span>
                                   )}
                                   {hasPhishtank && (
@@ -8316,23 +8999,13 @@ export default function App() {
                                       border: `1px solid ${d.phishtank.verified && d.phishtank.valid ? "rgba(255,77,109,0.3)" : "rgba(138,160,173,0.25)"}`,
                                     }} title="PhishTank community-verified phishing report">
                                       {d.phishtank.verified && d.phishtank.valid ? "🔴 PhishTank · Verified Phishing" : "⚪ PhishTank · Reported, unverified"}
-                                      {d.phishtank.verifiedAt ? ` · ${d.phishtank.verifiedAt.split("T")[0]}` : ""}
+                                      {d.phishtank.submittedAt ? ` · submitted ${d.phishtank.submittedAt.split("T")[0]}` : ""}{d.phishtank.verifiedAt ? ` · verified ${d.phishtank.verifiedAt.split("T")[0]}` : ""}
+                                      {d.phishtank.detailPage && <>{" · "}<a href={d.phishtank.detailPage} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>Report</a></>}
                                     </span>
                                   )}
                                   {hasMalBaz && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#00e5ff", backgroundColor: "rgba(0,229,255,0.12)", border: "1px solid rgba(0,229,255,0.3)" }}>
-                                      MalBazaar · {d.malwarebazaar.family} · {d.malwarebazaar.type}{d.malwarebazaar.size ? ` · ${d.malwarebazaar.size}` : ""}{d.malwarebazaar.delivery ? ` · via ${d.malwarebazaar.delivery}` : ""}{d.malwarebazaar.tags ? ` · ${d.malwarebazaar.tags}` : ""}
-                                    </span>
-                                  )}
-                                  {(d.malwarebazaar?.detections || d.malwarebazaar?.fileName) && (
-                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#ff4d6d", backgroundColor: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.3)" }}>
-                                      🔴 {d.malwarebazaar.fileName ? d.malwarebazaar.fileName + (d.malwarebazaar.detections ? " | " : "") : ""}{d.malwarebazaar.detections || ""}
-                                    </span>
-                                  )}
-                                  {d.malwarebazaar?.codeSign && (
-                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#fbbf24", backgroundColor: "rgba(251,191,36,0.10)", border: "1px solid rgba(251,191,36,0.35)" }}
-                                      title="Code-signed malware — stolen or abused certificate">
-                                      ✍️ Signed{d.malwarebazaar.codeSign.subject ? ` · Subject: ${d.malwarebazaar.codeSign.subject}` : ""}{d.malwarebazaar.codeSign.issuer ? ` · Issuer: ${d.malwarebazaar.codeSign.issuer}` : ""}{d.malwarebazaar.codeSign.algorithm ? ` · ${d.malwarebazaar.codeSign.algorithm}` : ""}
+                                      MalBazaar · {d.malwarebazaar.family}{d.malwarebazaar.delivery ? ` · via ${d.malwarebazaar.delivery}` : ""}{d.malwarebazaar.tags ? ` · ${d.malwarebazaar.tags}` : ""}{d.malwarebazaar.originCountry ? ` · origin ${d.malwarebazaar.originCountry}` : ""}{d.malwarebazaar.reporter ? ` · reported by ${d.malwarebazaar.reporter}` : ""}
                                     </span>
                                   )}
                                   {d.circl && (
@@ -8345,9 +9018,6 @@ export default function App() {
                                         {d.circl.legit ? "🟢 Known Legitimate" : "🔵 CIRCL Known"}
                                         {d.circl.trust != null ? ` · Trust ${d.circl.trust}/100` : ""}
                                         {d.circl.parentTotal != null ? ` · Found in ${d.circl.parentTotal} packages` : ""}
-                                        {d.circl.fileName ? ` · ${d.circl.fileName}` : ""}
-                                        {d.circl.fileSize ? ` (${d.circl.fileSize})` : ""}
-                                        {d.circl.mimetype ? ` · ${d.circl.mimetype}` : ""}
                                         {d.circl.source ? ` · Source: ${d.circl.source}` : ""}
                                       </span>
                                       {(d.circl.productName || d.circl.packageVersion || d.circl.maintainer) && (
@@ -8379,7 +9049,6 @@ export default function App() {
                                           title="Tri.age (Recorded Future Sandbox) behavioral analysis">
                                           {icon} Tri.age · Score {score}/10
                                           {d.triage.families?.length ? ` · ${d.triage.families.join(", ")}` : ""}
-                                          {d.triage.filename ? ` · ${d.triage.filename}` : ""}
                                           {d.triage.submitted ? ` · Submitted ${fmtDate(d.triage.submitted)}` : ""}
                                           {" · "}<a href={d.triage.triageUrl} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a>
                                         </span>
@@ -8412,9 +9081,6 @@ export default function App() {
                                           {isHashHA ? ` · ${(ha.verdict || "unknown").charAt(0).toUpperCase() + (ha.verdict || "unknown").slice(1)}` : ` · ${ha.submissions} submission${ha.submissions !== 1 ? "s" : ""}`}
                                           {ha.family ? ` · ${ha.family}` : (ha.families ? ` · ${ha.families}` : "")}
                                           {ha.avDetect ? ` · AV ${ha.avDetect}%` : ""}
-                                          {ha.fileName ? ` · ${ha.fileName}` : ""}
-                                          {ha.fileType ? ` · ${ha.fileType}` : ""}
-                                          {ha.fileSize ? ` (${ha.fileSize})` : ""}
                                           {isHashHA && ha.envDesc ? ` · ${ha.envDesc}` : ""}
                                           {!isHashHA && ha.malicious > 0 ? ` · 🔴 ${ha.malicious} malicious` : ""}
                                           {!isHashHA && ha.suspicious > 0 ? ` · 🟡 ${ha.suspicious} suspicious` : ""}
@@ -8428,11 +9094,6 @@ export default function App() {
                                         {ha.tags && (
                                           <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}>
                                             🔬 {ha.tags}
-                                          </span>
-                                        )}
-                                        {ha.mitreAttacks && ha.mitreAttacks.length > 0 && (
-                                          <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#f43f5e", backgroundColor: "rgba(244,63,94,0.08)", border: "1px solid rgba(244,63,94,0.25)" }}>
-                                            🎯 MITRE: {ha.mitreAttacks.join(", ")}
                                           </span>
                                         )}
                                         {ha.compromised && ha.compromised.length > 0 && (
@@ -8464,15 +9125,120 @@ export default function App() {
                                         title="Kaspersky OpenTIP — vendor threat intelligence">
                                         {icon} Kaspersky · {z.charAt(0).toUpperCase() + z.slice(1)} Zone
                                         {d.kaspersky.fileStatus ? ` · ${d.kaspersky.fileStatus}` : ""}
-                                        {d.kaspersky.detections ? ` · ${d.kaspersky.detections}` : ""}
-                                        {d.kaspersky.productName ? ` · ${d.kaspersky.productName}` : ""}
-                                        {d.kaspersky.size ? ` · ${d.kaspersky.size}` : ""}
-                                        {d.kaspersky.signer ? ` · Signer: ${d.kaspersky.signer}` : ""}
                                       </span>
                                     );
                                   })()}
                               </>
                             ))}
+
+                            {/* ── FILE IDENTITY (hashes) — one merged record, not one per engine ── */}
+                            {!isCondensed && isHash && (() => {
+                              const fi = mergeFileIdentity(d);
+                              if (!fi.hasAny) return null;
+                              const hashRows = [
+                                ["imphash", "Import hash", fi.hashes.imphash],
+                                ["ssdeep", "ssdeep", fi.hashes.ssdeep],
+                                ["authentihash", "Authentihash", fi.hashes.authentihash],
+                                ["tlsh", "TLSH", fi.hashes.tlsh],
+                              ].filter((h) => h[2].value);
+                              const yr = fi.compiled ? new Date(fi.compiled).getUTCFullYear() : null;
+                              const implausible = yr != null && (yr < 1995 || new Date(fi.compiled).getTime() > Date.now() + 86400000);
+                              return secRow("File Identity", (
+                                <div className="w-full rounded-md p-2" style={accent("#00e5ff")}>
+                                  {fi.names.length > 0 && kvRow("Known names", fi.names.map((n) => (
+                                    <span key={n.name} className="rounded px-1.5 py-0.5" style={pill("#00e5ff")} title={`Reported by: ${n.sources.join(", ")}`}>
+                                      {n.name}{n.sources.length > 1 ? ` ×${n.sources.length}` : ""}
+                                    </span>
+                                  )), "names")}
+                                  {(fi.type || fi.size) && kvRow("Type · Size", <span>{[fi.type, fi.size].filter(Boolean).join(" · ")}</span>, "ts")}
+                                  {fi.product && kvRow("Product", <span>{fi.product}</span>, "prod")}
+                                  {fi.compiled && kvRow("Compiled", (
+                                    <span style={{ color: implausible ? "#fbbf24" : "#cfe0e8" }}>
+                                      {fmtDate(fi.compiled)}{implausible ? " ⚠ implausible compile timestamp — possibly forged/timestomped" : ""}
+                                    </span>
+                                  ), "compiled")}
+                                  {fi.signer && kvRow("Signature", (
+                                    <>
+                                      <span className="rounded px-1.5 py-0.5" style={pill(fi.signer.status === "Signed" ? "#8aa0ad" : "#fbbf24")}
+                                        title={`Source: ${fi.signer.source}${fi.signer.issuer ? ` · Issuer: ${fi.signer.issuer}` : ""} — signed malware usually means a stolen or abused certificate`}>
+                                        ✍️ {fi.signer.status}{fi.signer.who ? ` · ${fi.signer.who}` : ""}
+                                      </span>
+                                    </>
+                                  ), "signer")}
+                                  {hashRows.map(([k, label, h]) => kvRow(label, (
+                                    <>
+                                      {copyChip(h.value, `fh-${k}`, { mono: true })}
+                                      {h.cat && (isPivotAdded(h.cat, h.value)
+                                        ? <span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: 9 }}>Added to {h.cat}</span>
+                                        : <button onClick={() => addPivotIOC(h.cat, h.value, `${label} of ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold"
+                                            style={{ color: "#04111a", backgroundColor: "#22d3ee", fontSize: 9, cursor: "pointer", border: "none" }}
+                                            title="Pivot: hunt for other samples sharing this value">+ Add as IOC</button>)}
+                                    </>
+                                  ), k))}
+                                  {fi.origin && kvRow("First seen from", <span>{fi.origin}</span>, "origin")}
+                                </div>
+                              ), "Names · type · size · signer · fuzzy hashes");
+                            })()}
+
+                            {/* ── DETECTIONS & BEHAVIOR (hashes) — vendor names, rule hits, ATT&CK, sandbox ── */}
+                            {!isCondensed && isHash && (() => {
+                              const vt = d.virustotal || {}, mb = d.malwarebazaar || {}, kp = d.kaspersky || {}, tr = d.triage || {};
+                              const vendor = [];
+                              if (kp.detections) vendor.push({ vendor: "Kaspersky", name: kp.detections, cat: "malicious" });
+                              (vt.engineFlags || []).forEach((f) => {
+                                if (kp.detections && /kaspersky/i.test(f.engine)) return; // OpenTIP is the first-party source for Kaspersky
+                                vendor.push({ vendor: f.engine, name: f.result, cat: f.category });
+                              });
+                              if (mb.detections) String(mb.detections).split(" | ").filter(Boolean).forEach((n) => vendor.push({ vendor: "MalwareBazaar intel", name: n, cat: "malicious" }));
+                              const yara = uniqCI([
+                                ...(vt.yaraDetail || []).map((y) => (y.ruleset ? `${y.rule} (${y.ruleset})` : y.rule)),
+                                ...((vt.yaraDetail || []).length ? [] : (vt.yaraHits || [])),
+                                ...(mb.yara || []),
+                              ]).slice(0, 6);
+                              const sigma = vt.sigma || [];
+                              const clam = mb.clamav || [];
+                              const ids = vt.ids || [];
+                              const sandbox = vt.sandboxVerdicts || [];
+                              const sigs = (tr.signatures || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 6);
+                              const attack = mergeAttack(d);
+                              const cfg = tr.config && typeof tr.config === "object" ? Object.entries(tr.config).filter(([, v]) => v) : [];
+                              if (!vendor.length && !yara.length && !sigma.length && !(vt.sigmaHits > 0) && !clam.length && !ids.length && !sandbox.length && !sigs.length && !attack.length && !cfg.length) return null;
+                              return secRow("Detections & Behavior", (
+                                <div className="w-full rounded-md p-2" style={accent("#f43f5e")}>
+                                  {vendor.length > 0 && kvRow("Vendor names", vendor.slice(0, 10).map((v, vi) => (
+                                    <span key={vi} className="rounded px-1.5 py-0.5" style={pill(v.cat === "suspicious" ? "#fbbf24" : "#ff4d6d")}>
+                                      <b>{v.vendor}</b> · {v.name}
+                                    </span>
+                                  )), "vendor")}
+                                  {yara.length > 0 && kvRow("YARA", yara.map((y) => <span key={y} className="rounded px-1.5 py-0.5" style={pill("#7c9cff")}>{y}</span>), "yara")}
+                                  {(sigma.length > 0 || vt.sigmaHits > 0) && kvRow("Sigma", sigma.length
+                                    ? sigma.map((g) => <span key={g.title} className="rounded px-1.5 py-0.5" style={pill(g.level === "critical" || g.level === "high" ? "#ff4d6d" : "#7c9cff")}>{g.title}{g.level ? ` · ${g.level}` : ""}</span>)
+                                    : <span className="rounded px-1.5 py-0.5" style={pill("#7c9cff")}>{vt.sigmaHits} rule match{vt.sigmaHits !== 1 ? "es" : ""}</span>, "sigma")}
+                                  {clam.length > 0 && kvRow("ClamAV", clam.map((c) => <span key={c} className="rounded px-1.5 py-0.5" style={pill("#94a3b8")}>{c}</span>), "clam")}
+                                  {ids.length > 0 && kvRow("IDS / network", ids.map((x) => <span key={x.msg} className="rounded px-1.5 py-0.5" style={pill("#fbbf24")}>{x.msg}</span>), "ids")}
+                                  {sandbox.length > 0 && kvRow("Sandbox verdicts", sandbox.map((x) => (
+                                    <span key={x.sandbox} className="rounded px-1.5 py-0.5" style={pill(x.category === "malicious" ? "#ff4d6d" : "#fbbf24")}>
+                                      <b>{x.sandbox}</b> · {x.category}{x.names?.length ? ` · ${x.names.join(", ")}` : ""}
+                                    </span>
+                                  )), "sandbox")}
+                                  {sigs.length > 0 && kvRow("Behaviors", sigs.map((g) => (
+                                    <span key={g.name} className="rounded px-1.5 py-0.5" style={pill((g.score || 0) >= 8 ? "#ff4d6d" : (g.score || 0) >= 5 ? "#fbbf24" : "#94a3b8")}>
+                                      {g.name}{g.score != null ? ` · ${g.score}/10` : ""}
+                                    </span>
+                                  )), "sigs")}
+                                  {attack.length > 0 && kvRow("ATT&CK", attack.map((t) => (
+                                    <a key={t.id} href={`https://attack.mitre.org/techniques/${t.id.replace(".", "/")}/`} target="_blank" rel="noreferrer noopener"
+                                      className="rounded px-1.5 py-0.5" style={{ ...pill("#f43f5e"), textDecoration: "none" }}
+                                      title={`Reported by: ${t.sources.join(", ")}`}>
+                                      {t.id}{t.name ? ` · ${t.name}` : ""}{t.sources.length > 1 ? ` ×${t.sources.length}` : ""}
+                                    </a>
+                                  )), "attack")}
+                                  {cfg.length > 0 && kvRow("Extracted config", cfg.map(([k, v]) => (
+                                    <span key={k} className="rounded px-1.5 py-0.5" style={pill("#c084fc")}><b>{k}</b> · {String(v).slice(0, 60)}</span>
+                                  )), "cfg")}
+                                </div>
+                              ), "Vendor names · rules · ATT&CK · sandbox");
+                            })()}
 
                             {/* ── ROCKY RACCOON (process behavioral intel — FILE_NAME only, context only) ── */}
                             {!isCondensed && hasRockyRaccoon && secRow("Process Intel", (
@@ -8498,6 +9264,18 @@ export default function App() {
                                   {d.rockyRaccoon.mitreAttacks.length > 0 && (
                                     <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#f43f5e", backgroundColor: "rgba(244,63,94,0.08)", border: "1px solid rgba(244,63,94,0.25)" }}>
                                       🎯 MITRE: {d.rockyRaccoon.mitreAttacks.join(", ")}
+                                    </span>
+                                  )}
+                                  {d.rockyRaccoon.executionsTotal != null && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}
+                                      title="How often this process name appears in the EchoTrail telemetry — a very low count is itself unusual for a system binary">
+                                      📊 Seen in {d.rockyRaccoon.executionsTotal.toLocaleString()} observed executions{d.rockyRaccoon.confidence ? ` · confidence ${d.rockyRaccoon.confidence}` : ""}
+                                    </span>
+                                  )}
+                                  {d.rockyRaccoon.abusePatterns?.length > 0 && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#f43f5e", backgroundColor: "rgba(244,63,94,0.08)", border: "1px solid rgba(244,63,94,0.25)" }}
+                                      title="Known abuse patterns for this binary (EchoTrail)">
+                                      ☠ Known abuse: {d.rockyRaccoon.abusePatterns.join(" · ")}
                                     </span>
                                   )}
                                   {d.rockyRaccoon.description && (
@@ -8536,7 +9314,7 @@ export default function App() {
                                       📁 {d.virustotal.categories.join(", ")}
                                     </span>
                                   )}
-                                  {hasVT && cat === "DOMAIN" && d.virustotal.popularityRank && (
+                                  {hasVT && cat === "DOMAIN" && d.virustotal.popularityRank && d.virustotal.popularityRank.rank > 100000 && (
                                     <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#00ff9c", backgroundColor: "rgba(0,255,156,0.06)", border: "1px solid rgba(0,255,156,0.25)" }}
                                       title="Lower rank = more popular — a counter-signal against this being a throwaway malicious domain">
                                       📈 {d.virustotal.popularityRank.source} rank #{d.virustotal.popularityRank.rank.toLocaleString()}
@@ -8565,20 +9343,16 @@ export default function App() {
                                       ⚙️ {d.virustotal.capabilities.join(", ")}
                                     </span>
                                   )}
-                                  {hasVT && !["DOMAIN","IPV4","IPV6"].includes(cat) && (d.virustotal.sigmaHits > 0 || d.virustotal.yaraHits?.length > 0) && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#7c9cff", backgroundColor: "rgba(124,156,255,0.08)", border: "1px solid rgba(124,156,255,0.3)" }}>
-                                      {d.virustotal.sigmaHits > 0 ? `Σ ${d.virustotal.sigmaHits} Sigma match${d.virustotal.sigmaHits !== 1 ? "es" : ""}` : ""}
-                                      {d.virustotal.sigmaHits > 0 && d.virustotal.yaraHits?.length > 0 ? " · " : ""}
-                                      {d.virustotal.yaraHits?.length > 0 ? `YARA: ${d.virustotal.yaraHits.join(", ")}` : ""}
+                                  {hasVT && ["DOMAIN","IPV4","IPV6"].includes(cat) && d.virustotal.engineFlags?.length > 0 && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#ff8a9b", backgroundColor: "rgba(255,77,109,0.06)", border: "1px solid rgba(255,77,109,0.2)" }}
+                                      title="Which VirusTotal engines flagged it, and the label each one gave it (phishing vs malware vs C2…)">
+                                      🚩 {d.virustotal.engineFlags.slice(0, 6).map((f) => `${f.engine}: ${f.result || f.category}`).join(" · ")}{d.virustotal.engineFlags.length > 6 ? ` +${d.virustotal.engineFlags.length - 6} more` : ""}
                                     </span>
                                   )}
-                                  {hasVT && !["DOMAIN","IPV4","IPV6"].includes(cat) && d.virustotal.signatureVerified && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{
-                                      color: d.virustotal.signatureVerified === "Signed" ? "#8aa0ad" : "#fbbf24",
-                                      backgroundColor: d.virustotal.signatureVerified === "Signed" ? "rgba(148,163,184,0.06)" : "rgba(251,191,36,0.10)",
-                                      border: `1px solid ${d.virustotal.signatureVerified === "Signed" ? "rgba(148,163,184,0.2)" : "rgba(251,191,36,0.35)"}`,
-                                    }} title="VirusTotal Sigcheck/codesign verification — informational only">
-                                      ✍️ {d.virustotal.signatureVerified}{d.virustotal.signatureSigners ? ` · ${d.virustotal.signatureSigners}` : ""}
+                                  {hasVT && d.virustotal.votes && (
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: d.virustotal.votes.malicious > d.virustotal.votes.harmless ? "#fbbf24" : "#8aa0ad", backgroundColor: "rgba(148,163,184,0.06)", border: "1px solid rgba(148,163,184,0.2)" }}
+                                      title="VirusTotal community votes">
+                                      🗳 Community: {d.virustotal.votes.harmless} harmless / {d.virustotal.votes.malicious} malicious
                                     </span>
                                   )}
                                   {(hasVT ? d.virustotal.communicatingFiles?.length > 0 || d.virustotal.downloadedFiles?.length > 0 : false) && (
@@ -8605,16 +9379,26 @@ export default function App() {
                                   )}
                                   {hasOtx && d._verdict !== "Unknown" && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#2dd4bf", backgroundColor: "rgba(45,212,191,0.12)", border: "1px solid rgba(45,212,191,0.3)" }}>
-                                      OTX · {d.otx.pulses} pulses{d.otx.validation ? ` · ${d.otx.validation}` : ""}{d.otx.tags ? ` · ${d.otx.tags}` : ""}{d.otx.parentDomain ? ` (via ${d.otx.parentDomain})` : ""}
+                                      OTX · {d.otx.pulses} pulses{d.otx.validation ? ` · ${d.otx.validation}` : ""}{!d.otx.pulseList?.length && d.otx.tags ? ` · ${d.otx.tags}` : ""}{d.otx.parentDomain ? ` (via ${d.otx.parentDomain})` : ""}{d.otx.whitelisted === true ? " · ✅ whitelisted" : ""}
                                     </span>
                                   )}
                                   {hasAbuse && (
-                                    <span className="rounded-full px-2 py-0.5" style={{
-                                      color: (d.abuseipdb.score || 0) >= 80 ? "#ff4d6d" : (d.abuseipdb.score || 0) >= 25 ? "#fbbf24" : "#2dd4bf",
-                                      backgroundColor: (d.abuseipdb.score || 0) >= 80 ? "rgba(255,77,109,0.12)" : (d.abuseipdb.score || 0) >= 25 ? "rgba(251,191,36,0.12)" : "rgba(45,212,191,0.08)",
-                                      border: `1px solid ${(d.abuseipdb.score || 0) >= 80 ? "rgba(255,77,109,0.3)" : (d.abuseipdb.score || 0) >= 25 ? "rgba(251,191,36,0.3)" : "rgba(45,212,191,0.25)"}`,
-                                    }}>
-                                      AbuseIPDB · {d.abuseipdb.score}% Confidence · {d.abuseipdb.reports} Report{d.abuseipdb.reports !== 1 ? "s" : ""}{d.abuseipdb.categories ? ` · ${d.abuseipdb.categories}` : ""}{d.abuseipdb.lastReported ? ` · Last: ${d.abuseipdb.lastReported}` : ""}
+                                    <span className="flex flex-col gap-0.5">
+                                      <span className="rounded-full px-2 py-0.5" style={{
+                                        color: (d.abuseipdb.score || 0) >= 80 ? "#ff4d6d" : (d.abuseipdb.score || 0) >= 25 ? "#fbbf24" : "#2dd4bf",
+                                        backgroundColor: (d.abuseipdb.score || 0) >= 80 ? "rgba(255,77,109,0.12)" : (d.abuseipdb.score || 0) >= 25 ? "rgba(251,191,36,0.12)" : "rgba(45,212,191,0.08)",
+                                        border: `1px solid ${(d.abuseipdb.score || 0) >= 80 ? "rgba(255,77,109,0.3)" : (d.abuseipdb.score || 0) >= 25 ? "rgba(251,191,36,0.3)" : "rgba(45,212,191,0.25)"}`,
+                                      }}>
+                                        AbuseIPDB · {d.abuseipdb.score}% Confidence · {d.abuseipdb.reports} Report{d.abuseipdb.reports !== 1 ? "s" : ""}{d.abuseipdb.distinctReporters != null && d.abuseipdb.reports > 0 ? ` from ${d.abuseipdb.distinctReporters} distinct reporter${d.abuseipdb.distinctReporters !== 1 ? "s" : ""}` : ""}{d.abuseipdb.categories ? ` · ${d.abuseipdb.categories}` : ""}{d.abuseipdb.lastReported ? ` · Last: ${d.abuseipdb.lastReported}` : ""}{d.abuseipdb.isWhitelisted ? " · ✅ whitelisted by AbuseIPDB" : ""}
+                                      </span>
+                                      {d.abuseipdb.recentReports?.length > 0 && (
+                                        <span className="rounded-md px-2 py-1 text-[9px] flex flex-col gap-0.5" style={{ color: "#9fb3bd", backgroundColor: "rgba(148,163,184,0.04)", border: "1px solid rgba(148,163,184,0.15)" }}
+                                          title="Most recent community reports — free text written by reporters">
+                                          {d.abuseipdb.recentReports.map((r, ri) => (
+                                            <span key={ri}>🗒 {r.date || ""}{r.cc ? ` (${r.cc})` : ""} — {defangProse(r.comment)}</span>
+                                          ))}
+                                        </span>
+                                      )}
                                     </span>
                                   )}
                                   {hasValidin && (
@@ -8648,21 +9432,130 @@ export default function App() {
                               </>
                             ))}
 
-                            {/* ── INFRASTRUCTURE (skip for hashes) ── */}
-                            {!isCondensed && !isHash && (hasGeo || hasUrlscan || hasWhois || hasShodan || hasSansIsc) && secRow("Infrastructure", (
-                              <>
-                                  {hasGeo && (
-                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#a78bfa", backgroundColor: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)" }}>
-                                      GEO/ASN{d.whoisASN.country ? <>{" · "}<span style={{ color: "#eafcff", fontWeight: 700 }}>{d.whoisASN.flag ? d.whoisASN.flag + " " : ""}{d.whoisASN.country}</span></> : ""}{d.whoisASN.city ? ` (${d.whoisASN.city}${d.whoisASN.region ? `, ${d.whoisASN.region}` : ""})` : ""}{d.whoisASN.asn ? ` · ${d.whoisASN.asn}` : ""}{d.whoisASN.asnOrg ? ` · ${d.whoisASN.asnOrg}` : ""}{d.whoisASN.privacy ? <>{" · "}<span style={{ color: "#fbbf24", fontWeight: 700 }}>{d.whoisASN.privacy}</span></> : ""}
-                                    </span>
+                            {/* ── THREAT REPORTS & ATTRIBUTION (OTX pulses) ── */}
+                            {!isCondensed && hasOtx && (d.otx.pulseList?.length > 0 || d.otx.validationDetail?.length > 0 || d.otx.falsePositive?.length > 0) && (() => {
+                              const o = d.otx;
+                              const rel = o.related || {};
+                              return secRow("Threat Reports", (
+                                <div className="w-full rounded-md p-2" style={accent("#2dd4bf")}>
+                                  {(rel.adversaries?.length > 0 || rel.families?.length > 0 || rel.industries?.length > 0) && (
+                                    <div className="mb-1">
+                                      {rel.adversaries?.length > 0 && kvRow("Threat actors", rel.adversaries.map((x) => <span key={x} className="rounded px-1.5 py-0.5 font-bold" style={pill("#ff4d6d")}>{x}</span>), "adv")}
+                                      {rel.families?.length > 0 && kvRow("Malware", rel.families.map((x) => <span key={x} className="rounded px-1.5 py-0.5" style={pill("#c084fc")}>{x}</span>), "fam")}
+                                      {rel.industries?.length > 0 && kvRow("Targets", rel.industries.map((x) => <span key={x} className="rounded px-1.5 py-0.5" style={pill("#fbbf24")}>{x}</span>), "ind")}
+                                    </div>
                                   )}
+                                  {o.pulseList?.length > 0 && (
+                                    <div className="flex flex-col gap-1">
+                                      <span className="text-[9px] uppercase tracking-wider font-bold" style={{ color: "#6b8494" }}>
+                                        {o.pulses} report{o.pulses !== 1 ? "s" : ""} reference this indicator{o.parentDomain ? ` (via parent domain ${o.parentDomain})` : ""} — newest {Math.min(o.pulseList.length, 4)} shown
+                                      </span>
+                                      {o.pulseList.slice(0, 4).map((p) => (
+                                        <div key={p.id || p.name} className="rounded px-2 py-1" style={{ background: "rgba(0,0,0,0.22)" }}>
+                                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                                            {p.id
+                                              ? <a href={`https://otx.alienvault.com/pulse/${p.id}`} target="_blank" rel="noreferrer noopener" className="font-bold" style={{ color: "#5eead4", textDecoration: "underline" }}>{p.name}</a>
+                                              : <b style={{ color: "#5eead4" }}>{p.name}</b>}
+                                            <span style={{ color: "#6b8494" }}>{[p.author, p.created ? fmtDate(p.created) : null].filter(Boolean).join(" · ")}</span>
+                                            {p.ref && <a href={p.ref} target="_blank" rel="noreferrer noopener" style={{ color: "#38bdf8", textDecoration: "underline" }}>{hostOfUrl(p.ref)} ↗</a>}
+                                          </div>
+                                          {(p.adversary || p.families.length > 0 || p.attack.length > 0 || p.industries.length > 0) && (
+                                            <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                                              {p.adversary && <span className="rounded px-1.5 py-0.5" style={pill("#ff4d6d")}>🎭 {p.adversary}</span>}
+                                              {p.families.map((f) => <span key={f} className="rounded px-1.5 py-0.5" style={pill("#c084fc")}>{f}</span>)}
+                                              {p.attack.length > 0 && <span className="rounded px-1.5 py-0.5" style={pill("#f43f5e")}>🎯 {p.attack.join(", ")}</span>}
+                                              {p.industries.map((f) => <span key={f} className="rounded px-1.5 py-0.5" style={pill("#fbbf24")}>{f}</span>)}
+                                            </div>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                  {o.validationDetail?.length > 0 && kvRow("OTX validation", o.validationDetail.map((v, vi) => (
+                                    <span key={vi} className="rounded px-1.5 py-0.5" style={pill("#fbbf24")}>{[v.source, v.message].filter(Boolean).join(" — ")}</span>
+                                  )), "val")}
+                                  {o.falsePositive?.length > 0 && kvRow("False-positive notes", o.falsePositive.map((v) => <span key={v} className="rounded px-1.5 py-0.5" style={pill("#4ade80")}>{v}</span>), "fp")}
+                                </div>
+                              ), "OTX pulses · actors · malware · targets");
+                            })()}
+
+                            {/* ── NETWORK & OWNERSHIP (IPs) — one profile, best source per field ── */}
+                            {!isCondensed && isIP && (() => {
+                              const np = buildNetworkProfile(d);
+                              const g = d.whoisASN || {};
+                              if (!np.has && !g.country) return null;
+                              const ipForReport = arr[i];
+                              const buildIpAbuseReport = () => {
+                                const L = [];
+                                if (np.abuse?.email) L.push(`To: ${np.abuse.email}`);
+                                L.push(`Subject: Abuse report - malicious activity from ${ipForReport}`, "");
+                                L.push(`Hello${np.abuse?.name ? ` ${np.abuse.name}` : ""} Abuse Team,`, "");
+                                L.push(`We are reporting the IP address ${ipForReport} for suspected malicious activity and request that you investigate.`, "");
+                                L.push("Details:", `- IP: ${ipForReport}`);
+                                if (np.asn) L.push(`- ASN: ${np.asn}${np.asnName ? ` (${np.asnName})` : ""}`);
+                                if (np.route) L.push(`- Network: ${np.route}`);
+                                if (d._verdict && d._verdict !== "Unknown") L.push(`- Assessment: ${d._verdict}`);
+                                if (d.abuseipdb?.reports) L.push(`- AbuseIPDB: ${d.abuseipdb.score}% confidence, ${d.abuseipdb.reports} reports`);
+                                if (d.threatfox?.malware) L.push(`- Malware association: ${d.threatfox.malware}${d.threatfox.port ? `:${d.threatfox.port}` : ""}`);
+                                L.push("", "Thank you.");
+                                return L.join("\n");
+                              };
+                              const loc = [g.city, g.region].filter(Boolean).join(", ");
+                              return secRow("Network & Ownership", (
+                                <div className="w-full rounded-md p-2" style={accent("#a78bfa")}>
+                                  {np.asn && kvRow("ASN", (
+                                    <>
+                                      <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#a78bfa")} title={`Source: ${np.asnSrc}`}>{np.asn}{np.asnName ? ` · ${np.asnName}` : ""}</span>
+                                      {np.type && <span className="rounded px-1.5 py-0.5" style={pill(np.type === "hosting" ? "#fbbf24" : "#94a3b8")} title="Network type per IPLocate">{np.type}</span>}
+                                    </>
+                                  ), "asn")}
+                                  {np.owner && kvRow("Owner", <span>{np.owner}{g.companyType ? <span style={{ color: "#6b8494" }}> · {g.companyType}</span> : null}</span>, "owner")}
+                                  {np.route && kvRow("Network", (
+                                    <>
+                                      {copyChip(np.route, "route", { mono: true, color: "#a78bfa" })}
+                                      {np.netname && <span style={{ color: "#8aa0ad" }}>netname {np.netname}</span>}
+                                      {np.rir && <span style={{ color: "#6b8494" }}>· {np.rir}</span>}
+                                    </>
+                                  ), "route")}
+                                  {np.hostingProvider && kvRow("Hosting", <span className="rounded px-1.5 py-0.5" style={pill("#fbbf24")}>{np.hostingProvider}</span>, "host")}
+                                  {np.isp && kvRow("ISP", <span>{np.isp}</span>, "isp")}
+                                  {np.usage && kvRow("Usage type", <span>{np.usage}</span>, "usage")}
+                                  {(g.country || loc) && kvRow("Location", (
+                                    <>
+                                      <span>{g.flag ? g.flag + " " : ""}{g.country || ""}{loc ? ` · ${loc}` : ""}{g.timezone ? ` · ${g.timezone}` : ""}</span>
+                                      {np.anycast && <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#38bdf8")} title="Anycast: the same IP is announced from many places, so geolocation is not meaningful">📡 Anycast — location unreliable</span>}
+                                    </>
+                                  ), "loc")}
+                                  {np.flags.length > 0 && kvRow("Flags", np.flags.map((f) => <span key={f} className="rounded px-1.5 py-0.5 font-bold" style={pill(/abuser|tor/i.test(f) ? "#ff4d6d" : "#fbbf24")}>{f}</span>), "flags")}
+                                  {np.hostnames.length > 0 && kvRow("Reverse DNS", np.hostnames.map((h) => copyChip(h, `rdns-${h}`, { mono: true })), "rdns")}
+                                  {np.abuse && kvRow("Abuse contact", (
+                                    <>
+                                      {np.abuse.name && <span>{np.abuse.name}</span>}
+                                      {np.abuse.email && copyChip(np.abuse.email, "abuse-email", { mono: true, color: "#ff7a59" })}
+                                      {np.abuse.phone && copyChip(np.abuse.phone, "abuse-phone", { mono: true, color: "#ff7a59" })}
+                                      <button onClick={() => copyText(buildIpAbuseReport(), `${eKey}::cp::ip-abuse-report`)}
+                                        className="rounded-lg px-2 py-0.5 font-semibold flex items-center gap-1"
+                                        style={{ color: "#ff7a59", border: "1px solid rgba(255,122,89,0.45)", backgroundColor: "rgba(255,122,89,0.10)", cursor: "pointer" }}
+                                        title="Copies a ready-to-send takedown request addressed to the network's abuse contact">
+                                        <Copy size={11} /> {copied === `${eKey}::cp::ip-abuse-report` ? "Copied!" : "Copy abuse report"}
+                                      </button>
+                                      <span style={{ color: "#5d7382" }}>via {np.abuse.source}</span>
+                                    </>
+                                  ), "abuse")}
+                                </div>
+                              ), "Operator · BGP · abuse contact · rDNS");
+                            })()}
+
+                            {/* ── INFRASTRUCTURE (skip for hashes) ── */}
+                            {!isCondensed && !isHash && (hasUrlscan || (hasWhois && !(d.domainContacts?.registrar?.name || d.domainReg?.date)) || hasShodan || hasSansIsc) && secRow("Infrastructure", (
+                              <>
                                   {hasUrlscan && (
                                     <span className="rounded-full px-2 py-0.5" style={{
                                       color: d.urlscan.malicious > 0 ? "#ff4d6d" : "#38bdf8",
                                       backgroundColor: d.urlscan.malicious > 0 ? "rgba(255,77,109,0.12)" : "rgba(56,189,248,0.10)",
                                       border: `1px solid ${d.urlscan.malicious > 0 ? "rgba(255,77,109,0.3)" : "rgba(56,189,248,0.3)"}`,
                                     }}>
-                                      Urlscan.io · {d.urlscan.isPrimaryTarget ? `${d.urlscan.primaryScans} Scan${d.urlscan.primaryScans !== 1 ? "s" : ""}` : `${d.urlscan.scans} apex scan${d.urlscan.scans !== 1 ? "s" : ""}`}{d.urlscan.isPrimaryTarget && d.urlscan.malicious > 0 ? ` · 🔴 ${d.urlscan.malicious} Malicious` : ""}{d.urlscan.isPrimaryTarget && d.urlscan.title ? ` · "${d.urlscan.title}"` : ""}{d.urlscan.isPrimaryTarget && d.urlscan.server ? ` · ${d.urlscan.server}` : ""}{d.urlscan.isPrimaryTarget && d.urlscan.country && d.urlscan.flag ? ` · ${d.urlscan.flag}` : ""}
+                                      Urlscan.io · {d.urlscan.isPrimaryTarget ? `${d.urlscan.primaryScans} Scan${d.urlscan.primaryScans !== 1 ? "s" : ""}` : `${d.urlscan.scans} apex scan${d.urlscan.scans !== 1 ? "s" : ""}`}{d.urlscan.isPrimaryTarget && d.urlscan.malicious > 0 ? ` · 🔴 ${d.urlscan.malicious} Malicious` : ""}{d.urlscan.isPrimaryTarget && d.urlscan.title ? ` · "${d.urlscan.title}"` : ""}{d.urlscan.isPrimaryTarget && d.urlscan.country && d.urlscan.flag ? ` · ${d.urlscan.flag}` : ""}
                                       {!d.urlscan.isPrimaryTarget && (
                                         <span className="text-[9px] ml-1" style={{ color: "#fbbf24" }} title="No urlscan scan targets this exact host. It only appears as a contacted domain / redirect hop inside scans of other URLs, so no host-specific verdict, title, or screenshot is shown.">⚠ host only seen as contacted domain — no direct scan</span>
                                       )}
@@ -8692,13 +9585,7 @@ export default function App() {
                                       🎭 Impersonates: {d.urlscan.brands.slice(0, 3).join(", ")}
                                     </span>
                                   )}
-                                  {hasUrlscan && d.urlscan.tlsIssuer && (
-                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#8aa0ad", backgroundColor: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.25)" }}
-                                      title="TLS certificate — a very fresh cert on a brand-like domain is a phishing indicator">
-                                      🔒 {d.urlscan.tlsIssuer}{d.urlscan.tlsAgeDays != null ? ` · cert ${smartAge(d.urlscan.tlsAgeDays)} old` : ""}
-                                    </span>
-                                  )}
-                                  {hasWhois && (
+                                  {hasWhois && !(d.domainContacts?.registrar?.name || d.domainReg?.date) && (
                                     <span className="rounded-full px-2 py-0.5" style={{ color: "#a78bfa", backgroundColor: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)" }}>
                                       WHOIS{d.whois.org ? ` · ${d.whois.org}` : ""}{d.whois.country ? ` · ${d.whois.country}` : ""}{d.whois.ageDays !== null ? ` · ${Math.floor(d.whois.ageDays)}d old` : ""}
                                     </span>
@@ -8731,7 +9618,7 @@ export default function App() {
                                       backgroundColor: d.sansIsc.attacks >= 5 ? "rgba(251,191,36,0.10)" : "rgba(138,160,173,0.08)",
                                       border: `1px solid ${d.sansIsc.attacks >= 5 ? "rgba(251,191,36,0.35)" : "rgba(138,160,173,0.25)"}`,
                                     }} title="SANS ISC / DShield — crowd-sourced firewall log submissions">
-                                      🛡️ SANS ISC · {d.sansIsc.attacks} attack{d.sansIsc.attacks !== 1 ? "s" : ""} reported{d.sansIsc.count ? ` (${d.sansIsc.count} total reports)` : ""}{d.sansIsc.threatFeeds.length ? ` · Listed: ${d.sansIsc.threatFeeds.slice(0, 3).join(", ")}` : ""}
+                                      🛡️ SANS ISC · {d.sansIsc.attacks > 0 || d.sansIsc.count > 0 ? <>{d.sansIsc.attacks} attack{d.sansIsc.attacks !== 1 ? "s" : ""} reported{d.sansIsc.count ? ` (${d.sansIsc.count} total reports)` : ""}</> : "no attack reports"}{d.sansIsc.minDate && d.sansIsc.maxDate ? ` · active ${d.sansIsc.minDate} → ${d.sansIsc.maxDate}` : ""}{d.sansIsc.maxRisk != null ? ` · max risk ${d.sansIsc.maxRisk}` : ""}{d.sansIsc.feeds?.length ? ` · Listed in: ${d.sansIsc.feeds.slice(0, 4).map((f) => `${f.name}${f.first ? ` (since ${f.first})` : ""}`).join(", ")}${d.sansIsc.feeds.length > 4 ? ` +${d.sansIsc.feeds.length - 4}` : ""}` : (d.sansIsc.threatFeeds.length ? ` · Listed: ${d.sansIsc.threatFeeds.slice(0, 3).join(", ")}` : "")}
                                     </span>
                                   )}
                                 {hasPivotIP && !dismissedPivots.has(`ip::${d.urlscan.servingIP}::${arr[i]}`) && (
@@ -8750,6 +9637,90 @@ export default function App() {
                                 )}
                               </>
                             ))}
+
+                            {/* ── WEB & TLS PROFILE (urlscan page facts + certificate, VT cert as fallback) ── */}
+                            {!isCondensed && !isHash && (() => {
+                              const u = d.urlscan || {};
+                              const prim = hasUrlscan && u.isPrimaryTarget;
+                              const vc = d.virustotal?.cert || null;
+                              const certIssuer = (prim && u.tlsIssuer) || vc?.issuer || null;
+                              const certFrom = (prim && u.tlsValidFrom) || vc?.notBefore || null;
+                              const certTo = (prim && u.tlsValidTo) || vc?.notAfter || null;
+                              const vcDays = vc?.notBefore ? Math.floor((Date.now() - new Date(vc.notBefore).getTime()) / 86400000) : null;
+                              const certAge = (prim && u.tlsAgeDays != null) ? u.tlsAgeDays : (vcDays != null && !isNaN(vcDays) ? vcDays : null);
+                              const sans = (vc?.san || []).filter(Boolean);
+                              const hasWeb = prim && (u.httpStatus || u.mimeType || u.server || u.tech || u.ptr || u.scanStats || u.redirectChain || u.engineVerdict || u.communityVotes);
+                              if (!hasWeb && !certIssuer) return null;
+                              const freshCert = certAge != null && certAge < 30;
+                              return secRow("Web & TLS Profile", (
+                                <div className="w-full rounded-md p-2" style={accent("#38bdf8")}>
+                                  {prim && (u.httpStatus || u.mimeType || u.server || u.language) && kvRow("Page", (
+                                    <>
+                                      {u.httpStatus && <span className="rounded px-1.5 py-0.5" style={pill(String(u.httpStatus).startsWith("2") ? "#4ade80" : "#fbbf24")}>HTTP {u.httpStatus}</span>}
+                                      {u.mimeType && <span className="rounded px-1.5 py-0.5" style={pill("#94a3b8")}>{u.mimeType}</span>}
+                                      {u.server && <span className="rounded px-1.5 py-0.5" style={pill("#94a3b8")}>server: {u.server}</span>}
+                                      {u.language && <span style={{ color: "#6b8494" }}>lang {u.language}</span>}
+                                    </>
+                                  ), "page")}
+                                  {prim && u.tech?.length > 0 && kvRow("Tech stack", u.tech.map((t) => (
+                                    <span key={t.app} className="rounded px-1.5 py-0.5" style={pill("#38bdf8")} title={t.cats.join(", ")}>{t.app}</span>
+                                  )), "tech")}
+                                  {certIssuer && kvRow("Certificate", (
+                                    <>
+                                      <span className="rounded px-1.5 py-0.5" style={pill(freshCert ? "#ff4d6d" : "#94a3b8")}
+                                        title="A very fresh certificate on a brand-like or newly registered domain is a phishing indicator">
+                                        🔒 {certIssuer}
+                                      </span>
+                                      {certFrom && <span style={{ color: "#8aa0ad" }}>issued {fmtDate(certFrom)}{certAge != null ? ` (${smartAge(certAge)} ago)` : ""}</span>}
+                                      {certTo && <span style={{ color: "#6b8494" }}>· expires {fmtDate(certTo)}</span>}
+                                      {prim && u.tlsValidDays != null && <span style={{ color: "#6b8494" }}>· {u.tlsValidDays}-day lifetime</span>}
+                                      {freshCert && <span className="font-bold" style={{ color: "#ff4d6d" }}>· 🔴 issued &lt;30 days ago</span>}
+                                    </>
+                                  ), "cert")}
+                                  {sans.length > 0 && kvRow("Cert covers", (
+                                    <>
+                                      {sans.slice(0, 6).map((n) => <span key={n} className="rounded px-1.5 py-0.5" style={{ ...pill("#94a3b8"), fontFamily: "monospace" }}>{n}</span>)}
+                                      {sans.length > 6 && <span style={{ color: "#6b8494" }}>+{sans.length - 6} more</span>}
+                                    </>
+                                  ), "san")}
+                                  {prim && u.redirectChain?.length > 1 && kvRow("Redirects", (
+                                    <span className="break-all text-[10px]" style={{ fontFamily: "monospace", color: "#fbbf24" }}>{u.redirectChain.map((x) => defang(x)).join("  →  ")}</span>
+                                  ), "redir")}
+                                  {prim && (u.engineVerdict || u.communityVotes) && kvRow("Scan verdicts", (
+                                    <>
+                                      {u.engineVerdict && <span className="rounded px-1.5 py-0.5" style={pill(u.engineVerdict.malicious > 0 ? "#ff4d6d" : "#4ade80")}>urlscan engines: {u.engineVerdict.malicious}/{u.engineVerdict.total} malicious</span>}
+                                      {u.communityVotes && <span className="rounded px-1.5 py-0.5" style={pill(u.communityVotes.malicious > u.communityVotes.benign ? "#ff4d6d" : "#94a3b8")}>community: {u.communityVotes.malicious} malicious / {u.communityVotes.benign} benign</span>}
+                                    </>
+                                  ), "verd")}
+                                  {prim && (u.ptr || u.scanStats || (u.umbrellaRank != null && u.umbrellaRank > 100000)) && kvRow("Observed", (
+                                    <>
+                                      {u.ptr && <span style={{ color: "#8aa0ad" }}>rDNS <span style={{ fontFamily: "monospace" }}>{u.ptr}</span></span>}
+                                      {u.scanStats && <span style={{ color: "#6b8494" }}>· {u.scanStats.requests ?? "?"} requests · {u.scanStats.uniqIPs ?? "?"} IPs · {u.scanStats.uniqCountries ?? "?"} countries</span>}
+                                      {u.umbrellaRank != null && u.umbrellaRank > 100000 && <span className="rounded px-1.5 py-0.5" style={pill("#94a3b8")} title="Cisco Umbrella 1M popularity rank — lower is more popular">📈 Umbrella #{u.umbrellaRank.toLocaleString()}</span>}
+                                    </>
+                                  ), "obs")}
+                                </div>
+                              ), "HTTP · tech stack · certificate · redirects");
+                            })()}
+
+                            {/* ── MAIL & DNS RECORDS (VirusTotal last_dns_records — MX/TXT only; A and NS are
+                                already covered by passive DNS pivots and the Registration section) ── */}
+                            {!isCondensed && cat === "DOMAIN" && d.virustotal?.dns && (d.virustotal.dns.mx.length > 0 || d.virustotal.dns.txt.length > 0 || d.virustotal.dns.aCount > 0) && (() => {
+                              const dn = d.virustotal.dns;
+                              const spf = dn.txt.find((t) => /^v=spf1/i.test(t));
+                              const other = dn.txt.filter((t) => t !== spf);
+                              return secRow("Mail & DNS Records", (
+                                <div className="w-full rounded-md p-2" style={accent("#94a3b8")}>
+                                  {kvRow("Mail (MX)", dn.mx.length
+                                    ? dn.mx.map((m) => <span key={m.host} className="rounded px-1.5 py-0.5" style={{ ...pill("#94a3b8"), fontFamily: "monospace" }}>{m.priority != null ? `${m.priority} ` : ""}{m.host}</span>)
+                                    : <span style={{ color: "#8aa0ad" }}>No MX records — this domain is not set up to receive mail</span>, "mx")}
+                                  {kvRow("SPF", spf
+                                    ? <span className="text-[10px] break-all" style={{ fontFamily: "monospace", color: "#cfe0e8" }}>{spf}</span>
+                                    : <span style={{ color: "#8aa0ad" }}>No SPF record</span>, "spf")}
+                                  {other.length > 0 && kvRow("Other TXT", <span className="text-[10px]" style={{ color: "#8aa0ad" }}>{other.length} record{other.length !== 1 ? "s" : ""}: {other.slice(0, 3).map((t) => t.slice(0, 48)).join(" · ")}{other.length > 3 ? " …" : ""}</span>, "txt")}
+                                </div>
+                              ), "MX · SPF · TXT (VirusTotal)");
+                            })()}
 
                             {/* ── TIMELINE ── */}
                             {/* Tri.age (submitted/completed) and VT (first/last submission)
@@ -8929,7 +9900,7 @@ export default function App() {
                                   )}
                                 </div>
                               );
-                            })())}
+                            })(), "Registrar · registrant · abuse · nameservers")}
 
                             {/* ── PIVOTS (skip for hashes) ── */}
                             {!isCondensed && !isHash && (hasUrlscan || !!d.otxPDNS) && (() => {
