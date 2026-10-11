@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v142";
+const APP_VERSION = "v143";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -6923,11 +6923,19 @@ export default function App() {
     const typeCounts = {};
     // technique id -> Set of sources ("Source report" = parsed from the article/IOC list)
     const techSrc = new Map();
-    const addTech = (id, src) => {
-      const k = String(id || "").toUpperCase().trim();
-      if (!isAttackId(k)) return;
+    const techHint = new Map(); // id -> name carried by the parsed value ("T1204:User Execution")
+    const addTech = (raw, src) => {
+      const text = String(raw || "").trim();
+      const m = text.toUpperCase().match(/\bT\d{4}(?:\.\d{3})?\b/);
+      if (!m) return;
+      const k = m[0];
       if (!techSrc.has(k)) techSrc.set(k, new Set());
       techSrc.get(k).add(src);
+      const colon = text.indexOf(":");
+      if (colon > -1 && !techHint.has(k)) {
+        const h = text.slice(colon + 1).trim();
+        if (h && !/^n\/?a$/i.test(h) && !isAttackId(h)) techHint.set(k, h.slice(0, 80));
+      }
     };
     const allFamilies = new Set();
     const c2Nodes = new Set();
@@ -6976,6 +6984,7 @@ export default function App() {
       verdictCounts,
       techniques: [...techSrc.keys()].sort((a, b) => a.localeCompare(b, "en", { numeric: true })),
       techniqueSources: Object.fromEntries([...techSrc].map(([k, v]) => [k, [...v]])),
+      techniqueHints: Object.fromEntries(techHint),
       families: [...allFamilies].sort(),
       c2Nodes: [...c2Nodes],
       contactedHosts: [...contactedHosts],
@@ -7335,8 +7344,9 @@ export default function App() {
       const lk = attackLookup(pid);
       const subs = subsByParent[pid] || [];
       const srcs = [...new Set([pid, ...subs].flatMap(x => data.techniqueSources[x] || []))];
-      const tip = `${pid}${lk.parentName ? " " + lk.parentName : ""}${obs ? " — OBSERVED" + (srcs.length ? " [" + srcs.join(", ") + "]" : "") + (subs.length ? ": " + subs.map(sid => sid + (attackLookup(sid).name ? " " + attackLookup(sid).name : "")).join(", ") : "") : ""}`;
-      return `<div class="mitre-cell ${obs ? "mitre-obs" : ""}" title="${escapeHtml(tip)}">${pid}${obs && lk.parentName ? `<span class="mitre-name">${escapeHtml(lk.parentName)}</span>` : ""}${obs && subs.length ? `<span class="mitre-sub">${subs.map(sid => "." + sid.split(".")[1]).join(" ")}</span>` : ""}</div>`;
+      const tip = `${pid}${(lk.parentName || data.techniqueHints[pid]) ? " " + (lk.parentName || data.techniqueHints[pid]) : ""}${obs ? " — OBSERVED" + (srcs.length ? " [" + srcs.join(", ") + "]" : "") + (subs.length ? ": " + subs.map(sid => sid + (attackLookup(sid).name ? " " + attackLookup(sid).name : "")).join(", ") : "") : ""}`;
+      const pname = lk.parentName || data.techniqueHints[pid] || "";
+      return `<div class="mitre-cell ${obs ? "mitre-obs" : ""}" title="${escapeHtml(tip)}">${pid}${obs && pname ? `<span class="mitre-name">${escapeHtml(pname)}</span>` : ""}${obs && subs.length ? `<span class="mitre-sub">${subs.map(sid => "." + sid.split(".")[1]).join(" ")}</span>` : ""}</div>`;
     };
     const idSort = (a, b) => a.localeCompare(b, "en", { numeric: true });
     const tacticCols = ATTACK_TACTICS
@@ -7360,7 +7370,7 @@ export default function App() {
       return `
       <div class="tech-row">
         <span class="tech-id">${escapeHtml(t)}</span>
-        <span class="tech-name">${escapeHtml(lk.name ? (t.includes(".") && lk.parentName ? `${lk.parentName}: ${lk.name}` : lk.name) : (lk.parentName || "—"))}</span>
+        <span class="tech-name">${escapeHtml(lk.name ? (t.includes(".") && lk.parentName ? `${lk.parentName}: ${lk.name}` : lk.name) : (lk.parentName || data.techniqueHints[t] || "—"))}</span>
         <span class="tech-tactic">${escapeHtml(tacticNames || (lk.known ? "—" : "Not in ATT&CK Enterprise v" + ATTACK_VERSION))}</span>
         <span class="tech-src">${escapeHtml((data.techniqueSources[t] || []).join(" · "))}</span>
       </div>`;
@@ -8012,7 +8022,7 @@ export default function App() {
       md += `## MITRE ATT&CK Techniques\n\n`;
       data.techniques.forEach(t => {
         const lk = attackLookup(t);
-        const nm = lk.name ? (t.includes(".") && lk.parentName ? `${lk.parentName}: ${lk.name}` : lk.name) : (lk.parentName || "");
+        const nm = lk.name ? (t.includes(".") && lk.parentName ? `${lk.parentName}: ${lk.name}` : lk.name) : (lk.parentName || data.techniqueHints[t] || "");
         const srcs = (data.techniqueSources[t] || []).join(", ");
         md += `- **${t}**${nm ? ` — ${nm}` : ""} · ${lk.tactics.map(x => x[1]).join(" / ") || (lk.known ? "—" : `not in ATT&CK Enterprise v${ATTACK_VERSION}`)}${srcs ? ` · _${srcs}_` : ""}\n`;
       });
