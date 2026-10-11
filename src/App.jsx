@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v136";
+const APP_VERSION = "v137";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -602,6 +602,140 @@ const rdapServerFor = async (domain) => {
   const map = await loadRdapMap();
   if (map && map.has(tld)) return { url: `${map.get(tld)}/domain/${encodeURIComponent(domain)}`, authoritative: true };
   return null;
+};
+
+// ============================================================
+//  Domain contacts (RDAP entities / WhoisJSON) — "Registration" card section
+//  Most registrant fields are GDPR-redacted; only real values are kept and
+//  privacy-proxy services are named rather than shown as if they were people.
+// ============================================================
+const CONTACT_REDACTED_RE = /redacted|withheld|privacy|not disclosed|data protected|statutory masking|gdpr|non[- ]?public|please query|select request email|contact the registrar|see (?:the )?registrar|identity protect|^\s*n\/?a\s*$|^\s*none\s*$|^\s*-+\s*$|^\s*not available\s*$|^\s*unknown\s*$/i;
+const PRIVACY_PROXY_LIST = [
+  [/whoisguard|withheld for privacy/i, "Withheld for Privacy / WhoisGuard"],
+  [/domains? ?by ?proxy|domainsbyproxy/i, "Domains By Proxy"],
+  [/contact privacy inc/i, "Contact Privacy Inc."],
+  [/privacyguardian|privacy guardian/i, "PrivacyGuardian"],
+  [/perfect privacy/i, "Perfect Privacy"],
+  [/privacy ?protect(?:ion)?(?:\.org)?/i, "PrivacyProtect"],
+  [/whoisprivacy|whois privacy|private by design/i, "WHOIS Privacy Service"],
+  [/identity protect|identity digital privacy/i, "Identity Protect"],
+  [/redacted for privacy|privacy service|proxy service|anonymi[sz]ed/i, "Privacy-protected registration"],
+];
+const cleanContactValue = (v) => {
+  if (v == null) return "";
+  const s = String(Array.isArray(v) ? v.filter(Boolean).join(", ") : v).replace(/\s+/g, " ").trim();
+  return s;
+};
+const isRealContactValue = (v) => !!v && !CONTACT_REDACTED_RE.test(v);
+const detectPrivacyProxy = (text) => {
+  for (const [re, label] of PRIVACY_PROXY_LIST) if (re.test(text)) return label;
+  return null;
+};
+const normContactRole = (r) => {
+  const x = String(r || "").toLowerCase();
+  if (x.startsWith("admin")) return "admin";
+  if (x.startsWith("tech")) return "tech";
+  if (x === "registrant" || x === "owner") return "registrant";
+  if (x === "registrar") return "registrar";
+  if (x === "abuse") return "abuse";
+  if (x === "billing") return "billing";
+  return null;
+};
+// Builds the shared contact shape; returns null if nothing real was found.
+const buildDomainContacts = ({ contacts, registrar, nameservers, dnssec, privacyHint, source }) => {
+  const out = [];
+  let proxy = privacyHint || null;
+  let redacted = false;
+  const seen = new Set();
+  for (const c of contacts) {
+    const role = c.role;
+    const raw = [c.name, c.org, c.address, c.phone, c.email].map(cleanContactValue).join(" | ");
+    const isAbuse = role === "abuse";
+    if (!isAbuse) {
+      const p = detectPrivacyProxy(raw);
+      if (p) { proxy = proxy || p; redacted = true; continue; }
+    }
+    const f = {
+      role,
+      name: isRealContactValue(cleanContactValue(c.name)) ? cleanContactValue(c.name) : "",
+      org: isRealContactValue(cleanContactValue(c.org)) ? cleanContactValue(c.org) : "",
+      address: isRealContactValue(cleanContactValue(c.address)) ? cleanContactValue(c.address) : "",
+      phone: isRealContactValue(cleanContactValue(c.phone)) ? cleanContactValue(c.phone).replace(/^tel:/i, "") : "",
+      email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanContactValue(c.email)) && isRealContactValue(cleanContactValue(c.email)) ? cleanContactValue(c.email) : "",
+    };
+    if (!f.name && !f.org && !f.address && !f.phone && !f.email) { if (!isAbuse) redacted = true; continue; }
+    const sig = `${role}|${f.name}|${f.org}|${f.address}|${f.phone}|${f.email}`;
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    out.push(f);
+  }
+  const ns = (nameservers || []).map((n) => String(n || "").toLowerCase().replace(/\.$/, "")).filter(Boolean);
+  const reg = registrar && (registrar.name || registrar.ianaId) ? registrar : null;
+  if (!out.length && !reg && !ns.length && !proxy) return null;
+  return { contacts: out, registrar: reg, nameservers: [...new Set(ns)].slice(0, 8), dnssec: dnssec ?? null, proxy, redacted, source };
+};
+// Parses an RDAP domain response (RFC 7483): entities[] with vCard arrays.
+const parseRdapContacts = (rj) => {
+  if (!rj || typeof rj !== "object") return null;
+  const contacts = [];
+  let registrar = null;
+  const vcardOf = (e) => {
+    const props = Array.isArray(e.vcardArray?.[1]) ? e.vcardArray[1] : [];
+    const get = (k) => props.find((p) => p[0] === k);
+    const adr = get("adr");
+    let address = "";
+    if (adr) {
+      const v = adr[3];
+      if (Array.isArray(v)) address = v.slice(2).map((x) => (Array.isArray(x) ? x.join(" ") : x)).filter(Boolean).join(", ");
+      else if (typeof v === "string") address = v;
+      if (!address && adr[1]?.label) address = String(adr[1].label).replace(/\n+/g, ", ");
+    }
+    return {
+      name: get("fn")?.[3] || "",
+      org: Array.isArray(get("org")?.[3]) ? get("org")[3].join(", ") : (get("org")?.[3] || ""),
+      address,
+      phone: props.filter((p) => p[0] === "tel").map((p) => p[3]).find((t) => /^tel:|^\+?\d/.test(String(t))) || "",
+      email: get("email")?.[3] || "",
+    };
+  };
+  const walk = (e) => {
+    const roles = (e.roles || []).map(normContactRole).filter(Boolean);
+    const vc = vcardOf(e);
+    for (const role of roles) {
+      if (role === "registrar") {
+        const iana = (e.publicIds || []).find((p) => /iana/i.test(p.type || ""));
+        registrar = { name: vc.name || vc.org || "", ianaId: iana?.identifier || "", url: (e.links || []).find((l) => l.rel === "about" || l.rel === "self")?.href || "" };
+      } else {
+        contacts.push({ role, ...vc });
+      }
+    }
+    (e.entities || []).forEach(walk);
+  };
+  (rj.entities || []).forEach(walk);
+  const nameservers = (rj.nameservers || []).map((n) => n.ldhName).filter(Boolean);
+  const dnssec = typeof rj.secureDNS?.delegationSigned === "boolean" ? rj.secureDNS.delegationSigned : null;
+  const remarks = (rj.remarks || []).map((r) => `${r.title || ""} ${(r.description || []).join(" ")}`).join(" ");
+  return buildDomainContacts({ contacts, registrar, nameservers, dnssec, privacyHint: /redacted|privacy/i.test(remarks) ? detectPrivacyProxy(remarks) : null, source: "rdap" });
+};
+// Parses WhoisJSON (flat registrant/admin/tech objects or contacts.{owner,admin,tech} arrays).
+const parseWhoisJsonContacts = (wj) => {
+  if (!wj || typeof wj !== "object") return null;
+  const shape = (o) => o && typeof o === "object" ? {
+    name: o.name || "", org: o.organization || o.org || "",
+    address: [o.street, o.city, o.state, o.zipcode || o.postal_code, o.country].filter(Boolean).join(", "),
+    phone: o.telephone || o.phone || "", email: o.email || "",
+  } : null;
+  const contacts = [];
+  const pushAll = (role, v) => (Array.isArray(v) ? v : v ? [v] : []).forEach((o) => { const s = shape(o); if (s) contacts.push({ role, ...s }); });
+  const c = wj.contacts || {};
+  pushAll("registrant", c.owner || c.registrant || wj.registrant);
+  pushAll("admin", c.admin || wj.admin);
+  pushAll("tech", c.tech || wj.tech);
+  const rg = wj.registrar && typeof wj.registrar === "object" ? wj.registrar : null;
+  const registrar = rg ? { name: rg.name || "", ianaId: rg.id || "", url: rg.url || "" } : null;
+  if (rg && (rg.email || rg.phone)) contacts.push({ role: "abuse", name: "", org: "", address: "", phone: rg.phone || "", email: rg.email || "" });
+  const nameservers = Array.isArray(wj.nameserver) ? wj.nameserver : Array.isArray(wj.nameservers) ? wj.nameservers : [];
+  return buildDomainContacts({ contacts, registrar, nameservers, dnssec: null, privacyHint: null, source: "whoisjson" });
 };
 
 // ============================================================
@@ -3826,6 +3960,38 @@ export default function App() {
               if (r.status === 404 && ep.auth) got404FromAuthoritative = true;
             } catch { /* try next */ }
           }
+          if (rj) {
+            // Registration contacts / registrar / nameservers for the "Registration" section.
+            try {
+              let dc = parseRdapContacts(rj);
+              // Thin registries (.com/.net) only return registrar + abuse; the
+              // registrar's own RDAP (rel=related) carries the registrant block.
+              if (!dc || !dc.contacts.some((c) => c.role === "registrant")) {
+                const rel = (rj.links || []).find((l) => l.rel === "related" && /rdap/i.test(l.type || l.href || "") && l.href);
+                if (rel) {
+                  try {
+                    const rr = await fetch(rel.href, { headers: { "Accept": "application/rdap+json, application/json" }, signal: AbortSignal.timeout(6000) });
+                    if (rr.ok) {
+                      const dc2 = parseRdapContacts(await rr.json());
+                      if (dc2 && (dc2.contacts.length || dc2.proxy)) {
+                        dc = { ...dc2, registrar: dc2.registrar || dc?.registrar || null, nameservers: dc2.nameservers.length ? dc2.nameservers : (dc?.nameservers || []),
+                               dnssec: dc2.dnssec ?? dc?.dnssec ?? null, proxy: dc2.proxy || dc?.proxy || null,
+                               contacts: [
+                                 // Same role in both: registrar's record wins field-by-field, gaps filled from the registry's.
+                                 ...dc2.contacts.map((c) => {
+                                   const o = (dc?.contacts || []).find((x) => x.role === c.role);
+                                   return o ? { ...o, ...Object.fromEntries(Object.entries(c).filter(([, v]) => v)) } : c;
+                                 }),
+                                 ...(dc?.contacts || []).filter((c) => !dc2.contacts.some((x) => x.role === c.role)),
+                               ] };
+                      }
+                    }
+                  } catch { /* registrar RDAP is best-effort (CORS / timeout) */ }
+                }
+              }
+              if (dc) results.domainContacts = { ...dc, domain: baseDomain };
+            } catch (e) { console.warn("RDAP contacts parse failed:", e.message); }
+          }
           if (rj && Array.isArray(rj.events)) {
             const regEvent = rj.events.find((e) => e.eventAction === "registration");
             const regDate = regEvent?.eventDate || null;
@@ -3868,6 +4034,10 @@ export default function App() {
             // WhoisJSON returns flat fields at root: created, status, registered
             const created = wj?.created || null;
             const statusArr = Array.isArray(wj?.status) ? wj.status : null;
+            if (!results.domainContacts) {
+              const dcW = parseWhoisJsonContacts(wj);
+              if (dcW) results.domainContacts = { ...dcW, domain: baseDomain };
+            }
             if (created) {
               const cd = new Date(created);
               if (!isNaN(cd)) {
@@ -4288,6 +4458,7 @@ export default function App() {
   const [movingKey, setMovingKey] = useState(null); // "cat::value" being moved
   const [addedPivots, setAddedPivots] = useState(new Set());       // "targetCat::targetValue" → added
   const [dismissedPivots, setDismissedPivots] = useState(new Set()); // dismissed pivot suggestions
+  const [regOpen, setRegOpen] = useState({}); // "cat::value" → Registration section expanded
   const [enrichAllDone, setEnrichAllDone] = useState({});
   // Hash dedup: { sha256: { removed: [{cat, value}], sources: Set } }
   const [mergedHashes, setMergedHashes] = useState({});
@@ -5190,6 +5361,10 @@ export default function App() {
       domain_age:        e.domainReg?.ageDays != null ? smartAge(e.domainReg.ageDays) : "",
       domain_registered: e.domainReg?.registered || "",
       domain_status:     e.domainReg?.status || "",
+      domain_registrar:  e.domainContacts?.registrar?.name || "",
+      domain_registrant: (() => { const r = e.domainContacts?.contacts?.find((c) => c.role === "registrant"); return r ? [r.org || r.name, r.email, r.phone, r.address].filter(Boolean).join(" | ") : (e.domainContacts?.proxy ? `Privacy-protected (${e.domainContacts.proxy})` : ""); })(),
+      domain_abuse:      (() => { const a = e.domainContacts?.contacts?.find((c) => c.role === "abuse"); return a ? [a.email, a.phone].filter(Boolean).join(" | ") : ""; })(),
+      domain_nameservers: e.domainContacts?.nameservers?.join(", ") || "",
       // SANS ISC / DShield
       sansisc_attacks:   e.sansIsc?.attacks ?? "",
       sansisc_feeds:     e.sansIsc?.threatFeeds?.join(", ") || "",
@@ -5232,6 +5407,7 @@ export default function App() {
     "HA Verdict","HA Score","HA Family","HA AV","HA Tags","HA MITRE","HA URL","HA Downloaded From",
     // Domain
     "Domain Age","Domain Registered","Domain Status",
+    "Domain Registrar","Domain Registrant","Domain Abuse Contact","Domain Nameservers",
     // SANS ISC / DShield
     "SANS ISC Attacks","SANS ISC Threat Feeds",
     // CVE — CISA KEV / EPSS / NVD
@@ -5264,6 +5440,8 @@ export default function App() {
       "HA AV": r.ha_av, "HA Tags": r.ha_tags, "HA MITRE": r.ha_mitre, "HA URL": r.ha_url, "HA Downloaded From": r.ha_downloaded,
       "Domain Age": r.domain_age, "Domain Registered": r.domain_registered,
       "Domain Status": r.domain_status,
+      "Domain Registrar": r.domain_registrar, "Domain Registrant": r.domain_registrant,
+      "Domain Abuse Contact": r.domain_abuse, "Domain Nameservers": r.domain_nameservers,
       "SANS ISC Attacks": r.sansisc_attacks, "SANS ISC Threat Feeds": r.sansisc_feeds,
       "CISA KEV": r.cisa_kev, "EPSS Score": r.epss_score,
       "NVD CVSS": r.nvd_cvss, "NVD Description": r.nvd_description,
@@ -8637,6 +8815,121 @@ export default function App() {
                                   })()}
                               </>
                             ))}
+
+                            {/* ── REGISTRATION (RDAP / WhoisJSON contacts, registrar, nameservers) ── */}
+                            {!isCondensed && isDomUrl && !isIpAsDomain && d.domainContacts && secRow("Registration", (() => {
+                              const dc = d.domainContacts;
+                              const open = !!regOpen[eKey];
+                              const ROLE_META = {
+                                registrant: { label: "Registrant", icon: "👤", color: "#c084fc" },
+                                admin:      { label: "Admin",      icon: "🗂️", color: "#7c9cff" },
+                                tech:       { label: "Technical",  icon: "🛠️", color: "#38bdf8" },
+                                billing:    { label: "Billing",    icon: "💳", color: "#94a3b8" },
+                                abuse:      { label: "Abuse",      icon: "🚨", color: "#ff7a59" },
+                              };
+                              const order = ["registrant", "admin", "tech", "billing", "abuse"];
+                              const people = order.flatMap((r) => dc.contacts.filter((c) => c.role === r));
+                              const registrant = dc.contacts.find((c) => c.role === "registrant");
+                              const abuse = dc.contacts.find((c) => c.role === "abuse");
+                              const regLabel = registrant ? (registrant.org || registrant.name) : "";
+                              const chip = (color) => ({ color, backgroundColor: `${color}14`, border: `1px solid ${color}40` });
+                              const domainForReport = dc.domain || arr[i];
+                              const buildAbuseReport = () => {
+                                const lines = [];
+                                if (abuse?.email) lines.push(`To: ${abuse.email}`);
+                                lines.push(`Subject: Abuse report - malicious domain ${domainForReport}`, "");
+                                lines.push(`Hello${dc.registrar?.name ? ` ${dc.registrar.name}` : ""} Abuse Team,`, "");
+                                lines.push(`We are reporting the domain ${domainForReport} for suspected malicious activity and request that you investigate and suspend it if confirmed.`, "");
+                                lines.push("Details:", `- Domain: ${domainForReport}`);
+                                if (d.domainReg?.date) lines.push(`- Registered: ${d.domainReg.date}`);
+                                if (dc.registrar?.name) lines.push(`- Registrar: ${dc.registrar.name}${dc.registrar.ianaId ? ` (IANA ID ${dc.registrar.ianaId})` : ""}`);
+                                if (d._verdict && d._verdict !== "Unknown") lines.push(`- Assessment: ${d._verdict}`);
+                                if (dc.nameservers.length) lines.push(`- Nameservers: ${dc.nameservers.join(", ")}`);
+                                if (abuse?.phone) lines.push(`- Registrar abuse phone: ${abuse.phone}`);
+                                lines.push("", "Thank you.");
+                                return lines.join("\n");
+                              };
+                              const row = (icon, val, k, mono) => val ? (
+                                <button key={k} onClick={() => copyText(val, `${eKey}::reg::${k}`)} title="Click to copy"
+                                  className="flex items-start gap-1.5 text-left w-full rounded px-1 py-0.5"
+                                  style={{ background: "none", border: "none", cursor: "pointer", color: copied === `${eKey}::reg::${k}` ? "#00ff9c" : "#cfe0e8" }}>
+                                  <span className="shrink-0" style={{ width: 14 }}>{icon}</span>
+                                  <span className="min-w-0 break-words" style={{ fontFamily: mono ? "monospace" : "inherit", wordBreak: "break-word" }}>
+                                    {copied === `${eKey}::reg::${k}` ? "Copied!" : val}
+                                  </span>
+                                </button>
+                              ) : null;
+                              return (
+                                <div className="w-full">
+                                  <div className="flex flex-wrap items-center gap-1">
+                                    <button onClick={() => setRegOpen((s) => ({ ...s, [eKey]: !s[eKey] }))}
+                                      className="rounded-full px-2 py-0.5 flex items-center gap-1"
+                                      style={{ ...chip("#38bdf8"), cursor: "pointer" }} title="Registration details">
+                                      <span>🪪</span>
+                                      <span>{dc.registrar?.name ? `Registrar: ${dc.registrar.name}` : "Registration details"}</span>
+                                      <ChevronDown size={11} style={{ transform: open ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.15s" }} />
+                                    </button>
+                                    {regLabel && <span className="rounded-full px-2 py-0.5" style={chip("#c084fc")}>👤 Registrant: {regLabel}</span>}
+                                    {dc.proxy && <span className="rounded-full px-2 py-0.5" style={chip("#fbbf24")} title="Registrant details are hidden by a privacy/proxy service">🔒 Privacy-protected · {dc.proxy}</span>}
+                                    {!dc.proxy && dc.redacted && !regLabel && <span className="rounded-full px-2 py-0.5" style={chip("#8aa0ad")} title="Registrant details are redacted by the registry/registrar">🔒 Redacted</span>}
+                                    {abuse?.email && <span className="rounded-full px-2 py-0.5" style={chip("#ff7a59")}>🚨 {abuse.email}</span>}
+                                  </div>
+                                  {open && (
+                                    <div className="mt-1.5 rounded-lg p-2" style={{ background: "rgba(56,189,248,0.04)", border: "1px solid rgba(56,189,248,0.2)" }}>
+                                      <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
+                                        {dc.registrar && (dc.registrar.name || dc.registrar.ianaId) && (
+                                          <div className="rounded-md p-2" style={{ background: "rgba(0,0,0,0.25)", borderLeft: "3px solid #38bdf8" }}>
+                                            <div className="text-[9px] uppercase tracking-widest font-black mb-1" style={{ color: "#38bdf8" }}>🪪 Registrar</div>
+                                            {row("🏢", dc.registrar.name, "registrar-name")}
+                                            {row("#️⃣", dc.registrar.ianaId ? `IANA ID ${dc.registrar.ianaId}` : "", "registrar-iana", true)}
+                                          </div>
+                                        )}
+                                        {people.map((c, ci) => {
+                                          const m = ROLE_META[c.role] || { label: c.role, icon: "👤", color: "#94a3b8" };
+                                          return (
+                                            <div key={`${c.role}-${ci}`} className="rounded-md p-2" style={{ background: "rgba(0,0,0,0.25)", borderLeft: `3px solid ${m.color}` }}>
+                                              <div className="text-[9px] uppercase tracking-widest font-black mb-1" style={{ color: m.color }}>{m.icon} {m.label}</div>
+                                              {row("👤", c.name, `${c.role}${ci}-name`)}
+                                              {row("🏢", c.org, `${c.role}${ci}-org`)}
+                                              {row("📍", c.address, `${c.role}${ci}-adr`)}
+                                              {row("📞", c.phone, `${c.role}${ci}-tel`, true)}
+                                              {row("✉️", c.email, `${c.role}${ci}-mail`, true)}
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                      {(dc.nameservers.length > 0 || dc.dnssec !== null) && (
+                                        <div className="flex flex-wrap items-center gap-1 mt-2">
+                                          <span className="text-[9px] uppercase tracking-widest font-black" style={{ color: "#8aa0ad" }}>Nameservers</span>
+                                          {dc.nameservers.map((ns) => (
+                                            <button key={ns} onClick={() => copyText(ns, `${eKey}::reg::ns-${ns}`)} title="Click to copy"
+                                              className="rounded-full px-2 py-0.5" style={{ ...chip("#94a3b8"), cursor: "pointer", fontFamily: "monospace" }}>
+                                              {copied === `${eKey}::reg::ns-${ns}` ? "Copied!" : ns}
+                                            </button>
+                                          ))}
+                                          {dc.dnssec !== null && (
+                                            <span className="rounded-full px-2 py-0.5" style={chip(dc.dnssec ? "#00ff9c" : "#8aa0ad")}>
+                                              {dc.dnssec ? "🔐 DNSSEC signed" : "🔓 DNSSEC unsigned"}
+                                            </span>
+                                          )}
+                                        </div>
+                                      )}
+                                      <div className="flex flex-wrap items-center gap-2 mt-2">
+                                        <button onClick={() => copyText(buildAbuseReport(), `${eKey}::reg::abuse-report`)}
+                                          className="rounded-lg px-2.5 py-1 font-semibold flex items-center gap-1"
+                                          style={{ color: "#ff7a59", border: "1px solid rgba(255,122,89,0.45)", backgroundColor: "rgba(255,122,89,0.10)", cursor: "pointer" }}
+                                          title="Copies a ready-to-send takedown request addressed to the registrar abuse contact">
+                                          <Copy size={11} /> {copied === `${eKey}::reg::abuse-report` ? "Copied!" : "Copy abuse report"}
+                                        </button>
+                                        <span style={{ color: "#5d7382" }}>
+                                          via {dc.source === "whoisjson" ? "WhoisJSON" : "RDAP"}{dc.redacted ? " · some fields redacted" : ""}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })())}
 
                             {/* ── PIVOTS (skip for hashes) ── */}
                             {!isCondensed && !isHash && (hasUrlscan || !!d.otxPDNS) && (() => {
