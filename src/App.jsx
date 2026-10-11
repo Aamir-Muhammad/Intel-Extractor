@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v143";
+const APP_VERSION = "v144";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -894,6 +894,77 @@ const parseVtFileExtras = (vAttr) => {
   return out;
 };
 
+// ── DNS provider filter ─────────────────────────────────────────────────────
+// A nameserver on shared DNS infrastructure (Cloudflare, Route 53, GoDaddy…) says nothing
+// about who operates the domain, and as an IOC it would create false bridges (every
+// Cloudflare-hosted domain "shares" a pivot) and a dangerous block-list entry. Only
+// confidently-identified providers are filtered; anything unknown stays a pivot candidate.
+const DNS_PROVIDER_APEX = new Map([
+  ["cloudflare.com", "Cloudflare"], ["domaincontrol.com", "GoDaddy"], ["secureserver.net", "GoDaddy"],
+  ["registrar-servers.com", "Namecheap"], ["googledomains.com", "Google Domains"], ["nsone.net", "NS1"],
+  ["dnsmadeeasy.com", "DNS Made Easy"], ["ultradns.net", "UltraDNS"], ["ultradns.com", "UltraDNS"], ["ultradns.org", "UltraDNS"],
+  ["dynect.net", "Oracle Dyn"], ["akam.net", "Akamai"], ["akamaiedge.net", "Akamai"], ["worldnic.com", "Network Solutions"],
+  ["hostgator.com", "HostGator"], ["bluehost.com", "Bluehost"], ["digitalocean.com", "DigitalOcean"], ["linode.com", "Linode"],
+  ["name-services.com", "eNom"], ["dnsowl.com", "NameSilo"], ["namebrightdns.com", "NameBright"], ["he.net", "Hurricane Electric"],
+  ["wixdns.net", "Wix"], ["squarespacedns.com", "Squarespace"], ["ui-dns.com", "IONOS"], ["ui-dns.de", "IONOS"], ["ui-dns.org", "IONOS"], ["ui-dns.biz", "IONOS"],
+  ["first-ns.de", "Hetzner"], ["your-server.de", "Hetzner"], ["ovh.net", "OVH"], ["ovh.com", "OVH"], ["gandi.net", "Gandi"],
+  ["porkbun.com", "Porkbun"], ["dreamhost.com", "DreamHost"], ["dns-parking.com", "Hostinger"], ["afraid.org", "FreeDNS"],
+  ["zoneedit.com", "ZoneEdit"], ["cloudns.net", "ClouDNS"], ["rackspace.com", "Rackspace"], ["sedoparking.com", "Sedo"],
+  ["parkingcrew.net", "ParkingCrew"], ["registrar.eu", "Registrar.eu"], ["hover.com", "Hover"], ["netsol.com", "Network Solutions"],
+]);
+const DNS_PROVIDER_RE = [
+  [/(^|\.)awsdns-\d+\.(com|net|org|co\.uk)$/i, "AWS Route 53"],
+  [/(^|\.)azure-dns\.(com|net|org|info)$/i, "Azure DNS"],
+  [/(^|\.)google(domains|cloud)?dns\.com$/i, "Google DNS"],
+];
+const cleanNs = (ns) => String(ns || "").toLowerCase().trim().replace(/\.$/, "");
+// → provider label for a shared DNS provider, else null (custom / unknown).
+const dnsProviderOf = (ns) => {
+  const host = cleanNs(ns);
+  if (!host) return null;
+  for (const [re, label] of DNS_PROVIDER_RE) if (re.test(host)) return label;
+  return DNS_PROVIDER_APEX.get(registrableDomain(host)) || null;
+};
+// Vanity / in-bailiwick: the nameserver lives under the domain's own registrable domain.
+const isVanityNs = (ns, domain) => {
+  const a = registrableDomain(cleanNs(ns));
+  const b = registrableDomain(cleanNs(domain));
+  return !!a && a === b;
+};
+// Pivot decision for one nameserver: { provider, vanity, pivot }.
+const nsPivotInfo = (ns, domain, iocDomains) => {
+  const provider = dnsProviderOf(ns);
+  const apex = registrableDomain(cleanNs(ns));
+  const vanity = isVanityNs(ns, domain) || (!!iocDomains && iocDomains.has(apex));
+  return { provider: vanity ? null : provider, vanity, pivot: vanity || !provider };
+};
+
+// VT related-file objects (/ip_addresses/{ip}/communicating_files etc.) → compact rows.
+const parseVtLinkedFiles = (j) => {
+  const arr = Array.isArray(j?.data) ? j.data : [];
+  if (!arr.length) return null;
+  const items = arr.slice(0, 10).map((f) => {
+    const a = f.attributes || {};
+    const st = a.last_analysis_stats || {};
+    const total = (st.malicious || 0) + (st.suspicious || 0) + (st.harmless || 0) + (st.undetected || 0);
+    const sha = String(a.sha256 || f.id || "").toLowerCase();
+    return {
+      sha256: /^[a-f0-9]{64}$/.test(sha) ? sha : "",
+      md5: a.md5 || null,
+      name: a.meaningful_name || (Array.isArray(a.names) ? a.names[0] : null) || null,
+      type: a.type_description || null,
+      size: typeof a.size === "number" ? fmtBytes(a.size) : null,
+      malicious: st.malicious || 0,
+      suspicious: st.suspicious || 0,
+      total,
+      label: a.popular_threat_classification?.suggested_threat_label || null,
+      firstSeen: a.first_submission_date ? isoDay(a.first_submission_date) : null,
+    };
+  }).filter((f) => f.sha256).sort((a, b) => (b.malicious + b.suspicious) - (a.malicious + a.suspicious));
+  if (!items.length) return null;
+  return { total: typeof j?.meta?.count === "number" ? j.meta.count : items.length, items };
+};
+
 // NVD CVE object → compact severity / weakness / affected / reference brief.
 const parseNvdBrief = (vuln) => {
   const m = vuln.metrics || {};
@@ -1266,6 +1337,19 @@ const buildIntelBrief = (cat, value, d) => {
     }
     const ef = d.virustotal?.engineFlags || [];
     add("Flagged by (VirusTotal)", ef.slice(0, 6).map((f) => `${f.engine}: ${f.result || f.category}`).join("; "));
+    if (dc?.nameservers?.length) {
+      const dom = dc.domain || String(value);
+      const custom = dc.nameservers.filter((n) => nsPivotInfo(n, dom, null).pivot);
+      if (custom.length) add("Custom nameservers (pivot)", custom.join(", "));
+    }
+  }
+
+  // VirusTotal linked samples — name, detections and hash of files tied to this IP / domain
+  const lfl = d.virustotal?.linkedFiles;
+  if (lfl && (isIP || isDomUrl)) {
+    const fmtF = (f) => `${f.name || "unnamed"} — ${f.malicious + f.suspicious}/${f.total}${f.label ? ` (${f.label})` : ""} — ${f.sha256}`;
+    add("Communicating files (VirusTotal)", (lfl.communicating?.items || []).slice(0, 5).map(fmtF).join("; "));
+    add("Downloaded files (VirusTotal)", (lfl.downloaded?.items || []).slice(0, 5).map(fmtF).join("; "));
   }
 
   // Threat reports (OTX) — all indicator types
@@ -5534,6 +5618,19 @@ export default function App() {
               if (Array.isArray(dlFiles) && dlFiles.length) vt.downloadedFiles = dlFiles.map((f) => f.id).filter(Boolean).slice(0, 20);
               if (Array.isArray(subs) && subs.length) vt.subdomains = subs.map((s) => s.id).filter(Boolean).slice(0, 20);
               Object.assign(vt, parseVtNetworkExtras(vAttr));
+              // The inline relationship only yields SHA256 ids — fetch name / detections / type
+              // for the files tied to this domain so they can be read and pivoted on directly.
+              const linked = {};
+              for (const [relKey, relName] of [["communicating", "communicating_files"], ["downloaded", "downloaded_files"]]) {
+                const ids = relKey === "communicating" ? vt.communicatingFiles : vt.downloadedFiles;
+                if (!ids?.length) continue;
+                try {
+                  await vtPaceGate();
+                  const lf = parseVtLinkedFiles(await callEnrich("virustotal", null, null, undefined, { vt_type: "domain", vt_rel: relName }));
+                  if (lf) linked[relKey] = lf;
+                } catch (e) { console.warn(`VT linked files (domain ${relName}) failed:`, e.message); }
+              }
+              if (Object.keys(linked).length) vt.linkedFiles = linked;
               vt.noNotableData = !(vt.detectionStats.malicious || vt.detectionStats.suspicious || vt.detectionStats.harmless || vt.categories.length || vt.communicatingFiles || vt.downloadedFiles);
               results.virustotal = vt;
               // Registrar from VT only fills the gap when RDAP/WhoisJSON had none.
@@ -5582,6 +5679,13 @@ export default function App() {
               const commFiles = vj?.data?.relationships?.communicating_files?.data;
               if (Array.isArray(commFiles) && commFiles.length) vt.communicatingFiles = commFiles.map((f) => f.id).filter(Boolean).slice(0, 20);
               Object.assign(vt, parseVtNetworkExtras(vAttr));
+              if (vt.communicatingFiles?.length) {
+                try {
+                  await vtPaceGate();
+                  const lf = parseVtLinkedFiles(await callEnrich("virustotal", null, null, undefined, { vt_type: "ip", vt_rel: "communicating_files" }));
+                  if (lf) vt.linkedFiles = { communicating: lf };
+                } catch (e) { console.warn("VT linked files (IP) failed:", e.message); }
+              }
               vt.noNotableData = !(vt.detectionStats.malicious || vt.detectionStats.suspicious || vt.detectionStats.harmless || vt.tags.length || vt.communicatingFiles);
               results.virustotal = vt;
             }
@@ -10347,7 +10451,7 @@ export default function App() {
                                       🗳 Community: {d.virustotal.votes.harmless} harmless / {d.virustotal.votes.malicious} malicious
                                     </span>
                                   )}
-                                  {(hasVT ? d.virustotal.communicatingFiles?.length > 0 || d.virustotal.downloadedFiles?.length > 0 : false) && (
+                                  {(hasVT ? (d.virustotal.communicatingFiles?.length > 0 || d.virustotal.downloadedFiles?.length > 0) && !d.virustotal.linkedFiles : false) && (
                                     <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#c084fc", backgroundColor: "rgba(192,132,252,0.10)", border: "1px solid rgba(192,132,252,0.3)" }}
                                       title="Pivotable in ThreatGraph">
                                       {d.virustotal.downloadedFiles?.length > 0 ? `⬇️ ${d.virustotal.downloadedFiles.length} downloaded file${d.virustotal.downloadedFiles.length !== 1 ? "s" : ""}` : ""}
@@ -10423,6 +10527,45 @@ export default function App() {
                                   })()}
                               </>
                             ))}
+
+                            {/* ── LINKED SAMPLES (VirusTotal related files: name, detections, hash — pivotable) ── */}
+                            {!isCondensed && !isHash && d.virustotal?.linkedFiles && (() => {
+                              const lf = d.virustotal.linkedFiles;
+                              const groups = [
+                                ["communicating", `Communicating with this ${isIP ? "IP" : "domain"}`, "📡"],
+                                ["downloaded", "Downloaded from this domain", "⬇️"],
+                              ].filter(([k]) => lf[k]?.items?.length);
+                              if (!groups.length) return null;
+                              return secRow("Linked Samples", (
+                                <div className="w-full rounded-md p-2" style={accent("#c084fc")}>
+                                  {groups.map(([k, title, icon]) => (
+                                    <div key={k} className="mb-1">
+                                      <div className="text-[9px] uppercase tracking-wider font-bold mb-1" style={{ color: "#6b8494" }}>
+                                        {icon} {title} — {lf[k].total} file{lf[k].total !== 1 ? "s" : ""}{lf[k].total > lf[k].items.length ? ` (showing ${lf[k].items.length})` : ""}
+                                      </div>
+                                      {lf[k].items.map((f) => {
+                                        const flagged = f.malicious + f.suspicious;
+                                        const col = f.malicious >= 5 ? "#ff4d6d" : flagged > 0 ? "#fbbf24" : "#4ade80";
+                                        return (
+                                          <div key={f.sha256} className="flex flex-wrap items-center gap-1.5 rounded px-2 py-1 mb-1" style={{ background: "rgba(0,0,0,0.22)" }}>
+                                            <span className="rounded px-1.5 py-0.5 font-bold" style={pill(col)} title="VirusTotal detections (engines flagging / engines that ran)">{flagged}/{f.total}</span>
+                                            <b style={{ color: "#eafcff" }}>{f.name || "unnamed file"}</b>
+                                            {f.label && <span className="rounded px-1.5 py-0.5" style={pill("#c084fc")}>{f.label}</span>}
+                                            {(f.type || f.size || f.firstSeen) && <span style={{ color: "#6b8494" }}>{[f.type, f.size, f.firstSeen ? `first seen ${fmtDate(f.firstSeen)}` : null].filter(Boolean).join(" · ")}</span>}
+                                            {copyChip(f.sha256, `lf-${f.sha256}`, { mono: true, color: "#94a3b8" })}
+                                            {isPivotAdded("SHA256", f.sha256)
+                                              ? <span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: 9 }}>Added to SHA256</span>
+                                              : <button onClick={() => addPivotIOC("SHA256", f.sha256, `VT ${k} file of ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold"
+                                                  style={{ color: "#04111a", backgroundColor: "#22d3ee", fontSize: 9, cursor: "pointer", border: "none" }}>+ Add as IOC</button>}
+                                            {extLink(`https://www.virustotal.com/gui/file/${f.sha256}`, "VT", "#38bdf8")}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ))}
+                                </div>
+                              ), "Files tied to this host · name · detections · hash");
+                            })()}
 
                             {/* ── THREAT REPORTS & ATTRIBUTION (OTX pulses) ── */}
                             {!isCondensed && hasOtx && (d.otx.pulseList?.length > 0 || d.otx.validationDetail?.length > 0 || d.otx.falsePositive?.length > 0) && (() => {
@@ -10857,6 +11000,15 @@ export default function App() {
                                               {row("📍", c.address, `${c.role}${ci}-adr`)}
                                               {row("📞", c.phone, `${c.role}${ci}-tel`, true)}
                                               {row("✉️", c.email, `${c.role}${ci}-mail`, true)}
+                                              {c.email && c.role !== "abuse" && (
+                                                <div className="px-1 pb-0.5">
+                                                  {isPivotAdded("EMAIL", c.email)
+                                                    ? <span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: 9 }}>Added to EMAIL</span>
+                                                    : <button onClick={() => addPivotIOC("EMAIL", c.email, `${m.label} contact of ${domainForReport}`)} className="rounded px-1.5 py-0.5 font-bold"
+                                                        style={{ color: "#04111a", backgroundColor: "#f0abfc", fontSize: 9, cursor: "pointer", border: "none" }}
+                                                        title="Pivot: hunt for other domains registered with this contact">+ Add as IOC</button>}
+                                                </div>
+                                              )}
                                             </div>
                                           );
                                         })}
@@ -10864,12 +11016,29 @@ export default function App() {
                                       {(dc.nameservers.length > 0 || dc.dnssec !== null) && (
                                         <div className="flex flex-wrap items-center gap-1 mt-2">
                                           <span className="text-[9px] uppercase tracking-widest font-black" style={{ color: "#8aa0ad" }}>Nameservers</span>
-                                          {dc.nameservers.map((ns) => (
-                                            <button key={ns} onClick={() => copyText(ns, `${eKey}::reg::ns-${ns}`)} title="Click to copy"
-                                              className="rounded-full px-2 py-0.5" style={{ ...chip("#94a3b8"), cursor: "pointer", fontFamily: "monospace" }}>
-                                              {copied === `${eKey}::reg::ns-${ns}` ? "Copied!" : ns}
-                                            </button>
-                                          ))}
+                                          {dc.nameservers.map((ns) => {
+                                            const info = nsPivotInfo(ns, domainForReport, new Set((displayData?.DOMAIN || []).map((x) => registrableDomain(String(x).toLowerCase()))));
+                                            return (
+                                              <span key={ns} className="inline-flex items-center gap-1">
+                                                <button onClick={() => copyText(ns, `${eKey}::reg::ns-${ns}`)} title="Click to copy"
+                                                  className="rounded-full px-2 py-0.5" style={{ ...chip(info.pivot ? "#c4b5fd" : "#94a3b8"), cursor: "pointer", fontFamily: "monospace" }}>
+                                                  {copied === `${eKey}::reg::ns-${ns}` ? "Copied!" : ns}
+                                                </button>
+                                                {info.provider && (
+                                                  <span className="text-[9px]" style={{ color: "#5d7382" }} title="Shared DNS infrastructure — it doesn't identify who operates the domain, so it isn't offered as an IOC or graph pivot">
+                                                    ☁ shared DNS · {info.provider}
+                                                  </span>
+                                                )}
+                                                {info.pivot && (isPivotAdded("DOMAIN", ns)
+                                                  ? <span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: 9 }}>Added to DOMAIN</span>
+                                                  : <button onClick={() => addPivotIOC("DOMAIN", ns, `Nameserver of ${domainForReport}`)} className="rounded px-1.5 py-0.5 font-bold"
+                                                      style={{ color: "#04111a", backgroundColor: "#c4b5fd", fontSize: 9, cursor: "pointer", border: "none" }}
+                                                      title={info.vanity ? "Nameserver on the domain's own infrastructure — a strong pivot" : "Not a known shared DNS provider — domains sharing it are likely related"}>
+                                                      + Add as IOC{info.vanity ? " · vanity NS" : ""}
+                                                    </button>)}
+                                              </span>
+                                            );
+                                          })}
                                           {dc.dnssec !== null && (
                                             <span className="rounded-full px-2 py-0.5" style={chip(dc.dnssec ? "#00ff9c" : "#8aa0ad")}>
                                               {dc.dnssec ? "🔐 DNSSEC signed" : "🔓 DNSSEC unsigned"}
@@ -11280,6 +11449,8 @@ const EDGE_KIND_META = {
   dropped: { label: "Execution parent", color: "#c084fc" },
   asn: { label: "Shared ASN infrastructure", color: "#a78bfa" },
   subdomain: { label: "Subdomain", color: "#7c9cff" },
+  nameserver: { label: "Custom nameserver", color: "#c4b5fd" },
+  registrant: { label: "Registrant contact", color: "#f0abfc" },
 };
 
 // Major CDN/cloud ASNs where "these two IOCs share an ASN" carries no real
@@ -11533,16 +11704,25 @@ const buildGraphModel = (iocData, enrichCache) => {
       // direction as urlscan's served-files edge above) vs files that merely
       // talked TO this domain over the network (contacted, file→domain since
       // the file is the one initiating contact) — distinct relationships.
+      // linkedFiles carries the real filename + detection score for these hashes, so the
+      // node reads "invoice.exe" (and is coloured by verdict) instead of a bare 12-char prefix.
+      const vtLinked = [...(d.virustotal?.linkedFiles?.communicating?.items || []), ...(d.virustotal?.linkedFiles?.downloaded?.items || [])];
+      const vtNode = (sha) => {
+        const f = vtLinked.find((x) => x.sha256 === String(sha).toLowerCase());
+        return { label: f?.name || sha.slice(0, 12) + "…", verdict: f && f.malicious >= 5 ? "Malicious" : null };
+      };
       (d.virustotal?.downloadedFiles || []).forEach((sha) => {
         if (!sha || typeof sha !== "string") return;
         if (norm(sha) === srcId) return;
-        addNode(sha, sha.slice(0, 12) + "…", "SHA256", true, null);
+        const vn = vtNode(sha);
+        addNode(sha, vn.label, "SHA256", true, vn.verdict);
         addEdge(val, sha, "hosts", "rgba(255,77,109,0.45)");
       });
       (d.virustotal?.communicatingFiles || []).forEach((sha) => {
         if (!sha || typeof sha !== "string") return;
         if (norm(sha) === srcId) return;
-        addNode(sha, sha.slice(0, 12) + "…", "SHA256", true, null);
+        const vn = vtNode(sha);
+        addNode(sha, vn.label, "SHA256", true, vn.verdict);
         addEdge(sha, val, "contacted", "rgba(251,146,60,0.4)");
       });
       (d.virustotal?.subdomains || []).forEach((sub) => {
@@ -11551,6 +11731,26 @@ const buildGraphModel = (iocData, enrichCache) => {
         addNode(sub, sub, "DOMAIN", true, null);
         addEdge(val, sub, "subdomain", "rgba(124,156,255,0.35)");
       });
+      // Registration pivots: a CUSTOM nameserver (shared DNS providers are filtered — they would
+      // bridge every domain hosted there) and the registrant's real contact email.
+      const dcn = d.domainContacts;
+      if (dcn && (cat === "DOMAIN" || cat === "URL")) {
+        const regDom = dcn.domain || registrableDomain(String(val).replace(/^https?:\/\//i, "").split("/")[0]);
+        const iocDoms = new Set((iocData.DOMAIN || []).map((x) => registrableDomain(String(x).toLowerCase())));
+        (dcn.nameservers || []).forEach((ns) => {
+          const h = cleanNs(ns);
+          if (!h || norm(h) === srcId) return;
+          if (!nsPivotInfo(h, regDom, iocDoms).pivot) return;
+          addNode(h, h, "DOMAIN", true, null);
+          addEdge(val, h, "nameserver", "rgba(196,181,253,0.55)");
+        });
+        (dcn.contacts || []).forEach((c) => {
+          if (!c || c.role === "abuse" || !c.email) return;
+          const em = String(c.email).toLowerCase();
+          addNode(em, em, "EMAIL", true, null);
+          addEdge(val, em, "registrant", "rgba(240,171,252,0.55)");
+        });
+      }
     });
   });
 
