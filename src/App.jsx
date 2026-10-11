@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v141";
+const APP_VERSION = "v142";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -6921,7 +6921,14 @@ export default function App() {
     const generatedAt = reportGeneratedAt;
     const verdictCounts = { Malicious: 0, Suspicious: 0, Whitelisted: 0, Unknown: 0 };
     const typeCounts = {};
-    const allTechniques = new Set();
+    // technique id -> Set of sources ("Source report" = parsed from the article/IOC list)
+    const techSrc = new Map();
+    const addTech = (id, src) => {
+      const k = String(id || "").toUpperCase().trim();
+      if (!isAttackId(k)) return;
+      if (!techSrc.has(k)) techSrc.set(k, new Set());
+      techSrc.get(k).add(src);
+    };
     const allFamilies = new Set();
     const c2Nodes = new Set();
     const contactedHosts = new Set();
@@ -6930,17 +6937,20 @@ export default function App() {
 
     filteredEntries.forEach(([cat, arr]) => {
       typeCounts[cat] = arr.length;
+      // ATT&CK IDs parsed from the source material are techniques the report is about —
+      // they must light up the matrix, not only the ones a sandbox happened to report.
+      if (cat === "MITRE_ATTACK") arr.forEach((v) => addTech(v, "Source report"));
       arr.forEach((v) => {
         const d = enrichCache[`${cat}::${v}`]?.data;
         if (!d) { verdictCounts.Unknown++; return; }
         const vd = d._verdict || "Unknown";
         if (verdictCounts[vd] != null) verdictCounts[vd]++;
         else verdictCounts.Unknown++;
-        (d.triage?.tags || []).forEach(t => { if (t.startsWith("attack.")) allTechniques.add(t.replace("attack.", "").toUpperCase()); });
+        (d.triage?.tags || []).forEach(t => { if (String(t).startsWith("attack.")) addTech(String(t).replace("attack.", ""), "Tri.age"); });
         // Same merged consensus the card shows (one entry per family, however many engines name it).
         deriveFamilyConsensus(d).forEach(f => allFamilies.add(f.name));
         // ATT&CK IDs reported by Hybrid Analysis and Tri.age (deduped across both).
-        mergeAttack(d).forEach(t => allTechniques.add(t.id));
+        mergeAttack(d).forEach(t => t.sources.forEach(src => addTech(t.id, src)));
         if (d.threatfox?.port && ["IPV4", "IPV6"].includes(cat)) c2Nodes.add(`${v}:${d.threatfox.port}`);
         (d.hybridAnalysis?.compromised || []).forEach(h => c2Nodes.add(h));
         (d.triage?.c2Urls || []).forEach(c => c2Nodes.add(c));
@@ -6964,7 +6974,8 @@ export default function App() {
       totalIOCs: filteredEntries.reduce((s, [, arr]) => s + arr.length, 0),
       typeCounts,
       verdictCounts,
-      techniques: [...allTechniques].map(t => String(t).toUpperCase().trim()).filter(isAttackId).filter((t, i, a) => a.indexOf(t) === i).sort(),
+      techniques: [...techSrc.keys()].sort((a, b) => a.localeCompare(b, "en", { numeric: true })),
+      techniqueSources: Object.fromEntries([...techSrc].map(([k, v]) => [k, [...v]])),
       families: [...allFamilies].sort(),
       c2Nodes: [...c2Nodes],
       contactedHosts: [...contactedHosts],
@@ -7323,7 +7334,8 @@ export default function App() {
       const obs = obsParents.has(pid);
       const lk = attackLookup(pid);
       const subs = subsByParent[pid] || [];
-      const tip = `${pid}${lk.parentName ? " " + lk.parentName : ""}${obs ? " — OBSERVED" + (subs.length ? ": " + subs.map(sid => sid + (attackLookup(sid).name ? " " + attackLookup(sid).name : "")).join(", ") : "") : ""}`;
+      const srcs = [...new Set([pid, ...subs].flatMap(x => data.techniqueSources[x] || []))];
+      const tip = `${pid}${lk.parentName ? " " + lk.parentName : ""}${obs ? " — OBSERVED" + (srcs.length ? " [" + srcs.join(", ") + "]" : "") + (subs.length ? ": " + subs.map(sid => sid + (attackLookup(sid).name ? " " + attackLookup(sid).name : "")).join(", ") : "") : ""}`;
       return `<div class="mitre-cell ${obs ? "mitre-obs" : ""}" title="${escapeHtml(tip)}">${pid}${obs && lk.parentName ? `<span class="mitre-name">${escapeHtml(lk.parentName)}</span>` : ""}${obs && subs.length ? `<span class="mitre-sub">${subs.map(sid => "." + sid.split(".")[1]).join(" ")}</span>` : ""}</div>`;
     };
     const idSort = (a, b) => a.localeCompare(b, "en", { numeric: true });
@@ -7350,6 +7362,7 @@ export default function App() {
         <span class="tech-id">${escapeHtml(t)}</span>
         <span class="tech-name">${escapeHtml(lk.name ? (t.includes(".") && lk.parentName ? `${lk.parentName}: ${lk.name}` : lk.name) : (lk.parentName || "—"))}</span>
         <span class="tech-tactic">${escapeHtml(tacticNames || (lk.known ? "—" : "Not in ATT&CK Enterprise v" + ATTACK_VERSION))}</span>
+        <span class="tech-src">${escapeHtml((data.techniqueSources[t] || []).join(" · "))}</span>
       </div>`;
     }).join("") : `<div class="empty-state">No MITRE ATT&CK techniques identified from enrichment data.</div>`;
 
@@ -7359,7 +7372,7 @@ export default function App() {
           <div class="section-title">MITRE ATT&amp;CK Mapping</div>
           <div class="section-badge">FOR THREAT ANALYSTS</div>
         </div>
-        <div class="prose"><p>Techniques observed across all enriched indicators, mapped to the MITRE ATT&amp;CK Enterprise matrix (v${ATTACK_VERSION}). Highlighted cells are techniques attributed to this campaign by enrichment sources (Hybrid Analysis, Tri.age behavioral analysis); sub-techniques appear on their parent technique's cell.</p></div>
+        <div class="prose"><p>Techniques observed across all enriched indicators, mapped to the MITRE ATT&amp;CK Enterprise matrix (v${ATTACK_VERSION}). Highlighted cells are techniques named in the source material and/or attributed to this campaign by sandbox analysis (Hybrid Analysis, Tri.age); sub-techniques appear on their parent technique's cell.</p></div>
         <div class="mitre-heatmap">${mitreGrid}</div>
         <div class="mitre-legend">
           <span class="legend-item"><span class="legend-swatch legend-obs"></span> Observed technique</span>
@@ -7787,6 +7800,7 @@ export default function App() {
   .mitre-name { display: block; font-size: 7px; font-weight: 600; letter-spacing: 0; line-height: 1.25; margin-top: 2px; opacity: 0.9; }
   .mitre-sub { display: block; font-size: 7.5px; font-weight: 700; margin-top: 1px; opacity: 0.85; }
   .tech-name { flex: 1; font-size: 11px; color: var(--txt); }
+  .tech-src { font-size: 9px; color: var(--txt-dim); letter-spacing: 0.5px; white-space: nowrap; }
   .mitre-obs {
     background: ${isLight ? "#cff5fb" : "rgba(0,229,255,0.15)"};
     color: ${isLight ? "#005566" : "var(--cyan)"};
@@ -7999,7 +8013,8 @@ export default function App() {
       data.techniques.forEach(t => {
         const lk = attackLookup(t);
         const nm = lk.name ? (t.includes(".") && lk.parentName ? `${lk.parentName}: ${lk.name}` : lk.name) : (lk.parentName || "");
-        md += `- **${t}**${nm ? ` — ${nm}` : ""} · ${lk.tactics.map(x => x[1]).join(" / ") || (lk.known ? "—" : `not in ATT&CK Enterprise v${ATTACK_VERSION}`)}\n`;
+        const srcs = (data.techniqueSources[t] || []).join(", ");
+        md += `- **${t}**${nm ? ` — ${nm}` : ""} · ${lk.tactics.map(x => x[1]).join(" / ") || (lk.known ? "—" : `not in ATT&CK Enterprise v${ATTACK_VERSION}`)}${srcs ? ` · _${srcs}_` : ""}\n`;
       });
       md += `\n`;
     }
