@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v138";
+const APP_VERSION = "v139";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -1081,6 +1081,34 @@ const mergeAttack = (d) => {
   return [...map.values()].map((e) => ({ id: e.id, name: e.name, sources: [...e.sources] })).sort((a, b) => b.sources.length - a.sources.length || a.id.localeCompare(b.id)).slice(0, 14);
 };
 
+// Vendor names / rule hits / ATT&CK / sandbox for one file — shared by the card and the report.
+const deriveDetections = (d) => {
+  const vt = d.virustotal || {}, mb = d.malwarebazaar || {}, kp = d.kaspersky || {}, tr = d.triage || {};
+  const vendor = [];
+  if (kp.detections) vendor.push({ vendor: "Kaspersky", name: kp.detections, cat: "malicious" });
+  (vt.engineFlags || []).forEach((f) => {
+    if (kp.detections && /kaspersky/i.test(f.engine)) return; // OpenTIP is the first-party source for Kaspersky
+    vendor.push({ vendor: f.engine, name: f.result, cat: f.category });
+  });
+  if (mb.detections) String(mb.detections).split(" | ").filter(Boolean).forEach((n) => vendor.push({ vendor: "MalwareBazaar intel", name: n, cat: "malicious" }));
+  const yara = uniqCI([
+    ...(vt.yaraDetail || []).map((y) => (y.ruleset ? `${y.rule} (${y.ruleset})` : y.rule)),
+    ...((vt.yaraDetail || []).length ? [] : (vt.yaraHits || [])),
+    ...(mb.yara || []),
+  ]).slice(0, 6);
+  return {
+    vendor, yara,
+    sigma: vt.sigma || [],
+    sigmaCount: vt.sigmaHits || 0,
+    clam: mb.clamav || [],
+    ids: vt.ids || [],
+    sandbox: vt.sandboxVerdicts || [],
+    sigs: (tr.signatures || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 6),
+    attack: mergeAttack(d),
+    cfg: tr.config && typeof tr.config === "object" ? Object.entries(tr.config).filter(([, v]) => v) : [],
+  };
+};
+
 // One IP profile: ASN/owner/route/type/abuse/hostnames from the best source each.
 const buildNetworkProfile = (d) => {
   const g = d.whoisASN || {}, s = d.sansIsc || {}, a = d.abuseipdb || {}, sh = d.shodan || {}, u = d.urlscan || {}, v = d.virustotal || {};
@@ -1107,6 +1135,160 @@ const buildNetworkProfile = (d) => {
     flags, abuse, hostnames, anycast: !!g.anycast,
     has: !!(asn || owner || route || abuse || hostnames.length || g.asnType || flags.length),
   };
+};
+
+// Plain-text intelligence brief for one indicator — the report counterpart of the card's
+// evidence panels (same merged helpers, so the report never shows a different answer).
+const buildIntelBrief = (cat, value, d) => {
+  const rows = [];
+  const add = (label, text) => { const t = text == null ? "" : String(text).trim(); if (t) rows.push({ label, text: t }); };
+  if (!d) return rows;
+  const isHash = ["MD5", "SHA1", "SHA256", "SHA512"].includes(cat);
+  const isIP = ["IPV4", "IPV6"].includes(cat);
+  const isDomUrl = ["DOMAIN", "URL"].includes(cat);
+  const day = (x) => (x ? fmtDate(x) : "");
+
+  // Why — deciding engines, conflicts, family, context
+  const sig = deriveVerdictSignals(d, cat);
+  const pol = { Malicious: "mal", Suspicious: "susp", Whitelisted: "clean" }[d._verdict];
+  if (pol) {
+    const drivers = sig.filter((x) => x.polarity === pol).sort((a, b) => b.weight - a.weight).slice(0, 5);
+    add("Decided by", drivers.map((x) => `${x.engine} (${x.text})`).join("; "));
+    const against = pol === "clean" ? sig.filter((x) => x.polarity !== "clean") : sig.filter((x) => x.polarity === "clean");
+    add("Conflicting signals", against.slice(0, 4).map((x) => `${x.engine} (${x.text})`).join("; "));
+  }
+  const fam = deriveFamilyConsensus(d);
+  add("Malware family", fam.map((f) => `${f.name} [${f.sources.join(", ")}]`).join("; "));
+  const risk = deriveRiskContext(d);
+  if (risk.reasons.length) {
+    const flagged = d._verdict === "Malicious" || d._verdict === "Suspicious";
+    add("Shared / popular infrastructure", `${risk.reasons.join("; ")} — ${flagged ? "flagged despite this: possible compromised site or abused legitimate service, verify before blocking" : "blocking outright may cause collateral damage"}`);
+  }
+  const dr = d.domainReg;
+  const vtCertDays = d.virustotal?.cert?.notBefore ? Math.floor((Date.now() - new Date(d.virustotal.cert.notBefore).getTime()) / 86400000) : null;
+  const certAge = d.urlscan?.tlsAgeDays ?? (vtCertDays != null && !isNaN(vtCertDays) ? vtCertDays : null);
+  if (isDomUrl && dr?.state === "active" && dr.ageDays != null && dr.ageDays < 90 && certAge != null && certAge < 30) {
+    add("Fresh infrastructure", `domain ${smartAge(dr.ageDays)} old, TLS certificate ${smartAge(certAge)} old — typical of phishing / C2 kits`);
+  }
+
+  // CVE brief
+  if (cat === "CVE") {
+    const n = d.nvd || {};
+    add("Exploitation", [d.cisaKev?.listed ? `CISA KEV — actively exploited (added ${d.cisaKev.dateAdded || "?"}, remediate by ${d.cisaKev.dueDate || "?"}${d.cisaKev.ransomwareUse ? `, ransomware use: ${d.cisaKev.ransomwareUse}` : ""})` : null,
+      d.epss?.score != null ? `EPSS ${d.epss.score}% (${d.epss.percentile}th percentile)` : null].filter(Boolean).join("; "));
+    add("Severity", [n.cvss != null ? `CVSS ${n.cvss}${n.severity ? ` ${n.severity}` : ""}` : null, n.vector].filter(Boolean).join(" · "));
+    if (String(n.attackVector).toUpperCase() === "NETWORK" && String(n.complexity).toUpperCase() === "LOW" && String(n.privileges).toUpperCase() === "NONE" && (!n.userInteraction || String(n.userInteraction).toUpperCase() === "NONE")) {
+      add("Exploitability", "remotely exploitable, no authentication, no user interaction");
+    }
+    add("Weakness", (n.cwes || []).join(", "));
+    add("Affected", (n.products?.length ? n.products : [[d.cisaKev?.vendorProject, d.cisaKev?.product].filter(Boolean).join(" ")]).filter(Boolean).join("; "));
+    add("Required action", n.kevAction);
+    const refs = n.refs || {};
+    add("Patch / fix", (refs.patch || []).map((r) => r.url).join("  "));
+    add("Vendor advisory", (refs.advisory || []).map((r) => r.url).join("  "));
+    add("Mitigation", (refs.mitigation || []).map((r) => r.url).join("  "));
+    add("Public exploit", (refs.exploit || []).map((r) => r.url).join("  "));
+  }
+
+  // File identity + detections
+  if (isHash) {
+    const fi = mergeFileIdentity(d);
+    add("Known names", fi.names.map((x) => x.name + (x.sources.length > 1 ? ` ×${x.sources.length}` : "")).join(", "));
+    add("Type · size", [fi.type, fi.size].filter(Boolean).join(" · "));
+    add("Product", fi.product);
+    add("Compiled", day(fi.compiled));
+    if (fi.signer) add("Signature", `${fi.signer.status}${fi.signer.who ? ` — ${fi.signer.who}` : ""}${fi.signer.issuer ? ` (issuer ${fi.signer.issuer})` : ""} [${fi.signer.source}]`);
+    add("Fuzzy hashes", Object.entries({ imphash: fi.hashes.imphash, ssdeep: fi.hashes.ssdeep, authentihash: fi.hashes.authentihash, tlsh: fi.hashes.tlsh })
+      .filter(([, h]) => h.value).map(([k, h]) => `${k}: ${h.value}`).join("  "));
+    const dt = deriveDetections(d);
+    add("Vendor detections", dt.vendor.slice(0, 10).map((v) => `${v.vendor}: ${v.name}`).join("; "));
+    add("YARA", dt.yara.join(", "));
+    add("Sigma", dt.sigma.length ? dt.sigma.map((g) => `${g.title}${g.level ? ` (${g.level})` : ""}`).join("; ") : (dt.sigmaCount ? `${dt.sigmaCount} rule match(es)` : ""));
+    add("ClamAV", dt.clam.join(", "));
+    add("IDS", dt.ids.map((x) => x.msg).join("; "));
+    add("Sandbox verdicts", dt.sandbox.map((x) => `${x.sandbox}: ${x.category}${x.names?.length ? ` (${x.names.join(", ")})` : ""}`).join("; "));
+    add("Behaviors", dt.sigs.map((g) => `${g.name}${g.score != null ? ` ${g.score}/10` : ""}`).join("; "));
+    add("ATT&CK", dt.attack.map((t) => t.id + (t.name ? ` ${t.name}` : "")).join("; "));
+    add("Extracted config", dt.cfg.map(([k, v]) => `${k}=${v}`).join(", "));
+    add("Contacted C2", (d.triage?.c2Urls || []).slice(0, 4).join(", "));
+  }
+
+  // IP network profile
+  if (isIP) {
+    const np = buildNetworkProfile(d);
+    const g = d.whoisASN || {};
+    add("ASN", [np.asn, np.asnName, np.type].filter(Boolean).join(" · "));
+    add("Owner", np.owner);
+    add("Network", [np.route, np.netname ? `netname ${np.netname}` : "", np.rir].filter(Boolean).join(" · "));
+    add("Hosting", np.hostingProvider);
+    add("ISP", np.isp);
+    add("Usage type", np.usage);
+    add("Location", [g.country, [g.city, g.region].filter(Boolean).join(", "), g.timezone].filter(Boolean).join(" · ") + (np.anycast ? " (anycast — location unreliable)" : ""));
+    add("Flags", np.flags.join(", "));
+    add("Reverse DNS", np.hostnames.join(", "));
+    if (np.abuse) add("Abuse contact", [np.abuse.name, np.abuse.email, np.abuse.phone].filter(Boolean).join(" · ") + ` [${np.abuse.source}]`);
+    add("C2 port (ThreatFox)", d.threatfox?.port);
+    const rr = d.abuseipdb?.recentReports || [];
+    add("Recent abuse reports", rr.map((r) => `${r.date || ""}: ${r.comment}`).join(" | "));
+  }
+
+  // Domain / URL registration + web profile + mail
+  if (isDomUrl) {
+    const dc = d.domainContacts;
+    if (dr?.date) add("Registered", `${day(dr.date)}${dr.ageDays != null ? ` (${smartAge(dr.ageDays)} old)` : ""}${dr.status ? ` · ${dr.status}` : ""}`);
+    if (dc) {
+      add("Registrar", `${dc.registrar?.name || ""}${dc.registrar?.ianaId ? ` (IANA ${dc.registrar.ianaId})` : ""}`);
+      const rg = dc.contacts.find((c) => c.role === "registrant");
+      add("Registrant", rg ? [rg.name, rg.org, rg.address, rg.email, rg.phone].filter(Boolean).join(" · ") : (dc.proxy ? `privacy-protected (${dc.proxy})` : (dc.redacted ? "redacted" : "")));
+      const ab = dc.contacts.find((c) => c.role === "abuse");
+      add("Abuse contact", ab ? [ab.email, ab.phone].filter(Boolean).join(" · ") : "");
+      add("Nameservers", `${dc.nameservers.join(", ")}${dc.dnssec != null ? ` · DNSSEC ${dc.dnssec ? "signed" : "unsigned"}` : ""}`);
+    }
+    const u = d.urlscan || {};
+    if (u.isPrimaryTarget) {
+      add("Web page", [u.httpStatus ? `HTTP ${u.httpStatus}` : null, u.mimeType, u.server ? `server ${u.server}` : null, u.title ? `"${u.title}"` : null].filter(Boolean).join(" · "));
+      add("Tech stack", (u.tech || []).map((t) => t.app).join(", "));
+      add("Redirects", (u.redirectChain || []).map((x) => defang(x)).join(" → "));
+      if (u.brands?.length) add("Impersonates", u.brands.join(", "));
+    }
+    const vc = d.virustotal?.cert;
+    const issuer = (u.isPrimaryTarget && u.tlsIssuer) || vc?.issuer;
+    if (issuer) {
+      const from = (u.isPrimaryTarget && u.tlsValidFrom) || vc?.notBefore;
+      add("TLS certificate", `${issuer}${from ? ` · issued ${day(from)}` : ""}${certAge != null ? ` (${smartAge(certAge)} old)` : ""}`);
+      add("Certificate covers", (vc?.san || []).slice(0, 8).join(", "));
+    }
+    const dn = d.virustotal?.dns;
+    if (dn) {
+      add("Mail (MX)", dn.mx.length ? dn.mx.map((m) => m.host).join(", ") : "none — domain not set up to receive mail");
+      const spf = dn.txt.find((t) => /^v=spf1/i.test(t));
+      add("SPF", spf || "none");
+    }
+    const ef = d.virustotal?.engineFlags || [];
+    add("Flagged by (VirusTotal)", ef.slice(0, 6).map((f) => `${f.engine}: ${f.result || f.category}`).join("; "));
+  }
+
+  // Threat reports (OTX) — all indicator types
+  const o = d.otx;
+  if (o) {
+    add("Threat actors (OTX)", (o.related?.adversaries || []).join(", "));
+    add("Targeted sectors (OTX)", (o.related?.industries || []).join(", "));
+    add("Threat reports (OTX)", (o.pulseList || []).slice(0, 3).map((p) => `${p.name}${p.author ? ` — ${p.author}` : ""}${p.created ? ` (${day(p.created)})` : ""}${p.id ? ` https://otx.alienvault.com/pulse/${p.id}` : ""}`).join(" | "));
+  }
+
+  // abuse.ch detail
+  const tf = d.threatfox;
+  if (tf) add("ThreatFox", [tf.malware, tf.port ? `C2 port ${tf.port}` : null, tf.threat, tf.confidence ? `${tf.confidence}% confidence` : null, tf.aliases?.length ? `aka ${tf.aliases.join(", ")}` : null, tf.reference].filter(Boolean).join(" · "));
+  const uh = d.urlhaus;
+  if (uh) {
+    add("URLhaus", [uh.status, uh.urls_total ? `${uh.urls_total} URLs` : null, uh.blacklists?.length ? `blocklisted: ${uh.blacklists.join(", ")}` : null].filter(Boolean).join(" · "));
+    add("Malicious URLs", (uh.topUrls || []).map((x) => defang(x.url)).join("  "));
+    add("Payloads", (uh.payloadList || []).map((x) => `${x.filename || "payload"}${x.signature ? ` (${x.signature})` : ""} ${x.sha256}`).join("; "));
+  }
+  if (d.phishtank?.detailPage) add("PhishTank", d.phishtank.detailPage);
+  const sa = d.sansIsc;
+  if (sa) add("SANS ISC", [sa.attacks ? `${sa.attacks} attacks` : null, sa.minDate && sa.maxDate ? `active ${sa.minDate} → ${sa.maxDate}` : null, sa.feeds?.length ? `listed in ${sa.feeds.map((f) => f.name).join(", ")}` : null].filter(Boolean).join(" · "));
+  return rows;
 };
 
 // ============================================================
@@ -5118,6 +5300,7 @@ export default function App() {
     { id: "cover",       name: "Cover Page",           enabled: true },
     { id: "exec",        name: "Executive Summary",    enabled: true },
     { id: "technical",   name: "Technical IOC Report", enabled: true },
+    { id: "intel",       name: "Indicator Intelligence", enabled: true },
     { id: "graph",       name: "Shared-Pivot Graph",   enabled: true },
     { id: "mitre",       name: "MITRE ATT&CK Mapping", enabled: true },
     { id: "hunting",     name: "Hunting Playbook",     enabled: true },
@@ -5167,7 +5350,7 @@ export default function App() {
     setReportSections(prev => prev.map(s => {
       if (t === "full") return { ...s, enabled: true };
       if (t === "exec") return { ...s, enabled: ["cover", "exec", "glossary"].includes(s.id) };
-      if (t === "technical") return { ...s, enabled: ["cover", "technical", "consolidation", "glossary"].includes(s.id) };
+      if (t === "technical") return { ...s, enabled: ["cover", "technical", "intel", "consolidation", "glossary"].includes(s.id) };
       if (t === "mitre") return { ...s, enabled: ["cover", "mitre", "glossary"].includes(s.id) };
       if (t === "hunting") return { ...s, enabled: ["cover", "hunting", "glossary"].includes(s.id) };
       return s;
@@ -6033,11 +6216,12 @@ export default function App() {
         const vd = d._verdict || "Unknown";
         if (verdictCounts[vd] != null) verdictCounts[vd]++;
         else verdictCounts.Unknown++;
-        (d.hybridAnalysis?.mitreAttacks || []).forEach(t => allTechniques.add(t));
         (d.triage?.tags || []).forEach(t => { if (t.startsWith("attack.")) allTechniques.add(t.replace("attack.", "").toUpperCase()); });
-        if (d.hybridAnalysis?.family) allFamilies.add(d.hybridAnalysis.family);
-        if (d.triage?.families) d.triage.families.forEach(f => allFamilies.add(f));
-        if (d.malwarebazaar?.signature) allFamilies.add(d.malwarebazaar.signature);
+        // Same merged consensus the card shows (one entry per family, however many engines name it).
+        deriveFamilyConsensus(d).forEach(f => allFamilies.add(f.name));
+        // ATT&CK IDs reported by Hybrid Analysis and Tri.age (deduped across both).
+        mergeAttack(d).forEach(t => allTechniques.add(t.id));
+        if (d.threatfox?.port && ["IPV4", "IPV6"].includes(cat)) c2Nodes.add(`${v}:${d.threatfox.port}`);
         (d.hybridAnalysis?.compromised || []).forEach(h => c2Nodes.add(h));
         (d.triage?.c2Urls || []).forEach(c => c2Nodes.add(c));
         (d.hybridAnalysis?.hosts || []).forEach(h => contactedHosts.add(h));
@@ -6104,14 +6288,20 @@ export default function App() {
     if (d?.cisaKev?.listed) parts.push(`CISA KEV: Actively Exploited${d.cisaKev.dateAdded ? ` (added ${d.cisaKev.dateAdded})` : ""}`);
     if (d?.epss?.score != null) parts.push(`EPSS: ${d.epss.score}% (30-day exploitation probability)`);
     if (d?.nvd?.cvss != null) parts.push(`NVD: CVSS ${d.nvd.cvss}${d.nvd.severity ? ` ${d.nvd.severity}` : ""}`);
-    if (d?.virustotal?.malicious != null) parts.push(`VirusTotal: ${d.virustotal.malicious}/${d.virustotal.total || "—"} detections`);
+    if (d?.threatfox?.malware) parts.push(`ThreatFox: ${d.threatfox.malware}${d.threatfox.port ? ` (C2 port ${d.threatfox.port})` : ""}`);
+    if (d?.urlhaus?.status) parts.push(`URLhaus: ${d.urlhaus.status}${d.urlhaus.threat ? ` (${String(d.urlhaus.threat).replace(/_/g, " ")})` : ""}`);
+    if (d?.malwarebazaar?.family) parts.push(`MalwareBazaar: ${d.malwarebazaar.family}`);
+    const vst = d?.virustotal?.detectionStats;
+    if (vst) {
+      const flagged = vst.malicious + vst.suspicious;
+      const total = flagged + vst.harmless + vst.undetected;
+      if (total > 0) parts.push(`VirusTotal: ${flagged}/${total} engines flagged`);
+    }
     if (d?.kaspersky?.zone) parts.push(kaspZoneLabel(d.kaspersky.zone));
-    if (d?.abuseipdb?.abuseScore != null) parts.push(`AbuseIPDB: ${d.abuseipdb.abuseScore}% abuse score`);
+    if (d?.abuseipdb?.score != null) parts.push(`AbuseIPDB: ${d.abuseipdb.score}% confidence${d.abuseipdb.reports ? `, ${d.abuseipdb.reports} reports` : ""}`);
     if (d?.sansIsc?.attacks) parts.push(`SANS ISC: ${d.sansIsc.attacks} attack${d.sansIsc.attacks !== 1 ? "s" : ""} reported`);
-    if (d?.threatfox?.malwareName) parts.push(`ThreatFox: ${d.threatfox.malwareName}`);
-    if (d?.urlhaus?.threat) parts.push(`URLhaus: ${d.urlhaus.threat}`);
-    if (d?.malwarebazaar?.signature) parts.push(`MalwareBazaar: ${d.malwarebazaar.signature}`);
-    if (d?.otx?.pulseCount) parts.push(`OTX: ${d.otx.pulseCount} pulse${d.otx.pulseCount !== 1 ? "s" : ""}`);
+    if (d?.otx?.pulses) parts.push(`OTX: ${d.otx.pulses} pulse${d.otx.pulses !== 1 ? "s" : ""}`);
+    if (d?.phishtank?.verified && d?.phishtank?.valid) parts.push("PhishTank: verified phishing");
     if (d?.hybridAnalysis?.verdict) {
       const parts2 = [`Hybrid Analysis: ${d.hybridAnalysis.verdict}`];
       if (d.hybridAnalysis.threatScore != null) parts2.push(`score ${d.hybridAnalysis.threatScore}/100`);
@@ -6120,7 +6310,7 @@ export default function App() {
     }
     if (d?.triage?.families?.[0]) parts.push(`Tri.age: ${d.triage.families[0]}${d.triage.score != null ? ` (score ${d.triage.score}/10)` : ""}`);
     if (d?.urlscan?.overallMalicious) parts.push(`urlscan: malicious verdict`);
-    return parts.slice(0, 4).join(" · ") || "—";
+    return parts.slice(0, 5).join(" · ") || "—";
   };
 
   // Radial SVG rendering of shared-pivot (bridge) nodes.
@@ -6382,6 +6572,45 @@ export default function App() {
         ${iocTables || `<div class="empty-state">No IOCs match current filter.</div>`}
       </section>
     `;
+
+    // Indicator Intelligence — per-indicator evidence (same merged data as the card panels).
+    // Malicious / Suspicious indicators and every CVE; capped so a large IOC set stays readable.
+    const INTEL_CAP = 60;
+    let intelTotal = 0;
+    const intelCards = [];
+    data.entries.forEach(([cat, arr]) => arr.forEach(v => {
+      const d = data.enrichCache[`${cat}::${v}`]?.data;
+      if (!d) return;
+      const verdict = d._verdict || "Unknown";
+      if (!(verdict === "Malicious" || verdict === "Suspicious" || cat === "CVE")) return;
+      const rows = buildIntelBrief(cat, v, d);
+      if (!rows.length) return;
+      intelTotal++;
+      if (intelCards.length >= INTEL_CAP) return;
+      const vClass = verdict === "Malicious" ? "vmal" : verdict === "Suspicious" ? "vsusp" : verdict === "Whitelisted" ? "vclean" : "vunk";
+      intelCards.push(`
+        <div class="intel-card">
+          <div class="intel-head">
+            <span class="type-chip" style="color:${colorFor(cat)};background:${colorFor(cat)}18;border-color:${colorFor(cat)}55;">${cat}</span>
+            <span class="ioc-val">${escapeHtml(v)}</span>
+            <span class="verdict-pill ${vClass}">${verdict}</span>
+          </div>
+          <table class="intel-table"><tbody>
+            ${rows.map(r => `<tr><th>${escapeHtml(r.label)}</th><td>${escapeHtml(r.text)}</td></tr>`).join("")}
+          </tbody></table>
+        </div>`);
+    }));
+    sec.intel = intelCards.length ? `
+      <section class="page">
+        <div class="section-header">
+          <div class="section-title">Indicator Intelligence</div>
+          <div class="section-badge">FOR ANALYSTS</div>
+        </div>
+        <div class="prose"><p>Evidence behind each malicious or suspicious indicator and every CVE: which engines decided the verdict, who operates the infrastructure, registration and abuse contacts, file identity and detections, and linked threat reports. Fields reported by several sources are merged and shown once, from the most authoritative source.</p></div>
+        ${intelCards.join("")}
+        ${intelTotal > INTEL_CAP ? `<div class="prose"><p><em>${intelTotal - INTEL_CAP} further indicator${intelTotal - INTEL_CAP !== 1 ? "s" : ""} omitted for length — see the CSV/XLSX export for the complete set.</em></p></div>` : ""}
+      </section>
+    ` : "";
 
     // MITRE
     const observed = new Set(data.techniques.map(t => t.split(".")[0]));
@@ -6800,6 +7029,11 @@ export default function App() {
     vertical-align: middle;
   }
   .ioc-val { color: var(--cyan); word-break: break-all; font-weight: 500; }
+  .intel-card { border: 1px solid var(--line); border-radius: 8px; margin: 0 0 14px; padding: 10px 12px; page-break-inside: avoid; background: ${isLight ? "#fbfcfd" : "rgba(10,14,20,0.35)"}; }
+  .intel-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .intel-table { width: 100%; border-collapse: collapse; }
+  .intel-table th { text-align: left; vertical-align: top; width: 150px; padding: 4px 8px 4px 0; font-size: 9px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; color: var(--txt-dim); }
+  .intel-table td { padding: 4px 0; font-size: 11px; line-height: 1.5; word-break: break-word; color: var(--txt); }
   .sources { color: var(--txt-muted); font-size: 10px; }
   .verdict-pill { padding: 2px 8px; border-radius: 12px; font-size: 9px; font-weight: 800; letter-spacing: 1px; border: 1px solid; white-space: nowrap; }
   .vmal { color: var(--mal); background: ${isLight ? "#fff0f2" : "rgba(255,77,109,0.1)"}; border-color: ${isLight ? "#f0b5be" : "rgba(255,77,109,0.35)"}; }
@@ -7011,6 +7245,31 @@ export default function App() {
         });
         md += `\n`;
       });
+    }
+
+    if (enabledSections.has("intel")) {
+      const INTEL_CAP = 60;
+      let n = 0, total = 0, block = "";
+      data.entries.forEach(([cat, arr]) => arr.forEach(v => {
+        const d = enrichCache[`${cat}::${v}`]?.data;
+        if (!d) return;
+        const verdict = d._verdict || "Unknown";
+        if (!(verdict === "Malicious" || verdict === "Suspicious" || cat === "CVE")) return;
+        const rows = buildIntelBrief(cat, v, d);
+        if (!rows.length) return;
+        total++;
+        if (n >= INTEL_CAP) return;
+        n++;
+        block += `### \`${v}\` — ${verdict} (${cat})\n\n`;
+        rows.forEach(r => { block += `- **${r.label}:** ${r.text}\n`; });
+        block += `\n`;
+      }));
+      if (block) {
+        md += `## Indicator Intelligence\n\n`;
+        md += `Evidence behind each malicious or suspicious indicator and every CVE. Fields reported by several sources are merged and shown once, from the most authoritative source.\n\n`;
+        md += block;
+        if (total > INTEL_CAP) md += `*${total - INTEL_CAP} further indicators omitted for length — see the CSV/XLSX export.*\n\n`;
+      }
     }
 
     if (enabledSections.has("mitre") && data.techniques.length) {
@@ -9182,26 +9441,8 @@ export default function App() {
 
                             {/* ── DETECTIONS & BEHAVIOR (hashes) — vendor names, rule hits, ATT&CK, sandbox ── */}
                             {!isCondensed && isHash && (() => {
-                              const vt = d.virustotal || {}, mb = d.malwarebazaar || {}, kp = d.kaspersky || {}, tr = d.triage || {};
-                              const vendor = [];
-                              if (kp.detections) vendor.push({ vendor: "Kaspersky", name: kp.detections, cat: "malicious" });
-                              (vt.engineFlags || []).forEach((f) => {
-                                if (kp.detections && /kaspersky/i.test(f.engine)) return; // OpenTIP is the first-party source for Kaspersky
-                                vendor.push({ vendor: f.engine, name: f.result, cat: f.category });
-                              });
-                              if (mb.detections) String(mb.detections).split(" | ").filter(Boolean).forEach((n) => vendor.push({ vendor: "MalwareBazaar intel", name: n, cat: "malicious" }));
-                              const yara = uniqCI([
-                                ...(vt.yaraDetail || []).map((y) => (y.ruleset ? `${y.rule} (${y.ruleset})` : y.rule)),
-                                ...((vt.yaraDetail || []).length ? [] : (vt.yaraHits || [])),
-                                ...(mb.yara || []),
-                              ]).slice(0, 6);
-                              const sigma = vt.sigma || [];
-                              const clam = mb.clamav || [];
-                              const ids = vt.ids || [];
-                              const sandbox = vt.sandboxVerdicts || [];
-                              const sigs = (tr.signatures || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 6);
-                              const attack = mergeAttack(d);
-                              const cfg = tr.config && typeof tr.config === "object" ? Object.entries(tr.config).filter(([, v]) => v) : [];
+                              const { vendor, yara, sigma, clam, ids, sandbox, sigs, attack, cfg } = deriveDetections(d);
+                              const vt = d.virustotal || {};
                               if (!vendor.length && !yara.length && !sigma.length && !(vt.sigmaHits > 0) && !clam.length && !ids.length && !sandbox.length && !sigs.length && !attack.length && !cfg.length) return null;
                               return secRow("Detections & Behavior", (
                                 <div className="w-full rounded-md p-2" style={accent("#f43f5e")}>
