@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v145";
+const APP_VERSION = "v146";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -6104,6 +6104,7 @@ export default function App() {
   const [hoveredActionRow, setHoveredActionRow] = useState(null);
   const [parseFlash, setParseFlash] = useState(null); // "paste"|"raw" — brief glow on click // eKey whose action button is hovered
   const [pdnsExpanded, setPdnsExpanded] = useState({});   // { "cat::ioc": bool } show all raw obs
+  const [pivotsExpanded, setPivotsExpanded] = useState({}); // { "cat::ioc::group": bool } show every pivot, not just the latest 4
   const [pdnsRowOpen, setPdnsRowOpen] = useState({});     // { "cat::ioc::target": bool } per-IP expand
   const [expiringTokens, setExpiringTokens] = useState([]);
   const [tokenBannerDismissed, setTokenBannerDismissed] = useState(false);
@@ -10104,7 +10105,7 @@ export default function App() {
                                               <span>📦 {p.filename || "payload"}{p.fileType ? ` (${p.fileType})` : ""}{p.signature ? ` · ${p.signature}` : ""}{p.vtPercent != null ? ` · VT ${p.vtPercent}%` : ""}</span>
                                               <span style={{ fontFamily: "monospace", color: "#7f95a3" }}>{p.sha256.slice(0, 16)}…</span>
                                               {isPivotAdded("SHA256", p.sha256)
-                                                ? <span className="rounded px-1 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c" }}>Added</span>
+                                                ? <><span className="rounded px-1 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c" }}>Added</span><button onClick={() => removePivotIOC("SHA256", p.sha256)} className="rounded px-1 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: 9, lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove</button></>
                                                 : <button onClick={() => addPivotIOC("SHA256", p.sha256, `URLhaus payload of ${arr[i]}`)} className="rounded px-1 font-bold" style={{ color: "#04111a", backgroundColor: "#22d3ee", cursor: "pointer", border: "none" }}>+ Add as IOC</button>}
                                             </span>
                                           ))}
@@ -10289,7 +10290,7 @@ export default function App() {
                                     <>
                                       {copyChip(h.value, `fh-${k}`, { mono: true })}
                                       {h.cat && (isPivotAdded(h.cat, h.value)
-                                        ? <span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: 9 }}>Added to {h.cat}</span>
+                                        ? <><span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: 9 }}>Added to {h.cat}</span><button onClick={() => removePivotIOC(h.cat, h.value)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: 9, lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove</button></>
                                         : <button onClick={() => addPivotIOC(h.cat, h.value, `${label} of ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold"
                                             style={{ color: "#04111a", backgroundColor: "#22d3ee", fontSize: 9, cursor: "pointer", border: "none" }}
                                             title="Pivot: hunt for other samples sharing this value">+ Add as IOC</button>)}
@@ -10560,7 +10561,7 @@ export default function App() {
                                             {(f.type || f.size || f.firstSeen) && <span style={{ color: "#6b8494" }}>{[f.type, f.size, f.firstSeen ? `first seen ${fmtDate(f.firstSeen)}` : null].filter(Boolean).join(" · ")}</span>}
                                             {copyChip(f.sha256, `lf-${f.sha256}`, { mono: true, color: "#94a3b8" })}
                                             {isPivotAdded("SHA256", f.sha256)
-                                              ? <span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: 9 }}>Added to SHA256</span>
+                                              ? <><span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: 9 }}>Added to SHA256</span><button onClick={() => removePivotIOC("SHA256", f.sha256)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: 9, lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove</button></>
                                               : <button onClick={() => addPivotIOC("SHA256", f.sha256, `VT ${k} file of ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold"
                                                   style={{ color: "#04111a", backgroundColor: "#22d3ee", fontSize: 9, cursor: "pointer", border: "none" }}>+ Add as IOC</button>}
                                             {extLink(`https://www.virustotal.com/gui/file/${f.sha256}`, "VT", "#38bdf8")}
@@ -11009,7 +11010,7 @@ export default function App() {
                                               {c.email && c.role !== "abuse" && (
                                                 <div className="px-1 pb-0.5">
                                                   {isPivotAdded("EMAIL", c.email)
-                                                    ? <span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: 9 }}>Added to EMAIL</span>
+                                                    ? <><span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: 9 }}>Added to EMAIL</span><button onClick={() => removePivotIOC("EMAIL", c.email)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: 9, lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove</button></>
                                                     : <button onClick={() => addPivotIOC("EMAIL", c.email, `${m.label} contact of ${domainForReport}`)} className="rounded px-1.5 py-0.5 font-bold"
                                                         style={{ color: "#04111a", backgroundColor: "#f0abfc", fontSize: 9, cursor: "pointer", border: "none" }}
                                                         title="Pivot: hunt for other domains registered with this contact">+ Add as IOC</button>}
@@ -11036,7 +11037,7 @@ export default function App() {
                                                   </span>
                                                 )}
                                                 {info.pivot && (isPivotAdded("DOMAIN", ns)
-                                                  ? <span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: 9 }}>Added to DOMAIN</span>
+                                                  ? <><span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#04111a", backgroundColor: "#00ff9c", fontSize: 9 }}>Added to DOMAIN</span><button onClick={() => removePivotIOC("DOMAIN", ns)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.15)", fontSize: 9, lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,107,107,0.3)" }}>Remove</button></>
                                                   : <button onClick={() => addPivotIOC("DOMAIN", ns, `Nameserver of ${domainForReport}`)} className="rounded px-1.5 py-0.5 font-bold"
                                                       style={{ color: "#04111a", backgroundColor: "#c4b5fd", fontSize: 9, cursor: "pointer", border: "none" }}
                                                       title={info.vanity ? "Nameserver on the domain's own infrastructure — a strong pivot" : "Not a known shared DNS provider — domains sharing it are likely related"}>
@@ -11112,9 +11113,25 @@ export default function App() {
                               });
                               const hasContacted = (d.urlscan?.contactedIPs || []).length > 0 || (d.urlscan?.contactedDomains || []).length > 0;
                               if (!newUrls.length && !hasFiles && !pdnsRecords.length && !hasContacted) return null;
+                              // Concise by default: each pivot group shows its latest 4 (passive DNS is already
+                              // ordered current-first, newest-last-seen-first); the rest sit behind one button.
+                              const PIVOT_CAP = 4;
+                              const visibleFiles = (d.urlscan?.files || []).filter((f) => !dismissedPivots.has(`file::${f.sha256 || f.filename}::${arr[i]}`));
+                              const pivotCap = (key, list) => (pivotsExpanded[`${eKey}::${key}`] ? list : list.slice(0, PIVOT_CAP));
+                              const pivotMore = (key, list) => {
+                                if (list.length <= PIVOT_CAP) return null;
+                                const open = !!pivotsExpanded[`${eKey}::${key}`];
+                                return (
+                                  <button key={`more-${key}`} onClick={() => setPivotsExpanded((p) => ({ ...p, [`${eKey}::${key}`]: !p[`${eKey}::${key}`] }))}
+                                    className="self-start text-[9px] rounded px-2 py-0.5 font-bold my-0.5"
+                                    style={{ color: "#7c9cff", backgroundColor: "rgba(124,156,255,0.1)", border: "1px solid rgba(124,156,255,0.3)", cursor: "pointer" }}>
+                                    {open ? "Show fewer pivots" : `Show Additional Pivots (+${list.length - PIVOT_CAP})`}
+                                  </button>
+                                );
+                              };
                               return secRow("Pivots", (
                                   <div className="flex flex-col gap-0.5 w-full">
-                                    {newUrls.map((su, ui) => {
+                                    {pivotCap("urls", newUrls).map((su, ui) => {
                                       const u = typeof su === "string" ? su : su.url;
                                       const shot = typeof su === "string" ? null : su.screenshot;
                                       const uNorm = u.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
@@ -11149,7 +11166,8 @@ export default function App() {
                                         </span>
                                       );
                                     })}
-                                    {(d.urlscan?.files || []).filter((f) => !dismissedPivots.has(`file::${f.sha256 || f.filename}::${arr[i]}`)).map((f, fi) => {
+                                    {pivotMore("urls", newUrls)}
+                                    {pivotCap("files", visibleFiles).map((f, fi) => {
                                       const hashAdded = f.sha256 && isPivotAdded("SHA256", f.sha256);
                                       const fileAdded = f.filename && isPivotAdded("FILE_NAME", f.filename);
                                       const urlAdded = f.url && isPivotAdded("URL", f.url.replace(/^https?:\/\//i, "").replace(/\/+$/, ""));
@@ -11179,6 +11197,7 @@ export default function App() {
                                         </span>
                                       );
                                     })}
+                                    {pivotMore("files", visibleFiles)}
                                     {pdnsRecords.length > 0 && (
                                       <div className="flex items-center gap-1.5 mt-1 mb-0.5">
                                         <span className="text-[9px] uppercase tracking-widest font-bold" style={{ color: "#5d7382" }}>Passive DNS</span>
@@ -11190,7 +11209,7 @@ export default function App() {
                                         </button>
                                       </div>
                                     )}
-                                    {pdnsRecords.map((r, pi) => {
+                                    {pivotCap("pdns", pdnsRecords).map((r, pi) => {
                                       // For DOMAIN queries, pivot the IP addresses. For IP queries, pivot the hostnames.
                                       const target = cat === "DOMAIN" ? r.address : r.hostname;
                                       const targetCat = cat === "DOMAIN" ? ipCat(r.address) : "DOMAIN";
@@ -11257,6 +11276,7 @@ export default function App() {
                                         </div>
                                       );
                                     })}
+                                    {pivotMore("pdns", pdnsRecords)}
                                     {/* Contacted infrastructure from urlscan result detail */}
                                     {(() => {
                                       const cIPs = (d.urlscan?.contactedIPs || []).filter((ip) => {
@@ -11281,7 +11301,7 @@ export default function App() {
                                             <span className="text-[9px] uppercase tracking-widest font-bold" style={{ color: "#5d7382" }}>Contacted Infrastructure</span>
                                             <span className="text-[9px]" style={{ color: "#5d7382" }}>· hosts this page communicated with (CDN/analytics filtered)</span>
                                           </div>
-                                          {rows.map((row, ci) => {
+                                          {pivotCap("contacted", rows).map((row, ci) => {
                                             const added = isPivotAdded(row.cat, row.v);
                                             return (
                                               <span key={`c${ci}`} className="rounded-full px-2 py-0.5 flex items-center gap-1.5" style={{ color: "#fb923c", backgroundColor: "rgba(251,146,60,0.06)", border: "1px solid rgba(251,146,60,0.25)" }}>
@@ -11315,6 +11335,7 @@ export default function App() {
                                               </span>
                                             );
                                           })}
+                                          {pivotMore("contacted", rows)}
                                         </>
                                       );
                                     })()}
@@ -11737,8 +11758,10 @@ const buildGraphModel = (iocData, enrichCache) => {
         addNode(sub, sub, "DOMAIN", true, null);
         addEdge(val, sub, "subdomain", "rgba(124,156,255,0.35)");
       });
-      // Registration pivots: a CUSTOM nameserver (shared DNS providers are filtered — they would
-      // bridge every domain hosted there) and the registrant's real contact email.
+      // Registration pivots are NEVER auto-added as graph nodes — the analyst decides, via the
+      // "+ Add as IOC" button in the Registration section. Once a custom nameserver or a registrant
+      // email IS an IOC (so its node exists), link it to the domain it belongs to. addEdge()
+      // ignores edges to nodes that aren't in the graph, so nothing appears until the analyst adds it.
       const dcn = d.domainContacts;
       if (dcn && (cat === "DOMAIN" || cat === "URL")) {
         const regDom = dcn.domain || registrableDomain(String(val).replace(/^https?:\/\//i, "").split("/")[0]);
@@ -11747,14 +11770,11 @@ const buildGraphModel = (iocData, enrichCache) => {
           const h = cleanNs(ns);
           if (!h || norm(h) === srcId) return;
           if (!nsPivotInfo(h, regDom, iocDoms).pivot) return;
-          addNode(h, h, "DOMAIN", true, null);
           addEdge(val, h, "nameserver", "rgba(196,181,253,0.55)");
         });
         (dcn.contacts || []).forEach((c) => {
           if (!c || c.role === "abuse" || !c.email) return;
-          const em = String(c.email).toLowerCase();
-          addNode(em, em, "EMAIL", true, null);
-          addEdge(val, em, "registrant", "rgba(240,171,252,0.55)");
+          addEdge(val, String(c.email).toLowerCase(), "registrant", "rgba(240,171,252,0.55)");
         });
       }
     });
