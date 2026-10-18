@@ -55,7 +55,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v144";
+const APP_VERSION = "v145";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -8671,6 +8671,12 @@ export default function App() {
         }
         *::-webkit-scrollbar-thumb:hover { background: #00e5ffaa; }
         *::-webkit-scrollbar-corner { background: #070b10; }
+        /* Indicator detail chips: a fixed corner radius reads as a clean pill on one line and a tidy
+           rounded rectangle when the text wraps (rounded-full = 9999px turned wrapped chips into blobs). */
+        .ie-detail .rounded-full { border-radius: 12px; }
+        /* One fixed line height for every chip, so 10px and 9px chips (and +Add buttons) are the same height. */
+        .ie-detail [class*="rounded"][class*="py-0.5"] { line-height: 16px; }
+        .ie-detail .rounded-full:has(> .animate-spin) { display: inline-flex; align-items: center; gap: 4px; }
         .sitroom-sonar { position: absolute; inset: 0; pointer-events: none; }
         .sitroom-sonar i {
           position: absolute; inset: 0; border-radius: 50%; border: 1.4px solid #d99a4e;
@@ -9803,7 +9809,7 @@ export default function App() {
                           ) : null;
                           if (reservedLabel) {
                             return (
-                              <div className="ml-4 mb-1.5 text-[10px]">
+                              <div className="ie-detail ml-4 mb-1.5 text-[10px]">
                                 <span className="rounded-full px-2 py-0.5 font-bold inline-flex items-center gap-1" style={{ color: "#fbbf24", backgroundColor: "rgba(251,191,36,0.10)", border: "1px solid rgba(251,191,36,0.35)" }}
                                   title="This address is within a special-purpose/non-routable range — never real attacker infrastructure, so no further enrichment is shown.">
                                   🟠 {reservedLabel} — Non-Routable IP Address
@@ -9854,7 +9860,7 @@ export default function App() {
                                 <span className="block text-[9px] uppercase tracking-widest font-black" style={{ color: "#8aa0ad", letterSpacing: "1.5px" }}>{label}</span>
                                 {hint && <span className="block text-[8px] leading-tight mt-0.5" style={{ color: "#5d7382" }}>{hint}</span>}
                               </span>
-                              <div className="flex flex-wrap gap-1 flex-1 min-w-0">{children}</div>
+                              <div className="flex flex-wrap items-start gap-1 flex-1 min-w-0">{children}</div>
                             </div>
                           );
                           // Shared building blocks for the evidence panels below.
@@ -9878,7 +9884,7 @@ export default function App() {
                               style={{ ...pill(color || "#38bdf8"), textDecoration: "none" }}>{text} ↗</a>
                           );
                           return (
-                          <div className="ml-4 mb-1.5 text-[10px]">
+                          <div className="ie-detail ml-4 mb-1.5 text-[10px]">
                             {/* Provenance badge — shown when this SHA256 card received data via hash dedup */}
                             {d._sourcedFrom && (
                               <div className="flex items-center gap-2 mb-2 rounded-lg px-2.5 py-1.5"
