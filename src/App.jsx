@@ -56,7 +56,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v151";
+const APP_VERSION = "v152";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -6237,6 +6237,15 @@ export default function App() {
 
   // ── Indicator filters (Verdict / ASN / Country / Family / Flagged by) ──
   const [iocFilter, setIocFilter] = useState({});
+  // Side menu: null = All boxes; a category = show only that box, at full length.
+  const [focusCatRaw, setFocusCat] = useState(null);
+  const focusCat = focusCatRaw && entries.some(([c]) => c === focusCatRaw) ? focusCatRaw : null;
+  const iocLayoutRef = useRef(null);
+  const focusType = (cat) => {
+    setFocusCat(cat);
+    const el = iocLayoutRef.current;
+    if (el && el.getBoundingClientRect().top < 0) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
   const facetIndex = useMemo(() => {
     const m = new Map();
     entries.forEach(([cat, arr]) => arr.forEach((v) => m.set(`${cat}::${v}`, iocFacets(cat, enrichCache[`${cat}::${v}`]?.data))));
@@ -9058,7 +9067,7 @@ export default function App() {
         )}
 
         {!total && <ThreatWire onHunt={huntArticle} />}
-        {total > 0 && <CaseSpectrum entries={viewEntries} enrichCache={enrichCache} />}
+        {total > 0 && <CaseSpectrum entries={viewEntries} enrichCache={enrichCache} onReveal={(cat) => setFocusCat((f) => (f ? cat : f))} />}
         </div>
 
         {meta && (meta.title || meta.description) && (
@@ -9258,54 +9267,6 @@ export default function App() {
           </div>
         )}
 
-        {entries.length > 0 && (
-          <div className="flex flex-wrap gap-2 mb-5 items-center">
-            {entries.map(([cat, arr]) => {
-              const c = colorFor(cat);
-              return (
-                <a key={cat} href={`#cat-${cat}`} className="flex items-center gap-2 rounded-full px-3 py-1 text-xs" style={{ border: `1px solid ${c}55`, backgroundColor: `${c}14`, color: c }}>
-                  <span style={{ width: 7, height: 7, borderRadius: 99, backgroundColor: c, boxShadow: `0 0 8px ${c}` }} />
-                  {cat} <span className="font-bold" style={{ opacity: 0.85 }}>· {arr.length}</span>
-                </a>
-              );
-            })}
-            {/* Add new IOC category — for when an article lacks a type you want to add manually */}
-            {/* Always-visible "Add Category / IOC" dropdown — single interaction */}
-            <div className="relative">
-              <select
-                value={customAddCat && customAddCat !== "__NEW__" ? customAddCat : ""}
-                onChange={(e) => { if (e.target.value) { setCustomAddCat(e.target.value); setCustomAddValue(""); } }}
-                className="rounded-full px-3 py-1 text-xs font-semibold outline-none cursor-pointer appearance-none pr-7"
-                style={{ background: "rgba(252,165,10,0.06)", border: "1px solid rgba(252,165,10,0.35)", color: "#fca50a" }}>
-                <option value="" style={{ background: "#0f0d19", color: "#6a6385" }}>+ Add Category / IOC</option>
-                {ALL_IOC_CATS.map((c) => (
-                  <option key={c} value={c} style={{ background: "#0f0d19", color: colorFor(c) }}>{c}</option>
-                ))}
-              </select>
-              <span className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none text-[10px]" style={{ color: "#fca50a" }}>▾</span>
-            </div>
-          </div>
-        )}
-        {/* Floating input for adding to a new category that has no card yet */}
-        {customAddCat && customAddCat !== "__NEW__" && !iocData?.[customAddCat] && (
-          <div className="flex items-center gap-2 mb-3 rounded-lg px-3 py-2" style={{ border: `1px solid ${colorFor(customAddCat)}55`, backgroundColor: `${colorFor(customAddCat)}0a` }}>
-            <span className="text-xs font-bold shrink-0" style={{ color: colorFor(customAddCat) }}>{customAddCat}</span>
-            <input autoFocus value={customAddValue} onChange={(e) => setCustomAddValue(e.target.value)}
-              placeholder={`Enter ${customAddCat} value…`}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && customAddValue.trim()) { addPivotIOC(customAddCat, customAddValue.trim(), "Manual"); setCustomAddValue(""); setCustomAddCat(null); }
-                if (e.key === "Escape") { setCustomAddCat(null); setCustomAddValue(""); }
-              }}
-              className="flex-1 rounded-md px-2 py-1 text-xs outline-none"
-              style={{ background: "rgba(0,0,0,0.3)", border: "1px solid rgba(132,116,190,0.3)", color: "#efecf8" }} />
-            <button onClick={() => { if (customAddValue.trim()) { addPivotIOC(customAddCat, customAddValue.trim(), "Manual"); setCustomAddValue(""); setCustomAddCat(null); } }}
-              className="text-xs rounded-md px-2 py-1 shrink-0"
-              style={{ color: "#160b02", background: colorFor(customAddCat), cursor: "pointer", border: "none" }}>Add</button>
-            <button onClick={() => { setCustomAddCat(null); setCustomAddValue(""); }} style={{ color: "#6a6385", background: "none", border: "none", cursor: "pointer" }}><X size={13} /></button>
-          </div>
-        )}
-
-
         {dragging && (
           <div className="fixed inset-0 z-[9998] pointer-events-none">
             <div className="fixed bottom-6 left-1/2 -translate-x-1/2 pointer-events-auto rounded-2xl px-5 py-3"
@@ -9437,11 +9398,86 @@ export default function App() {
           );
         })()}
 
+        {total > 0 && (
+        <div ref={iocLayoutRef} className="flex flex-col md:flex-row gap-4 md:items-stretch" style={{ scrollMarginTop: 8 }}>
+          {/* ── Side menu: indicator types (full height of the column; menu stays in view) ── */}
+          <aside className="md:w-[212px] shrink-0 rounded-2xl" style={{ background: "rgba(15,13,25,0.82)", border: "1px solid rgba(132,116,190,0.18)" }}>
+            <nav aria-label="Indicator types" className="md:sticky p-2.5 md:max-h-[calc(100vh-16px)] md:overflow-y-auto" style={{ top: 8 }}>
+              <div className="ie-label hidden md:block px-2 pt-1 pb-2 text-[9.5px] uppercase tracking-widest" style={{ color: "#8b84a6" }}>Indicators</div>
+              <div className="flex md:flex-col gap-1 overflow-x-auto md:overflow-visible pb-1 md:pb-0">
+                {[["__ALL__", null], ...entries.map(([cat]) => [cat, cat])].map(([key, cat]) => {
+                  const active = focusCat === cat;
+                  const c = cat ? colorFor(cat) : "#d6c8ff";
+                  const all = cat ? (entries.find(([x]) => x === cat)?.[1].length || 0) : total;
+                  const shownN = cat ? (filterActive ? (viewMap.get(cat) || []).length : all) : viewTotal;
+                  const empty = filterActive && shownN === 0;
+                  return (
+                    <button key={key} onClick={() => focusType(cat)} aria-pressed={active}
+                      title={cat ? `Show only ${cat} (${all})` : "Show every indicator type"}
+                      className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-left shrink-0 md:w-full"
+                      style={{ background: active ? "#1d1830" : "transparent", border: `1px solid ${active ? `${c}66` : "transparent"}`, opacity: empty && !active ? 0.45 : 1 }}>
+                      {cat
+                        ? <span className="shrink-0 rounded-full" style={{ width: 8, height: 8, background: c, boxShadow: active ? `0 0 8px ${c}` : "none" }} />
+                        : <span className="shrink-0 rounded-sm" style={{ width: 8, height: 8, border: "1.5px solid #d6c8ff" }} />}
+                      <span className="text-[12.5px] font-semibold truncate" style={{ color: active ? "#f4f1fb" : cat ? c : "#d6c8ff" }}>{cat || "All types"}</span>
+                      <span className="ml-auto pl-2 text-[11px] tabular-nums whitespace-nowrap" style={{ color: active ? "#f4f1fb" : "#8b84a6" }}>
+                        {filterActive ? `${shownN}/${all}` : all}
+                      </span>
+                    </button>
+                  );
+                })}
+                <div className="shrink-0 md:mt-2 md:pt-2 md:border-t" style={{ borderColor: "rgba(132,116,190,0.16)" }}>
+                  <div className="relative">
+                  <select
+                    value={customAddCat && customAddCat !== "__NEW__" ? customAddCat : ""}
+                    onChange={(e) => { const v = e.target.value; if (v) { setCustomAddCat(v); setCustomAddValue(""); if (focusCat) setFocusCat(iocData?.[v] ? v : null); } }}
+                    className="w-full rounded-full px-3 py-1.5 text-xs font-semibold outline-none cursor-pointer appearance-none pr-7"
+                    style={{ background: "rgba(252,165,10,0.06)", border: "1px solid rgba(252,165,10,0.35)", color: "#fca50a" }}>
+                    <option value="" style={{ background: "#0f0d19", color: "#6a6385" }}>+ Add Category / IOC</option>
+                    {ALL_IOC_CATS.map((c) => (
+                      <option key={c} value={c} style={{ background: "#0f0d19", color: colorFor(c) }}>{c}</option>
+                    ))}
+                  </select>
+                  <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "#fca50a" }} />
+                  </div>
+                </div>
+              </div>
+            </nav>
+          </aside>
+          <div className="flex-1 min-w-0">
+        {/* Floating input for adding to a new category that has no card yet */}
+          {customAddCat && customAddCat !== "__NEW__" && !iocData?.[customAddCat] && (
+            <div className="flex items-center gap-2 mb-3 rounded-lg px-3 py-2" style={{ border: `1px solid ${colorFor(customAddCat)}55`, backgroundColor: `${colorFor(customAddCat)}0a` }}>
+              <span className="text-xs font-bold shrink-0" style={{ color: colorFor(customAddCat) }}>{customAddCat}</span>
+              <input autoFocus value={customAddValue} onChange={(e) => setCustomAddValue(e.target.value)}
+                placeholder={`Enter ${customAddCat} value…`}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && customAddValue.trim()) { addPivotIOC(customAddCat, customAddValue.trim(), "Manual"); setCustomAddValue(""); setCustomAddCat(null); }
+                  if (e.key === "Escape") { setCustomAddCat(null); setCustomAddValue(""); }
+                }}
+                className="flex-1 rounded-md px-2 py-1 text-xs outline-none"
+                style={{ background: "rgba(0,0,0,0.3)", border: "1px solid rgba(132,116,190,0.3)", color: "#efecf8" }} />
+              <button onClick={() => { if (customAddValue.trim()) { addPivotIOC(customAddCat, customAddValue.trim(), "Manual"); setCustomAddValue(""); setCustomAddCat(null); } }}
+                className="text-xs rounded-md px-2 py-1 shrink-0"
+                style={{ color: "#160b02", background: colorFor(customAddCat), cursor: "pointer", border: "none" }}>Add</button>
+              <button onClick={() => { setCustomAddCat(null); setCustomAddValue(""); }} style={{ color: "#6a6385", background: "none", border: "none", cursor: "pointer" }}><X size={13} /></button>
+            </div>
+          )}
+
+
+          {focusCat && (
+            <div className="flex flex-wrap items-center gap-2 mb-3 text-[12px]" style={{ color: "#8b84a6" }}>
+              <span>Showing only <b style={{ color: colorFor(focusCat) }}>{focusCat}</b>, full list</span>
+              <button onClick={() => focusType(null)} className="rounded-full px-2.5 py-0.5 text-[11px] font-medium"
+                style={{ color: "#d6c8ff", border: "1px solid rgba(185,165,255,0.28)" }}>Show all types</button>
+            </div>
+          )}
         {total > 0 && (anyEnrichedCase || filterActive) && (
           <IocFilterBar options={filterOptions} filter={iocFilter} setFilter={setIocFilter} shown={viewTotal} total={total} />
         )}
         <div className="grid grid-cols-1 gap-4">
           {entries.map(([cat, allArr]) => {
+            if (focusCat && cat !== focusCat) return null;
             const c = colorFor(cat);
             const arr = filterActive ? (viewMap.get(cat) || []) : allArr;
             if (filterActive && !arr.length) {
@@ -9615,7 +9651,7 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="px-4 py-2 overflow-y-auto flex-1" style={{ maxHeight: 420 }}>
+                <div className="px-4 py-2 overflow-y-auto flex-1" style={{ maxHeight: focusCat === cat ? "none" : 420 }}>
                   {customAddCat === cat && (
                     <div className="flex gap-1.5 mb-2 pb-2" style={{ borderBottom: `1px solid ${c}22` }}>
                       <input
@@ -11441,6 +11477,9 @@ export default function App() {
             );
           })}
         </div>
+          </div>
+        </div>
+        )}
 
         {references.length > 0 && (
           <div className="rounded-xl overflow-hidden mt-4" style={{ backgroundColor: "rgba(15,13,25,0.72)", border: "1px solid rgba(132,116,190,0.12)", backdropFilter: "blur(6px)" }}>
@@ -13646,7 +13685,7 @@ const collectIocEvents = (d) => {
   return ev;
 };
 
-function CaseSpectrum({ entries, enrichCache }) {
+function CaseSpectrum({ entries, enrichCache, onReveal }) {
   const [range, setRange] = useState(30);
   const [expanded, setExpanded] = useState(false);
   const [selected, setSelected] = useState(null);
@@ -13796,11 +13835,15 @@ function CaseSpectrum({ entries, enrichCache }) {
 
   const jump = (key) => {
     setSelected(key);
-    const el = document.querySelector(`[data-ioc="${(window.CSS && CSS.escape) ? CSS.escape(key) : key}"]`);
-    if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
-      el.animate?.([{ boxShadow: "inset 0 0 0 1px rgba(252,165,10,0.9)" }, { boxShadow: "inset 0 0 0 1px rgba(252,165,10,0)" }], { duration: 1600 });
-    }
+    // If the side menu is focused on another type, switch it first so the row exists.
+    if (onReveal) onReveal(key.split("::")[0]);
+    setTimeout(() => {
+      const el = document.querySelector(`[data-ioc="${(window.CSS && CSS.escape) ? CSS.escape(key) : key}"]`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.animate?.([{ boxShadow: "inset 0 0 0 1px rgba(252,165,10,0.9)" }, { boxShadow: "inset 0 0 0 1px rgba(252,165,10,0)" }], { duration: 1600 });
+      }
+    }, 60);
   };
 
   const onMove = (e) => {
