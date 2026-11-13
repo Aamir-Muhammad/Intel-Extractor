@@ -56,7 +56,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v149";
+const APP_VERSION = "v150";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -12219,6 +12219,9 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
       const S = stateRef.current;
       const cam = camRef.current;
       S.t += 1;
+      // Wall-clock seconds for decorative motion (orbit, sonar, flow dots), so the
+      // speed is identical on 60 Hz and 120/144 Hz screens. Physics stays per-frame.
+      const clock = performance.now() / 1000;
       const N = S.nodes, E = S.edges;
       const cx = dims.w / 2, cy = dims.h / 2;
 
@@ -12320,7 +12323,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
       // contacted satellites swing wider than primaries, so the small nodes keep
       // gently circling their parent instead of locking in place.
       if (!reduceMotion) {
-        const tt = S.t / 60;
+        const tt = clock;
         for (const n of N) {
           if (n._ph == null) {
             let h = 0; for (let i = 0; i < n.id.length; i++) h = (h * 31 + n.id.charCodeAt(i)) >>> 0;
@@ -12399,7 +12402,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
         }
         // Flow particle
         if (!dim && e.kind !== "asn") {
-          const prog = ((S.t * 0.01) + (e.a.charCodeAt(0) % 10) * 0.1) % 1;
+          const prog = ((clock * 0.18) + (e.a.charCodeAt(0) % 10) * 0.1) % 1;
           const px = pa.x + (pb.x - pa.x) * prog, py = pa.y + (pb.y - pa.y) * prog;
           ctx.fillStyle = e.toBridge ? "rgba(252,211,107,0.95)" : e.color.replace(/[\d.]+\)$/, "0.9)");
           ctx.beginPath(); ctx.arc(px, py, e.toBridge ? 2.4 : 1.8, 0, Math.PI * 2); ctx.fill();
@@ -12427,13 +12430,13 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
         const preGraph = E.length === 0; // no relationships yet → dim to background texture
         if (!dim && !preGraph && n.verdict === "Malicious" && !reduceMotion) {
           for (let k = 0; k < 2; k++) {
-            const f = ((S.t / 60) * 0.45 + k * 0.5 + (n._ph || 0) * 0.1) % 1;
+            const f = (clock * 0.45 + k * 0.5 + (n._ph || 0) * 0.1) % 1;
             ctx.strokeStyle = `rgba(242,84,91,${(0.5 * (1 - f)).toFixed(3)})`; ctx.lineWidth = 1.3;
             ctx.beginPath(); ctx.arc(p.x, p.y, R + 7 * cam.zoom + f * R * 2.4, 0, Math.PI * 2); ctx.stroke();
           }
         }
         if (!dim && n.bridge) {
-          const gR = R * (2.6 + 0.3 * Math.sin(S.t * 0.07));
+          const gR = R * (2.6 + 0.3 * Math.sin(clock * 4.2));
           const g = ctx.createRadialGradient(p.x, p.y, R * 0.6, p.x, p.y, gR);
           g.addColorStop(0, BRIDGE_GOLD + "66"); g.addColorStop(1, BRIDGE_GOLD + "00");
           ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, gR, 0, Math.PI * 2); ctx.fill();
