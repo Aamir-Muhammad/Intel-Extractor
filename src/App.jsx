@@ -56,7 +56,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v150";
+const APP_VERSION = "v151";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -11552,21 +11552,49 @@ const isSharedInfraAsn = (asnRaw, orgRaw) => {
 // reveals, with bridge detection (a node reached by 2+ primary IOCs). Pure function —
 // used by the on-screen ThreatGraph AND the report's Shared-Pivot graph so the two
 // can never disagree about what is shared.
-// Detection share for a graph node: VirusTotal flagged/total when VT has an
-// analysis, otherwise how many of our engines flagged it out of those that
-// returned data. Never invented — no data means no arc.
-const GRAPH_ENGINE_KEYS = ["virustotal", "threatfox", "urlhaus", "malwarebazaar", "kaspersky", "otx", "abuseipdb", "sansIsc", "triage", "hybridAnalysis", "urlscan", "phishtank", "circl", "crowdstrike", "validin"];
+// OSINT consensus for a graph node: how many sources flagged it, out of the
+// sources that actually had an opinion on it. VirusTotal is ONE source (its
+// ~90 engines are mostly file AV that never score IPs/domains, so their raw
+// ratio understates network indicators). A source that has never seen the
+// indicator is left out rather than counted as "clean". Flags come from the
+// same per-engine rules that decide the verdict, so the two never disagree.
 const graphDetectionOf = (d, cat) => {
   if (!d) return null;
+  const isHash = ["MD5", "SHA1", "SHA256", "SHA512"].includes(cat);
   const st = d.virustotal?.detectionStats;
-  if (st) {
-    const t = (st.malicious || 0) + (st.suspicious || 0) + (st.harmless || 0) + (st.undetected || 0);
-    if (t > 0) return { f: (st.malicious || 0) + (st.suspicious || 0), t, src: "VirusTotal engines" };
-  }
-  const t = GRAPH_ENGINE_KEYS.filter((k) => d[k]).length;
-  if (!t) return null;
-  const f = new Set(deriveVerdictSignals(d, cat).filter((x) => x.polarity !== "clean").map((x) => x.engine)).size;
-  return { f: Math.min(f, t), t, src: "our engines" };
+  const vtTotal = st ? (st.malicious || 0) + (st.suspicious || 0) + (st.harmless || 0) + (st.undetected || 0) : 0;
+  const hadOpinion = {
+    "VirusTotal": vtTotal > 0,
+    "ThreatFox": !!d.threatfox,
+    "URLhaus": !!d.urlhaus,
+    "MalwareBazaar": !!d.malwarebazaar,
+    "Kaspersky": d.kaspersky?.zone === "red" || d.kaspersky?.zone === "yellow" || (isHash && d.kaspersky?.zone === "green"),
+    "OTX": (d.otx?.pulses || 0) > 0 || !!d.otx?.validation || d.otx?.whitelisted === true,
+    "AbuseIPDB": (d.abuseipdb?.reports || 0) > 0 || (d.abuseipdb?.score || 0) > 0 || !!d.abuseipdb?.isWhitelisted,
+    "SANS ISC": !!d.sansIsc,
+    "Tri.age": !!d.triage,
+    "Hybrid Analysis": !!d.hybridAnalysis,
+    "urlscan.io": !!d.urlscan?.isPrimaryTarget,
+    "PhishTank": !!d.phishtank,
+    "CIRCL": !!d.circl,
+    "CrowdStrike Falcon ML": !!d.crowdstrike,
+    "Validin": !!d.validin,
+  };
+  const responded = new Set(Object.keys(hadOpinion).filter((k) => hadOpinion[k]));
+  const flagged = new Set();
+  deriveVerdictSignals(d, cat).forEach((x) => {
+    if (!(x.engine in hadOpinion)) return; // context signals (Registry, EPSS…) aren't sources
+    responded.add(x.engine);
+    if (x.polarity !== "clean") flagged.add(x.engine);
+  });
+  if (!responded.size) return null;
+  const vt = vtTotal > 0 ? `${(st.malicious || 0) + (st.suspicious || 0)}/${vtTotal}` : null;
+  const label = (e) => (e === "VirusTotal" && vt ? `VirusTotal (${vt})` : e);
+  return {
+    f: flagged.size, t: responded.size,
+    flagged: [...flagged].map(label),
+    clean: [...responded].filter((e) => !flagged.has(e)).map(label),
+  };
 };
 
 const buildGraphModel = (iocData, enrichCache) => {
@@ -12465,6 +12493,17 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
           ctx.beginPath(); ctx.arc(p.x, p.y, rr, 0, Math.PI * 2); ctx.stroke();
           const ratio = n.det.f / n.det.t;
           const clean = ratio === 0 && n.verdict === "Whitelisted";
+          if (ratio === 0 && !clean && (cam.zoom > 0.6 || isHover)) {
+            // Checked by sources, none flagged it: muted count at the top of the empty track.
+            const txt = `0/${n.det.t}`;
+            ctx.font = '500 9px "JetBrains Mono", ui-monospace, monospace';
+            ctx.textAlign = "center"; ctx.textBaseline = "middle";
+            const tw = ctx.measureText(txt).width + 8, tx = p.x, ty = p.y - rr - 9;
+            ctx.fillStyle = "rgba(11,9,20,0.92)"; ctx.beginPath();
+            if (ctx.roundRect) ctx.roundRect(tx - tw / 2, ty - 7, tw, 14, 7); else ctx.rect(tx - tw / 2, ty - 7, tw, 14);
+            ctx.fill(); ctx.strokeStyle = "rgba(132,116,190,0.35)"; ctx.lineWidth = 1; ctx.stroke();
+            ctx.fillStyle = "#8b84a6"; ctx.fillText(txt, tx, ty + 0.5); ctx.textBaseline = "alphabetic";
+          }
           if (ratio > 0 || clean) {
             const arcCol = clean ? "#3ee0a1" : (vc || "#8b84a6");
             const endA = -Math.PI / 2 + (clean ? 1 : Math.max(ratio, 0.03)) * Math.PI * 2;
@@ -12475,7 +12514,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
             if (!clean && (cam.zoom > 0.6 || isHover)) {
               const tx = p.x + Math.cos(endA) * (rr + 9), ty = p.y + Math.sin(endA) * (rr + 9);
               tagLow = Math.sin(endA) > 0.55;
-              const txt = ratio < 0.01 ? "<1%" : `${Math.round(ratio * 100)}%`;
+              const txt = `${n.det.f}/${n.det.t}`;
               ctx.font = '600 9px "JetBrains Mono", ui-monospace, monospace';
               ctx.textAlign = "center"; ctx.textBaseline = "middle";
               const tw = ctx.measureText(txt).width + 8;
@@ -12995,9 +13034,12 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
             </div>
           )}
           {hoverInfo.node.det && (
-            <div style={{ color: "#cfc9e4", marginTop: 2 }}>
-              Detection <span className="ie-mono" style={{ color: "#f4f1fb" }}>{hoverInfo.node.det.f}/{hoverInfo.node.det.t}</span>
-              <span style={{ color: "#8b84a6" }}> · {hoverInfo.node.det.src}</span>
+            <div style={{ color: "#cfc9e4", marginTop: 3 }}>
+              <div>
+                Sources flagged <span className="ie-mono" style={{ color: "#f4f1fb" }}>{hoverInfo.node.det.f}/{hoverInfo.node.det.t}</span>
+              </div>
+              {hoverInfo.node.det.flagged.length > 0 && <div style={{ color: "#efecf8" }}>{hoverInfo.node.det.flagged.join(", ")}</div>}
+              {hoverInfo.node.det.clean.length > 0 && <div style={{ color: "#8b84a6" }}>No detection: {hoverInfo.node.det.clean.join(", ")}</div>}
             </div>
           )}
           {hoverInfo.asn && <div style={{ color: "#b9a5ff", marginTop: 2 }}>{hoverInfo.asn}</div>}
