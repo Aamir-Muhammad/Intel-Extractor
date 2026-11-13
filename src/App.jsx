@@ -56,7 +56,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v148";
+const APP_VERSION = "v149";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -11552,6 +11552,23 @@ const isSharedInfraAsn = (asnRaw, orgRaw) => {
 // reveals, with bridge detection (a node reached by 2+ primary IOCs). Pure function —
 // used by the on-screen ThreatGraph AND the report's Shared-Pivot graph so the two
 // can never disagree about what is shared.
+// Detection share for a graph node: VirusTotal flagged/total when VT has an
+// analysis, otherwise how many of our engines flagged it out of those that
+// returned data. Never invented — no data means no arc.
+const GRAPH_ENGINE_KEYS = ["virustotal", "threatfox", "urlhaus", "malwarebazaar", "kaspersky", "otx", "abuseipdb", "sansIsc", "triage", "hybridAnalysis", "urlscan", "phishtank", "circl", "crowdstrike", "validin"];
+const graphDetectionOf = (d, cat) => {
+  if (!d) return null;
+  const st = d.virustotal?.detectionStats;
+  if (st) {
+    const t = (st.malicious || 0) + (st.suspicious || 0) + (st.harmless || 0) + (st.undetected || 0);
+    if (t > 0) return { f: (st.malicious || 0) + (st.suspicious || 0), t, src: "VirusTotal engines" };
+  }
+  const t = GRAPH_ENGINE_KEYS.filter((k) => d[k]).length;
+  if (!t) return null;
+  const f = new Set(deriveVerdictSignals(d, cat).filter((x) => x.polarity !== "clean").map((x) => x.engine)).size;
+  return { f: Math.min(f, t), t, src: "our engines" };
+};
+
 const buildGraphModel = (iocData, enrichCache) => {
   if (!iocData) return { nodes: [], edges: [], stats: { nodes: 0, edges: 0, derived: 0 } };
   const nodes = new Map(); // id -> node
@@ -11590,7 +11607,11 @@ const buildGraphModel = (iocData, enrichCache) => {
   Object.entries(iocData).forEach(([cat, arr]) => {
     if (!Array.isArray(arr)) return;
     if (GRAPH_SKIP_CATS.has(cat)) return;
-    arr.forEach((val) => addNode(val, val, cat, false, verdictOf(cat, val)));
+    arr.forEach((val) => {
+      const n = addNode(val, val, cat, false, verdictOf(cat, val));
+      const det = graphDetectionOf(enrichCache[`${cat}::${val}`]?.data, cat);
+      if (det) n.det = det;
+    });
   });
 
   // 2. Derived nodes + edges from enrichment
@@ -11969,6 +11990,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
       if (p) {
         // Existing node — keep its settled position and velocity.
         n.x = p.x; n.y = p.y; n.vx = p.vx * 0.3; n.vy = p.vy * 0.3;
+        n._ox = p.ox; n._oy = p.oy;
         n.isNew = false;
       } else {
         // New node — spawn near a connected parent that already has a position,
@@ -12192,6 +12214,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
     const verdictColor = (v) => v === "Malicious" ? "#f2545b" : v === "Suspicious" ? "#f5b53a" : v === "Whitelisted" ? "#3ee0a1" : null;
 
     const reduceMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    const hexA = (h, al) => { const v = parseInt(String(h || "").replace("#", "").slice(0, 6), 16); return isNaN(v) ? `rgba(185,165,255,${al})` : `rgba(${(v >> 16) & 255},${(v >> 8) & 255},${v & 255},${al})`; };
     const step = () => {
       const S = stateRef.current;
       const cam = camRef.current;
@@ -12311,7 +12334,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
         }
       }
       // Snapshot positions so the next model rebuild can preserve them.
-      { const snap = prevPosRef.current; snap.clear(); for (const n of N) snap.set(n.id, { x: n.x, y: n.y, vx: n.vx, vy: n.vy }); }
+      { const snap = prevPosRef.current; snap.clear(); for (const n of N) snap.set(n.id, { x: n.x, y: n.y, vx: n.vx, vy: n.vy, ox: n._ox, oy: n._oy }); }
 
       // ---- Draw ----
       ctx.clearRect(0, 0, dims.w, dims.h);
@@ -12396,57 +12419,69 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
         const spawnScale = n.isNew ? Math.min(1, 0.3 + (n.spawnT || 0) / 90 * 0.7) : 1;
         const R = n.r * cam.zoom * (isHover ? 1.4 : 1) * spawnScale;
 
-        // Pulsing glow for malicious/suspicious; bridge nodes always pulse gold.
+        // ── Radar Blip + Detection Arc ──
+        // Dark lens, type-coloured ring, verdict pip in the centre. Red appears
+        // only for Malicious: the pip and a slow sonar pulse. The outer arc is
+        // the detection share (VirusTotal flagged/total, else our engines).
         const BRIDGE_GOLD = "#fcd36b";
-        let glowR = R * 2.4;
-        if (n.bridge) glowR *= 1.2 + 0.14 * Math.sin(S.t * 0.07);
-        else if (n.verdict === "Malicious") glowR *= 1.15 + 0.12 * Math.sin(S.t * 0.08);
-        else if (n.verdict === "Suspicious") glowR *= 1.05 + 0.08 * Math.sin(S.t * 0.06);
-
-        if (!dim) {
-          const preGlow = E.length === 0;
-          ctx.globalAlpha = preGlow ? 0.45 : 1;
-          const g = ctx.createRadialGradient(p.x, p.y, R * 0.5, p.x, p.y, glowR);
-          const glowColor = n.bridge ? BRIDGE_GOLD : (vc || base);
-          g.addColorStop(0, glowColor + (isHover ? "cc" : n.bridge ? "88" : "66"));
-          g.addColorStop(1, glowColor + "00");
-          ctx.fillStyle = g;
-          ctx.beginPath(); ctx.arc(p.x, p.y, glowR, 0, Math.PI * 2); ctx.fill();
-          ctx.globalAlpha = 1;
-        }
-
-        // Node body
         const preGraph = E.length === 0; // no relationships yet → dim to background texture
+        if (!dim && !preGraph && n.verdict === "Malicious" && !reduceMotion) {
+          for (let k = 0; k < 2; k++) {
+            const f = ((S.t / 60) * 0.45 + k * 0.5 + (n._ph || 0) * 0.1) % 1;
+            ctx.strokeStyle = `rgba(242,84,91,${(0.5 * (1 - f)).toFixed(3)})`; ctx.lineWidth = 1.3;
+            ctx.beginPath(); ctx.arc(p.x, p.y, R + 7 * cam.zoom + f * R * 2.4, 0, Math.PI * 2); ctx.stroke();
+          }
+        }
+        if (!dim && n.bridge) {
+          const gR = R * (2.6 + 0.3 * Math.sin(S.t * 0.07));
+          const g = ctx.createRadialGradient(p.x, p.y, R * 0.6, p.x, p.y, gR);
+          g.addColorStop(0, BRIDGE_GOLD + "66"); g.addColorStop(1, BRIDGE_GOLD + "00");
+          ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, gR, 0, Math.PI * 2); ctx.fill();
+        }
         ctx.globalAlpha = dim ? 0.25 : (preGraph ? 0.4 : 1);
-        // "Hot core" body — brightest at the centre like a heat signature,
-        // using the top of the Spectrum ramp instead of a white specular.
-        const body = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, R);
-        body.addColorStop(0, "#fcffa4");
-        body.addColorStop(0.38, n.bridge ? BRIDGE_GOLD : base);
-        body.addColorStop(1, n.bridge ? "#f0a030" : (vc || base));
-        ctx.fillStyle = body;
-        ctx.beginPath(); ctx.arc(p.x, p.y, R, 0, Math.PI * 2); ctx.fill();
-
-        // Ring: bridge = solid gold; contacted = orange dashed (secondary infra);
-        // derived = white dashed; primary = solid category color.
-        if (n.bridge) {
-          ctx.lineWidth = 2.5;
-          ctx.strokeStyle = BRIDGE_GOLD;
-          ctx.beginPath(); ctx.arc(p.x, p.y, R + 2, 0, Math.PI * 2); ctx.stroke();
-        } else if (n.contacted) {
-          // Contacted infra (urlscan secondary) — orange dashed ring, visually
-          // distinct from serving infra to show "this was talked to, not served from".
-          ctx.lineWidth = 1.5;
-          ctx.strokeStyle = "rgba(240,138,75,0.8)";
-          ctx.setLineDash([3, 2]);
-          ctx.beginPath(); ctx.arc(p.x, p.y, R + 1.5, 0, Math.PI * 2); ctx.stroke();
-          ctx.setLineDash([]);
-        } else {
-          ctx.lineWidth = 1.5;
-          ctx.strokeStyle = n.derived ? "rgba(255,255,255,0.25)" : (vc || base);
-          if (n.derived) ctx.setLineDash([2, 2]);
-          ctx.beginPath(); ctx.arc(p.x, p.y, R + 1.5, 0, Math.PI * 2); ctx.stroke();
-          ctx.setLineDash([]);
+        ctx.fillStyle = "#0e0b1a"; ctx.beginPath(); ctx.arc(p.x, p.y, R, 0, Math.PI * 2); ctx.fill();
+        const lens = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, R);
+        lens.addColorStop(0, hexA(base, 0)); lens.addColorStop(1, hexA(base, isHover ? 0.34 : 0.22));
+        ctx.fillStyle = lens; ctx.beginPath(); ctx.arc(p.x, p.y, R, 0, Math.PI * 2); ctx.fill();
+        // Ring: bridge = solid gold; contacted = orange dashed; derived = dashed type colour; primary = solid type colour.
+        if (n.bridge) { ctx.lineWidth = 2.5; ctx.strokeStyle = BRIDGE_GOLD; }
+        else if (n.contacted) { ctx.lineWidth = 1.4; ctx.strokeStyle = "rgba(240,138,75,0.85)"; ctx.setLineDash([3, 2]); }
+        else if (n.derived) { ctx.lineWidth = 1.2; ctx.strokeStyle = hexA(base, 0.75); ctx.setLineDash([2.5, 2]); }
+        else { ctx.lineWidth = isHover ? 2.6 : 2; ctx.strokeStyle = base; }
+        ctx.beginPath(); ctx.arc(p.x, p.y, R, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+        // Verdict pip
+        const pr = Math.max(2.2, R * 0.36);
+        if (vc) { ctx.shadowColor = vc; ctx.shadowBlur = 10; }
+        ctx.fillStyle = vc || "#6a6385";
+        ctx.beginPath(); ctx.arc(p.x, p.y, pr, 0, Math.PI * 2); ctx.fill(); ctx.shadowBlur = 0;
+        // Detection arc + percentage tag at its tip
+        let tagLow = false;
+        if (n.det && !preGraph) {
+          const rr = R + Math.max(3, 4.5 * cam.zoom);
+          ctx.lineWidth = 2; ctx.strokeStyle = "rgba(132,116,190,0.22)";
+          ctx.beginPath(); ctx.arc(p.x, p.y, rr, 0, Math.PI * 2); ctx.stroke();
+          const ratio = n.det.f / n.det.t;
+          const clean = ratio === 0 && n.verdict === "Whitelisted";
+          if (ratio > 0 || clean) {
+            const arcCol = clean ? "#3ee0a1" : (vc || "#8b84a6");
+            const endA = -Math.PI / 2 + (clean ? 1 : Math.max(ratio, 0.03)) * Math.PI * 2;
+            ctx.lineWidth = 2.4; ctx.lineCap = "round"; ctx.strokeStyle = arcCol;
+            if (n.verdict === "Malicious") { ctx.shadowColor = arcCol; ctx.shadowBlur = 6; }
+            ctx.beginPath(); ctx.arc(p.x, p.y, rr, -Math.PI / 2, endA); ctx.stroke();
+            ctx.shadowBlur = 0; ctx.lineCap = "butt";
+            if (!clean && (cam.zoom > 0.6 || isHover)) {
+              const tx = p.x + Math.cos(endA) * (rr + 9), ty = p.y + Math.sin(endA) * (rr + 9);
+              tagLow = Math.sin(endA) > 0.55;
+              const txt = ratio < 0.01 ? "<1%" : `${Math.round(ratio * 100)}%`;
+              ctx.font = '600 9px "JetBrains Mono", ui-monospace, monospace';
+              ctx.textAlign = "center"; ctx.textBaseline = "middle";
+              const tw = ctx.measureText(txt).width + 8;
+              ctx.fillStyle = "rgba(11,9,20,0.92)"; ctx.beginPath();
+              if (ctx.roundRect) ctx.roundRect(tx - tw / 2, ty - 7, tw, 14, 7); else ctx.rect(tx - tw / 2, ty - 7, tw, 14);
+              ctx.fill(); ctx.strokeStyle = hexA(arcCol, 0.55); ctx.lineWidth = 1; ctx.stroke();
+              ctx.fillStyle = arcCol; ctx.fillText(txt, tx, ty + 0.5); ctx.textBaseline = "alphabetic";
+            }
+          }
         }
 
         // Label (only when zoomed enough or hovered)
@@ -12456,9 +12491,10 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
           ctx.textAlign = "center";
           const lbl = n.label.length > 26 ? n.label.slice(0, 24) + "…" : n.label;
           ctx.lineJoin = "round"; ctx.lineWidth = 3.5; ctx.strokeStyle = "rgba(11,9,20,0.9)";
-          ctx.strokeText(lbl, p.x, p.y + R + 13);
+          const ly = p.y + R + (n.det && !preGraph ? 20 : 13) + (tagLow ? 12 : 0);
+          ctx.strokeText(lbl, p.x, ly);
           ctx.fillStyle = isHover ? "#fcffa4" : "#cfc9e4";
-          ctx.fillText(lbl, p.x, p.y + R + 13);
+          ctx.fillText(lbl, p.x, ly);
         }
         ctx.globalAlpha = 1;
       }
@@ -12953,6 +12989,12 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
           {hoverInfo.verdict && (
             <div style={{ color: hoverInfo.verdict === "Malicious" ? "#f2545b" : hoverInfo.verdict === "Suspicious" ? "#f5b53a" : "#3ee0a1", fontWeight: 700, marginTop: 2 }}>
               {hoverInfo.verdict === "Malicious" ? "●" : hoverInfo.verdict === "Suspicious" ? "●" : "●"} {hoverInfo.verdict}
+            </div>
+          )}
+          {hoverInfo.node.det && (
+            <div style={{ color: "#cfc9e4", marginTop: 2 }}>
+              Detection <span className="ie-mono" style={{ color: "#f4f1fb" }}>{hoverInfo.node.det.f}/{hoverInfo.node.det.t}</span>
+              <span style={{ color: "#8b84a6" }}> · {hoverInfo.node.det.src}</span>
             </div>
           )}
           {hoverInfo.asn && <div style={{ color: "#b9a5ff", marginTop: 2 }}>{hoverInfo.asn}</div>}
