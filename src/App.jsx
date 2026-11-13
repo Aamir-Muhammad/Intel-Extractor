@@ -56,7 +56,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v147";
+const APP_VERSION = "v148";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -2219,13 +2219,13 @@ const TYPE_COLORS = {
   IPV4: "#ff8a5c", IPV6: "#ffab85",
   DOMAIN: "#fcc24a", HOSTNAME: "#f5d57e",
   URL: "#b9a5ff", EMAIL: "#e86aa6",
-  MD5: "#d4a5ff", SHA1: "#c18cff", SHA256: "#ff6f91", SHA512: "#ff5c7a",
+  MD5: "#d4a5ff", SHA1: "#c18cff", SHA256: "#8fb4ff", SHA512: "#7a9cff",
   SSDEEP: "#f29ac9", IMPHASH: "#e9b44c", AUTHENTIHASH: "#dcc46a",
-  CVE: "#ff5a4f", BTC: "#f7a531", XMR: "#ff7a3d", ETH: "#a9a4d9",
+  CVE: "#f0a6ff", BTC: "#f7a531", XMR: "#ff7a3d", ETH: "#a9a4d9",
   ASN: "#9d8cff", MAC_ADDRESS: "#cbe27a",
   REGISTRY: "#e07bd9", FILE_NAME: "#b3abcf", FILE_PATH: "#a79ef2",
-  SCHEDULED_TASK: "#ff8fa3", SERVICE: "#d6c8ff", COMMAND_LINE: "#fce38a",
-  MITRE_ATTACK: "#ff6a5a", YARA: "#9fa8ff",
+  SCHEDULED_TASK: "#f6a5d8", SERVICE: "#d6c8ff", COMMAND_LINE: "#fce38a",
+  MITRE_ATTACK: "#9ad0ff", YARA: "#9fa8ff",
 };
 const FALLBACK_PALETTE = ["#ff8a5c","#fcc24a","#b9a5ff","#e86aa6","#ff6f91","#9d8cff","#f29ac9","#e9b44c","#c18cff","#ffab85"];
 const colorFor = (cat) => {
@@ -6235,6 +6235,37 @@ export default function App() {
   );
   const total = useMemo(() => entries.reduce((s, [, v]) => s + v.length, 0), [entries]);
 
+  // ── Indicator filters (Verdict / ASN / Country / Family / Flagged by) ──
+  const [iocFilter, setIocFilter] = useState({});
+  const facetIndex = useMemo(() => {
+    const m = new Map();
+    entries.forEach(([cat, arr]) => arr.forEach((v) => m.set(`${cat}::${v}`, iocFacets(cat, enrichCache[`${cat}::${v}`]?.data))));
+    return m;
+  }, [entries, enrichCache]);
+  const filterOptions = useMemo(() => {
+    const o = {};
+    FILTER_DIMS.forEach((dim) => { o[dim.key] = new Map(); });
+    facetIndex.forEach((f) => FILTER_DIMS.forEach((dim) => {
+      const vals = f[dim.key].length ? f[dim.key] : (dim.none ? [{ k: "__none", l: dim.none }] : []);
+      vals.forEach((x) => { const e = o[dim.key].get(x.k) || { k: x.k, l: x.l, n: 0 }; e.n += 1; o[dim.key].set(x.k, e); });
+    }));
+    const out = {};
+    FILTER_DIMS.forEach((dim) => {
+      const list = [...o[dim.key].values()];
+      out[dim.key] = dim.key === "verdict"
+        ? list.sort((a, b) => FILTER_VERDICT_ORDER.indexOf(a.k) - FILTER_VERDICT_ORDER.indexOf(b.k))
+        : list.sort((a, b) => (a.k === "__none") - (b.k === "__none") || b.n - a.n || a.l.localeCompare(b.l));
+    });
+    return out;
+  }, [facetIndex]);
+  const filterActive = useMemo(() => Object.values(iocFilter).some((sel) => sel && Object.keys(sel).length), [iocFilter]);
+  const viewEntries = useMemo(() => (filterActive
+    ? entries.map(([cat, arr]) => [cat, arr.filter((v) => facetPass(facetIndex.get(`${cat}::${v}`) || iocFacets(cat, null), iocFilter))])
+    : entries), [entries, facetIndex, iocFilter, filterActive]);
+  const viewMap = useMemo(() => new Map(viewEntries), [viewEntries]);
+  const viewTotal = useMemo(() => viewEntries.reduce((s, [, v]) => s + v.length, 0), [viewEntries]);
+  const anyEnrichedCase = useMemo(() => (filterOptions.verdict || []).some((o) => o.k !== "Not enriched"), [filterOptions]);
+
   // Auto-initialize report IOC-type filter when entries change (default: all enabled)
   useEffect(() => {
     setReportIocTypes(prev => {
@@ -6981,7 +7012,7 @@ export default function App() {
 
   const exportAllCSV = () => {
     const rows = [["Type", "IOC", ...ENRICH_HEADERS]];
-    entries.forEach(([cat, arr]) => {
+    viewEntries.forEach(([cat, arr]) => {
       const shown = proc(arr, cat);
       arr.forEach((orig, i) => rows.push([cat, shown[i], ...enrichVals(enrichRow(cat, orig))]));
     });
@@ -6989,12 +7020,12 @@ export default function App() {
   };
   const exportAllXLSX = () => {
     const all = [["Type", "IOC", ...ENRICH_HEADERS]];
-    entries.forEach(([cat, arr]) => {
+    viewEntries.forEach(([cat, arr]) => {
       const shown = proc(arr, cat);
       arr.forEach((orig, i) => all.push([cat, shown[i], ...enrichVals(enrichRow(cat, orig))]));
     });
     const sheets = [{ name: "All_IOCs", rows: all }];
-    entries.forEach(([cat, arr]) => {
+    viewEntries.forEach(([cat, arr]) => {
       const shown = proc(arr, cat);
       sheets.push({ name: cat, rows: [["IOC", ...ENRICH_HEADERS], ...arr.map((orig, i) => [shown[i], ...enrichVals(enrichRow(cat, orig))])] });
     });
@@ -9027,7 +9058,7 @@ export default function App() {
         )}
 
         {!total && <ThreatWire onHunt={huntArticle} />}
-        {total > 0 && <CaseSpectrum entries={entries} enrichCache={enrichCache} />}
+        {total > 0 && <CaseSpectrum entries={viewEntries} enrichCache={enrichCache} />}
         </div>
 
         {meta && (meta.title || meta.description) && (
@@ -9406,9 +9437,22 @@ export default function App() {
           );
         })()}
 
+        {total > 0 && (anyEnrichedCase || filterActive) && (
+          <IocFilterBar options={filterOptions} filter={iocFilter} setFilter={setIocFilter} shown={viewTotal} total={total} />
+        )}
         <div className="grid grid-cols-1 gap-4">
-          {entries.map(([cat, arr]) => {
+          {entries.map(([cat, allArr]) => {
             const c = colorFor(cat);
+            const arr = filterActive ? (viewMap.get(cat) || []) : allArr;
+            if (filterActive && !arr.length) {
+              return (
+                <div key={cat} id={`cat-${cat}`} className="rounded-xl px-4 py-2.5 flex items-center gap-2 text-[12px]" style={{ ...panel, borderColor: `${c}30` }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 99, backgroundColor: c, opacity: 0.6 }} />
+                  <span className="font-semibold" style={{ color: c, opacity: 0.8 }}>{cat}</span>
+                  <span style={{ color: "#8b84a6" }}>· no matches for the current filters ({allArr.length} hidden)</span>
+                </div>
+              );
+            }
             // Card-level effective collapse: explicit card state wins over global.
             const cardCollapseState = cardCondensed[cat];
             const inheritedCollapse = cardCollapseState !== undefined ? cardCollapseState : condensed;
@@ -9427,6 +9471,7 @@ export default function App() {
                   <div className="flex items-center gap-2 min-w-0">
                     <span style={{ width: 9, height: 9, borderRadius: 99, backgroundColor: c, boxShadow: `0 0 10px ${c}` }} />
                     <span className="font-bold tracking-wide truncate" style={{ color: c, textShadow: `0 0 12px ${c}55` }}>{cat}</span>
+                    {filterActive && <span className="shrink-0 text-[11px]" style={{ color: "#8b84a6" }}>{arr.length} of {allArr.length}</span>}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE","FILE_NAME","FILE_PATH","REGISTRY","SCHEDULED_TASK","SERVICE","COMMAND_LINE","EMAIL","MAC_ADDRESS"].includes(cat) && (
@@ -11466,14 +11511,14 @@ class GraphErrorBoundary extends Component {
 const EDGE_KIND_META = {
   serves: { label: "Serving IP", color: "#fca50a" },
   resolved: { label: "Resolved (passive DNS)", color: "#e86aa6" },
-  hosts: { label: "Hosts file", color: "#f2545b" },
+  hosts: { label: "Hosts file", color: "#e86aa6" },
   scanned: { label: "Scanned URL", color: "#b9a5ff" },
   contacted: { label: "Contacted", color: "#f08a4b" },
-  loads: { label: "Loads resource", color: "#f2545b" },
-  c2: { label: "C2 communication", color: "#f2545b" },
-  downloaded_from: { label: "Downloaded from", color: "#f2545b" },
+  loads: { label: "Loads resource", color: "#9ad0ff" },
+  c2: { label: "C2 communication", color: "#ff9f43" },
+  downloaded_from: { label: "Downloaded from", color: "#f6a5d8" },
   hosted_on: { label: "Hosted on", color: "#fca50a" },
-  related: { label: "Related sample", color: "#f2545b" },
+  related: { label: "Related sample", color: "#c18cff" },
   dropped: { label: "Execution parent", color: "#cdb8ff" },
   asn: { label: "Shared ASN infrastructure", color: "#b9a5ff" },
   subdomain: { label: "Subdomain", color: "#b9a5ff" },
@@ -11580,7 +11625,7 @@ const buildGraphModel = (iocData, enrichCache) => {
       (d.urlscan?.files || []).forEach((f) => {
         if (f.sha256) {
           addNode(f.sha256, f.filename ? `${f.filename}` : f.sha256.slice(0, 12) + "…", "SHA256", true, null);
-          addEdge(val, f.sha256, "hosts", "rgba(242,84,91,0.45)");
+          addEdge(val, f.sha256, "hosts", "rgba(232,106,166,0.45)");
         }
       });
 
@@ -11615,7 +11660,7 @@ const buildGraphModel = (iocData, enrichCache) => {
       (d.urlscan?.resourceHashes || []).forEach((h) => {
         if (!h || typeof h !== "string" || h.length < 32) return;
         addNode(h, h.slice(0, 12) + "…", "SHA256", true, null);
-        addEdge(val, h, "loads", "rgba(242,84,91,0.35)");
+        addEdge(val, h, "loads", "rgba(154,208,255,0.35)");
       });
 
       // Tri.age C2 URLs — extracted from behavioral analysis of this hash.
@@ -11629,20 +11674,20 @@ const buildGraphModel = (iocData, enrichCache) => {
           if (!dom) return;
           const n = addNode(dom, dom, "DOMAIN", true, "Malicious");
           if (n) n.c2 = true;
-          addEdge(val, dom, "c2", "rgba(242,84,91,0.6)");
+          addEdge(val, dom, "c2", "rgba(255,159,67,0.65)");
         } else if (raw.startsWith("ip:")) {
           const ip = raw.slice(3);
           if (!ip) return;
           const n = addNode(ip, ip, ipCat(ip), true, "Malicious");
           if (n) n.c2 = true;
-          addEdge(val, ip, "c2", "rgba(242,84,91,0.6)");
+          addEdge(val, ip, "c2", "rgba(255,159,67,0.65)");
         } else {
           // Bare URL
           try {
             const u = new URL(raw.includes("://") ? raw : "https://" + raw);
             const n = addNode(raw, u.hostname, "URL", true, "Malicious");
             if (n) n.c2 = true;
-            addEdge(val, raw, "c2", "rgba(242,84,91,0.6)");
+            addEdge(val, raw, "c2", "rgba(255,159,67,0.65)");
           } catch { /* skip malformed */ }
         }
       });
@@ -11659,7 +11704,7 @@ const buildGraphModel = (iocData, enrichCache) => {
           const host = u.hostname;
           // URL node (SHA256 → URL — the URL that dropped/served this sample)
           addNode(sc, sc, "URL", true, "Malicious");
-          addEdge(val, sc, "downloaded_from", "rgba(242,84,91,0.55)");
+          addEdge(val, sc, "downloaded_from", "rgba(246,165,216,0.55)");
           // Auto-derive host node (URL → IP/DOMAIN) so it can bridge with other IOCs.
           // Classify by whether hostname is IPv4 or a domain.
           const isIP = isIPv4(host) || host.includes(":");
@@ -11694,7 +11739,7 @@ const buildGraphModel = (iocData, enrichCache) => {
         const hcat = isIP ? ipCat(host) : "DOMAIN";
         const n = addNode(host, host, hcat, true, "Malicious");
         if (n) n.c2 = true;
-        addEdge(val, host, "c2", "rgba(242,84,91,0.6)");
+        addEdge(val, host, "c2", "rgba(255,159,67,0.65)");
       });
       // HA related SHA256s from imp_hash/ssdeep/authentihash/domain/ip pivots
       // — samples that share code lineage or infrastructure with this IOC.
@@ -11702,7 +11747,7 @@ const buildGraphModel = (iocData, enrichCache) => {
         if (!rh || typeof rh !== "string") return;
         if (norm(rh) === srcId) return;
         addNode(rh, rh.slice(0, 12) + "…", "SHA256", true, null);
-        addEdge(val, rh, "related", "rgba(242,84,91,0.35)");
+        addEdge(val, rh, "related", "rgba(193,140,255,0.35)");
       });
       // VirusTotal execution parents — files that, when run, produced/dropped
       // this sample. Directional lineage edge (parent → child), distinct from
@@ -11744,7 +11789,7 @@ const buildGraphModel = (iocData, enrichCache) => {
         if (norm(sha) === srcId) return;
         const vn = vtNode(sha);
         addNode(sha, vn.label, "SHA256", true, vn.verdict);
-        addEdge(val, sha, "hosts", "rgba(242,84,91,0.45)");
+        addEdge(val, sha, "hosts", "rgba(232,106,166,0.45)");
       });
       (d.virustotal?.communicatingFiles || []).forEach((sha) => {
         if (!sha || typeof sha !== "string") return;
@@ -12146,6 +12191,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
     const catColor = (n) => colorFor(n.cat);
     const verdictColor = (v) => v === "Malicious" ? "#f2545b" : v === "Suspicious" ? "#f5b53a" : v === "Whitelisted" ? "#3ee0a1" : null;
 
+    const reduceMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
     const step = () => {
       const S = stateRef.current;
       const cam = camRef.current;
@@ -12244,6 +12290,24 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
             n.spawnT = (n.spawnT || 0) + 1;
             if (n.spawnT > 240) n.isNew = false; // graduate after ~4s, matching warmKick
           }
+        }
+      }
+      // Ambient orbit — physics freezes once the layout settles, so every node
+      // also traces a slow, smooth loop around its resting point. Derived /
+      // contacted satellites swing wider than primaries, so the small nodes keep
+      // gently circling their parent instead of locking in place.
+      if (!reduceMotion) {
+        const tt = S.t / 60;
+        for (const n of N) {
+          if (n._ph == null) {
+            let h = 0; for (let i = 0; i < n.id.length; i++) h = (h * 31 + n.id.charCodeAt(i)) >>> 0;
+            n._ph = (h % 628) / 100; n._sp = 0.75 + (h % 41) / 80; n._dir = h % 2 ? 1 : -1;
+          }
+          const A = (n.derived || n.contacted ? 6 : 2.4) * Math.min(1, S.t / 240);
+          const ox = Math.cos(tt * 0.45 * n._sp * n._dir + n._ph) * A;
+          const oy = Math.sin(tt * 0.45 * n._sp * n._dir + n._ph) * A * 0.75;
+          if (cam.dragNode !== n) { n.x += ox - (n._ox || 0); n.y += oy - (n._oy || 0); }
+          n._ox = ox; n._oy = oy;
         }
       }
       // Snapshot positions so the next model rebuild can preserve them.
@@ -12683,14 +12747,14 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
           )}
           {model.stats.bridges > 0 && model.c2Links.length > 0 && <span style={{ color: "#3c3654" }}> · </span>}
           {model.c2Links.length > 0 && (
-            <span><span style={{ color: "#f2545b", fontWeight: 700 }}>{model.c2Links.length} confirmed C2 link{model.c2Links.length !== 1 ? "s" : ""}</span></span>
+            <span><span style={{ color: "#ff9f43", fontWeight: 700 }}>{model.c2Links.length} confirmed C2 link{model.c2Links.length !== 1 ? "s" : ""}</span></span>
           )}
         </div>
       )}
       {!hasGraph && (
         <button onClick={() => setFullscreen((v) => !v)}
           className="absolute z-20 flex items-center gap-1 rounded-md px-2.5 py-1 text-[10px] font-semibold"
-          style={{ bottom: 10, right: 10, background: fullscreen ? "#f2545b" : "rgba(252,165,10,0.12)", color: fullscreen ? "#fff" : "#fca50a", border: `1px solid ${fullscreen ? "rgba(242,84,91,0.8)" : "rgba(252,165,10,0.4)"}`, cursor: "pointer" }}>
+          style={{ bottom: 10, right: 10, background: fullscreen ? "linear-gradient(90deg, #e0553a, #fca50a)" : "rgba(15,13,25,0.82)", color: fullscreen ? "#160b02" : "#d6c8ff", border: `1px solid ${fullscreen ? "transparent" : "rgba(185,165,255,0.28)"}`, cursor: "pointer" }}>
           {fullscreen ? <><X size={11} /> Exit</> : <><Share2 size={11} /> Fullscreen</>}
         </button>
       )}
@@ -12935,7 +12999,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
             (enrData.whoisASN?.asnOrg || enrData.whoisASN?.asn) && { label: "ASN", value: enrData.whoisASN.asnOrg || enrData.whoisASN.asn },
             enrData.whoisASN?.country && { label: "Country", value: enrData.whoisASN.country },
             enrData.otx?.pulses && { label: "OTX Pulses", value: enrData.otx.pulses },
-            enrData.urlscan?.brands?.length && { label: "Impersonates", value: `${enrData.urlscan.brands[0]}`, color: "#f2545b" },
+            enrData.urlscan?.brands?.length && { label: "Impersonates", value: `${enrData.urlscan.brands[0]}`, color: "#f5b53a" },
             enrData.urlscan?.tlsIssuer && { label: "TLS", value: enrData.urlscan.tlsIssuer.split(" ")[0] },
             enrData.abuseipdb?.score != null && { label: "AbuseIPDB", value: `${enrData.abuseipdb.score}%` },
             enrData.urlscan?.firstSeen && { label: "First Seen", value: fmtDate(enrData.urlscan.firstSeen) },
@@ -13078,7 +13142,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
                 <button onClick={(e) => { e.stopPropagation(); setHiddenNodes((h) => { const n = new Set(h); n.add(selected.id); return n; }); setSelected(null); }}
                   className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold w-full mt-1"
                   title="Hide this node from the graph (IOC remains in your list)"
-                  style={{ color: "#ff7a70", background: "rgba(255,122,112,0.08)", border: "1px solid rgba(255,122,112,0.3)", cursor: "pointer" }}>
+                  style={{ color: "#d6c8ff", background: "transparent", border: "1px solid rgba(185,165,255,0.28)", cursor: "pointer" }}>
                   <X size={11} /> Hide from graph
                 </button>
                 {(() => {
@@ -13097,7 +13161,7 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
                     }}
                       className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-bold w-full"
                       title="Remove from graph and from your IOC list"
-                      style={{ color: "#f2545b", background: "rgba(242,84,91,0.1)", border: "1px solid rgba(242,84,91,0.4)", cursor: "pointer" }}>
+                      style={{ color: "#f4f1fb", background: "#2a2342", border: "1px solid rgba(185,165,255,0.35)", cursor: "pointer" }}>
                       <X size={11} /> Remove from graph & list
                     </button>
                   );
@@ -13284,6 +13348,157 @@ function ThreatWireTicker({ items, onHunt }) {
   );
 }
 
+
+
+// ════════════════════════════════════════════════════════════════════════
+//  Indicator filters — facets come only from what enrichment actually
+//  returned (same merged helpers the cards use), so every option in a
+//  dropdown is a value that exists in the current case.
+// ════════════════════════════════════════════════════════════════════════
+const FILTER_DIMS = [
+  { key: "verdict", label: "Verdict", none: null },
+  { key: "asn", label: "ASN", none: "No ASN" },
+  { key: "country", label: "Country", none: "No country" },
+  { key: "family", label: "Malware family", none: "No family" },
+  { key: "engine", label: "Flagged by", none: "Not flagged" },
+];
+const FILTER_VERDICT_ORDER = ["Malicious", "Suspicious", "Whitelisted", "Unknown", "Not enriched"];
+const FILTER_VERDICT_COLOR = { Malicious: "#f2545b", Suspicious: "#f5b53a", Whitelisted: "#3ee0a1", Unknown: "#8b84a6", "Not enriched": "#5a5474" };
+let _regionNames = null;
+const regionName = (cc) => {
+  try { _regionNames = _regionNames || new Intl.DisplayNames(["en"], { type: "region" }); return _regionNames.of(String(cc).toUpperCase()) || cc; } catch { return cc; }
+};
+const iocFacets = (cat, d) => {
+  const f = { verdict: [], asn: [], country: [], family: [], engine: [] };
+  const v = d ? (d._verdict || "Unknown") : "Not enriched";
+  f.verdict.push({ k: v, l: v });
+  if (!d) return f;
+  const np = buildNetworkProfile(d);
+  if (np.asn) {
+    const k = String(np.asn).toUpperCase().replace(/^(?!AS)/, "AS");
+    f.asn.push({ k, l: np.asnName ? `${k} · ${np.asnName}` : k });
+  }
+  const uc = d.urlscan?.country;
+  const cn = d.whoisASN?.country || (uc ? (String(uc).length === 2 ? regionName(uc) : uc) : null);
+  if (cn) f.country.push({ k: String(cn).toLowerCase(), l: String(cn) });
+  deriveFamilyConsensus(d).forEach((x) => { const k = famKey(x.name); if (!f.family.some((y) => y.k === k)) f.family.push({ k, l: x.name }); });
+  deriveVerdictSignals(d, cat).forEach((sg) => { if (sg.polarity !== "clean" && !f.engine.some((y) => y.k === sg.engine)) f.engine.push({ k: sg.engine, l: sg.engine }); });
+  return f;
+};
+// Include = OR within a dropdown; Exclude always removes; dropdowns combine with AND.
+const facetPass = (facets, filter) => {
+  for (const dim of FILTER_DIMS) {
+    const sel = filter[dim.key];
+    if (!sel) continue;
+    const modes = Object.values(sel);
+    if (!modes.length) continue;
+    const keys = facets[dim.key].length ? facets[dim.key].map((x) => x.k) : ["__none"];
+    if (keys.some((k) => sel[k]?.m === "exc")) return false;
+    if (modes.some((x) => x.m === "inc") && !keys.some((k) => sel[k]?.m === "inc")) return false;
+  }
+  return true;
+};
+
+function IocFilterBar({ options, filter, setFilter, shown, total }) {
+  const [open, setOpen] = useState(null); // { key, x }
+  const barRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e) => { if (barRef.current && !barRef.current.contains(e.target)) setOpen(null); };
+    const onKey = (e) => { if (e.key === "Escape") setOpen(null); };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [open]);
+  const setMode = (dim, opt, mode) => setFilter((prev) => {
+    const sel = { ...(prev[dim] || {}) };
+    if (sel[opt.k]?.m === mode) delete sel[opt.k]; else sel[opt.k] = { m: mode, l: opt.l };
+    return { ...prev, [dim]: sel };
+  });
+  const clearDim = (dim) => setFilter((prev) => ({ ...prev, [dim]: {} }));
+  const dims = FILTER_DIMS.filter((d) => Object.keys(filter[d.key] || {}).length
+    || (options[d.key] || []).some((o) => o.k !== "__none" && o.k !== "Not enriched"));
+  const active = FILTER_DIMS.flatMap((d) => Object.entries(filter[d.key] || {}).map(([k, v]) => ({ dim: d, k, ...v })));
+  const barW = barRef.current?.clientWidth || 600;
+  const popW = Math.min(330, barW);
+  const pill = (on, tone) => ({
+    color: on ? (tone === "inc" ? "#160b02" : "#f4f1fb") : "#8b84a6",
+    background: on ? (tone === "inc" ? "linear-gradient(90deg, #e0553a, #fca50a)" : "#3a3157") : "transparent",
+    border: `1px solid ${on ? "transparent" : "rgba(132,116,190,0.28)"}`,
+  });
+  return (
+    <div ref={barRef} className="sticky z-30 mb-4 rounded-2xl px-4 py-3"
+      style={{ top: 8, background: "rgba(15,13,25,0.9)", border: "1px solid rgba(132,116,190,0.18)", backdropFilter: "blur(12px)" }}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold mr-1" style={{ color: "#f4f1fb" }}>Filter indicators</span>
+        {dims.map((d) => {
+          const n = Object.keys(filter[d.key] || {}).length;
+          const isOpen = open?.key === d.key;
+          return (
+            <button key={d.key} onClick={(e) => setOpen(isOpen ? null : { key: d.key, x: e.currentTarget.offsetLeft })}
+              aria-expanded={isOpen}
+              className="flex items-center gap-1.5 rounded-full px-3 py-1 text-[12px] font-medium whitespace-nowrap"
+              style={{ color: n ? "#f4f1fb" : "#d6c8ff", background: isOpen || n ? "#1d1830" : "transparent", border: `1px solid ${n ? "rgba(252,165,10,0.5)" : "rgba(185,165,255,0.28)"}` }}>
+              {d.label}
+              {n > 0 && <span className="rounded-full px-1.5 text-[10px] font-semibold" style={{ background: "#fca50a", color: "#160b02" }}>{n}</span>}
+              <ChevronDown size={12} style={{ transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+            </button>
+          );
+        })}
+        <span className="ml-auto text-[11.5px]" style={{ color: "#8b84a6" }}>
+          {active.length ? <>Showing <b style={{ color: "#f4f1fb" }}>{shown}</b> of {total}</> : `${total} indicators`}
+        </span>
+      </div>
+      {open && (() => {
+        const d = FILTER_DIMS.find((x) => x.key === open.key);
+        const opts = options[open.key] || [];
+        const sel = filter[open.key] || {};
+        return (
+          <div className="absolute z-40 mt-2 rounded-xl p-1.5 shadow-2xl"
+            style={{ left: 16 + Math.max(0, Math.min(open.x - 16, barW - 32 - popW)), width: popW, maxHeight: 340, overflowY: "auto", background: "#141122", border: "1px solid rgba(132,116,190,0.3)" }}>
+            <div className="flex items-center justify-between px-2 py-1.5">
+              <span className="ie-label text-[9.5px] uppercase tracking-widest" style={{ color: "#8b84a6" }}>{d.label} · present in this case</span>
+              {Object.keys(sel).length > 0 && (
+                <button onClick={() => clearDim(open.key)} className="text-[11px]" style={{ color: "#d6c8ff" }}>Reset</button>
+              )}
+            </div>
+            {opts.map((o) => {
+              const m = sel[o.k]?.m;
+              return (
+                <div key={o.k} className="flex items-center gap-2 rounded-lg px-2 py-1.5" style={{ background: m ? "rgba(29,24,48,0.9)" : "transparent" }}>
+                  {open.key === "verdict" && <span className="shrink-0 rounded-full" style={{ width: 7, height: 7, background: FILTER_VERDICT_COLOR[o.k] || "#8b84a6" }} />}
+                  <span className={`min-w-0 flex-1 truncate text-[12px] ${open.key === "asn" ? "ie-mono" : ""}`} title={o.l}
+                    style={{ color: o.k === "__none" ? "#8b84a6" : "#efecf8", fontStyle: o.k === "__none" ? "italic" : "normal", textDecoration: m === "exc" ? "line-through" : "none" }}>{o.l}</span>
+                  <span className="shrink-0 text-[11px] tabular-nums" style={{ color: "#8b84a6" }}>{o.n}</span>
+                  <button onClick={() => setMode(open.key, o, "inc")} aria-pressed={m === "inc"} title={`Show only indicators matching ${o.l}`}
+                    className="shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-medium" style={pill(m === "inc", "inc")}>Include</button>
+                  <button onClick={() => setMode(open.key, o, "exc")} aria-pressed={m === "exc"} title={`Hide indicators matching ${o.l}`}
+                    className="shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-medium" style={pill(m === "exc", "exc")}>Exclude</button>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
+      {active.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 mt-2.5">
+          {active.map((a) => (
+            <span key={`${a.dim.key}-${a.k}`} className="flex items-center gap-1 rounded-full pl-2.5 pr-1 py-0.5 text-[11px]"
+              style={{ color: a.m === "inc" ? "#fcb045" : "#cfc9e4", background: a.m === "inc" ? "rgba(252,165,10,0.10)" : "rgba(132,116,190,0.12)", border: `1px solid ${a.m === "inc" ? "rgba(252,165,10,0.35)" : "rgba(132,116,190,0.3)"}` }}>
+              <span style={{ color: "#8b84a6" }}>{a.dim.label} {a.m === "inc" ? "is" : "is not"}</span>
+              <span className="max-w-[220px] truncate">{a.l || a.k}</span>
+              <button onClick={() => setMode(a.dim.key, { k: a.k, l: a.l }, a.m)} aria-label={`Remove filter ${a.dim.label} ${a.l}`}
+                className="rounded-full p-0.5" style={{ color: "#8b84a6" }}><X size={11} /></button>
+            </span>
+          ))}
+          <button onClick={() => setFilter({})} className="rounded-full px-2.5 py-0.5 text-[11px] font-medium"
+            style={{ color: "#d6c8ff", border: "1px solid rgba(185,165,255,0.28)" }}>Clear all</button>
+          <span className="text-[11px]" style={{ color: "#8b84a6" }}>· copy, CSV/XLSX, hunt queries and case activity use the filtered set</span>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ════════════════════════════════════════════════════════════════════════
 //  Case Spectrum — one lane per indicator, one column per day. Brightness is
