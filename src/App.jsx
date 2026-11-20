@@ -56,7 +56,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v153";
+const APP_VERSION = "v154";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -9067,7 +9067,7 @@ export default function App() {
         )}
 
         {!total && <ThreatWire onHunt={huntArticle} />}
-        {total > 0 && <CaseSpectrum entries={viewEntries} enrichCache={enrichCache} onReveal={(cat) => setFocusCat((f) => (f ? cat : f))} />}
+        {total > 0 && <DecisionBoard entries={viewEntries} enrichCache={enrichCache} onReveal={(cat) => setFocusCat((f) => (f ? cat : f))} />}
         </div>
 
         {meta && (meta.title || meta.description) && (
@@ -13619,32 +13619,12 @@ function IocFilterBar({ options, filter, setFilter, shown, total }) {
           ))}
           <button onClick={() => setFilter({})} className="rounded-full px-2.5 py-0.5 text-[11px] font-medium"
             style={{ color: "#d6c8ff", border: "1px solid rgba(185,165,255,0.28)" }}>Clear all</button>
-          <span className="text-[11px]" style={{ color: "#8b84a6" }}>· copy, CSV/XLSX, hunt queries and case activity use the filtered set</span>
+          <span className="text-[11px]" style={{ color: "#8b84a6" }}>· copy, CSV/XLSX, hunt queries and the decision board use the filtered set</span>
         </div>
       )}
     </div>
   );
 }
-
-// ════════════════════════════════════════════════════════════════════════
-//  Case Spectrum — one lane per indicator, one column per day. Brightness is
-//  built only from dated evidence the enrichment engines returned (first/last
-//  seen, registrations, certificate issuance, reports, KEV listing…), so a
-//  bright band means "lots happened here", never a made-up score.
-// ════════════════════════════════════════════════════════════════════════
-const SPECTRUM_RAMP = [[0, [12, 10, 22]], [0.16, [70, 16, 107]], [0.38, [152, 44, 104]], [0.6, [224, 85, 58]], [0.8, [252, 165, 10]], [1, [252, 255, 164]]];
-const spectrumRGB = (v) => {
-  const x = Math.max(0, Math.min(1, v));
-  for (let i = 1; i < SPECTRUM_RAMP.length; i++) {
-    if (x <= SPECTRUM_RAMP[i][0]) {
-      const [p0, c0] = SPECTRUM_RAMP[i - 1]; const [p1, c1] = SPECTRUM_RAMP[i];
-      const f = (x - p0) / (p1 - p0 || 1);
-      return c0.map((c, k) => Math.round(c + (c1[k] - c) * f));
-    }
-  }
-  return SPECTRUM_RAMP[SPECTRUM_RAMP.length - 1][1];
-};
-const SPECTRUM_VERDICT_COLOR = { Malicious: "#f2545b", Suspicious: "#f5b53a", Whitelisted: "#3ee0a1", Unknown: "#6a6385" };
 
 const collectIocEvents = (d) => {
   const ev = [];
@@ -13685,157 +13665,162 @@ const collectIocEvents = (d) => {
   return ev;
 };
 
-function CaseSpectrum({ entries, enrichCache, onReveal }) {
-  const [range, setRange] = useState(30);
-  const [expanded, setExpanded] = useState(false);
-  const [selected, setSelected] = useState(null);
-  const [hover, setHover] = useState(null);
-  const [width, setWidth] = useState(760);
-  const canvasRef = useRef(null);
-  const boxRef = useRef(null);
-  const LANE_H = 26;
-  const MAX_LANES = 8;
+// ════════════════════════════════════════════════════════════════════════
+//  Decision Board — every enriched indicator lands in one action lane:
+//  Block now / Hunt / Monitor / Don't block. Four factors decide it, all from
+//  data the engines already returned: source agreement (graphDetectionOf),
+//  freshness (latest dated evidence), collateral risk (shared / popular
+//  infrastructure) and novelty (no source has seen it). Nothing is guessed:
+//  missing dates read "no date", unknown networks read "network unknown".
+// ════════════════════════════════════════════════════════════════════════
+const BOARD_VERDICT_COLOR = { Malicious: "#f2545b", Suspicious: "#f5b53a", Whitelisted: "#3ee0a1", Unknown: "#6a6385" };
+const BOARD_CATS = new Set(["IPV4", "IPV6", "DOMAIN", "URL", "MD5", "SHA1", "SHA256", "SHA512", "EMAIL"]);
+const BOARD_HASH = new Set(["MD5", "SHA1", "SHA256", "SHA512"]);
+// CDN / reverse-proxy edges: one address fronts thousands of unrelated sites.
+const BOARD_EDGE_RE = /cloudflare|akamai|fastly|cloudfront|incapsula|imperva|edgecast|edgio|stackpath|sucuri|bunny|cdn77|limelight|g-core|gcore/i;
+// Hyperscale clouds: the address is rented by the hour and re-assigned after a takedown.
+const BOARD_CLOUD_RE = /amazon|\baws\b|google|microsoft|azure|oracle|alibaba|tencent/i;
+const BOARD_LANES = {
+  block: { name: "Block now", color: "#ff6fa8", sub: "Strong agreement, active recently, attacker-owned infrastructure" },
+  hunt: { name: "Hunt", color: "#8fb4ff", sub: "Feeds won't catch it, or it's old: search your historical logs" },
+  mon: { name: "Monitor", color: "#c9b8ff", sub: "Weak or single-source signal: watchlist and alert, don't block" },
+  dont: { name: "Don't block", color: "#9a93b5", sub: "Shared or legitimate infrastructure: blocking breaks real traffic" },
+};
+const BOARD_ORDER = ["block", "hunt", "mon", "dont"];
+const BOARD_LANE_CAP = 6;
 
-  const lanes = useMemo(() => {
-    const out = [];
-    entries.forEach(([cat, arr]) => arr.forEach((v) => {
-      const d = enrichCache[`${cat}::${v}`]?.data;
-      out.push({ key: `${cat}::${v}`, cat, value: v, enriched: !!d, verdict: d ? (d._verdict || "Unknown") : null, events: collectIocEvents(d) });
-    }));
-    const rank = (l) => (l.verdict === "Malicious" ? 0 : l.verdict === "Suspicious" ? 1 : l.enriched ? 2 : 3);
-    return out.sort((a, b) => rank(a) - rank(b) || b.events.length - a.events.length);
+const boardAge = (d) => d == null ? "no date" : d < 1 ? "today" : d < 60 ? `${d}d ago` : d < 365 ? `${Math.round(d / 30.4)}mo ago` : `${(d / 365).toFixed(1)}y ago`;
+const boardHost = (v) => { try { return new URL(/^[a-z]+:\/\//i.test(v) ? v : `http://${v}`).hostname; } catch { return String(v).split("/")[0]; } };
+
+const assessIoc = (cat, value, d) => {
+  const det = graphDetectionOf(d, cat);
+  const f = det?.f || 0, t = det?.t || 0, r = t ? f / t : 0;
+  const verdict = d._verdict || "Unknown";
+  const isHash = BOARD_HASH.has(cat), isIP = cat === "IPV4" || cat === "IPV6";
+
+  // Freshness: the most recent dated evidence any engine returned.
+  const now = Date.now();
+  let last = null;
+  collectIocEvents(d).forEach((e) => {
+    const ms = Date.parse(e.day + "T00:00:00Z");
+    if (!isNaN(ms) && ms <= now + 86400000 && (!last || ms > last.ms)) last = { ms, label: e.label };
+  });
+  const seen = last ? Math.max(0, Math.floor((now - last.ms) / 86400000)) : null;
+  const fresh = seen != null && seen <= 30;
+
+  // Collateral: CDN edges, popular legitimate domains, known-good files.
+  const risk = deriveRiskContext(d);
+  const net = isIP ? buildNetworkProfile(d) : null;
+  const netName = net ? [net.asnName, net.owner, net.hostingProvider].filter(Boolean).join(" ") : "";
+  const edge = isIP && (BOARD_EDGE_RE.test(netName) || !!net?.anycast);
+  const cloud = isIP && !edge && BOARD_CLOUD_RE.test(netName);
+  let shared = null;
+  if (edge) shared = `${net.asnName || "CDN"} edge address, shared by many sites`;
+  else if (cat === "DOMAIN" && risk.strong) shared = risk.reasons[0] || "Popular legitimate domain";
+  else if (isHash && d.circl?.legit) shared = "Known-legitimate file (CIRCL / NSRL)";
+
+  let host = "";
+  if (isIP) host = net?.asn ? `${net.asn}${net.asnName ? ` · ${net.asnName}` : ""}` : "Network unknown";
+  else if (cat === "DOMAIN") host = d.domainReg?.ageDays != null ? `Registered ${boardAge(Math.floor(d.domainReg.ageDays))}` : (risk.best ? `${risk.best.source} #${risk.best.rank.toLocaleString()}` : "");
+  else if (cat === "URL") host = boardHost(value);
+  else if (cat === "EMAIL") host = String(value).split("@")[1] || "";
+  else if (isHash) host = deriveFamilyConsensus(d)[0]?.name || mergeFileIdentity(d).type || "File";
+
+  const strong = f >= 2 && r >= 0.5;
+  const firstFlag = (det?.flagged?.[0] || "").replace(/ \(.*/, "");
+  let lane, why;
+  if (verdict === "Whitelisted" || shared) {
+    lane = "dont";
+    why = !shared ? "Whitelisted: legitimate service."
+      : !f ? `${shared}.`
+      : isHash ? `${shared}. Detections are likely false positives.`
+      : `${shared}. Block the exact URL, not the ${isIP ? "IP" : "domain"}.`;
+  } else if (t === 0) {
+    lane = "hunt"; why = "No source knows it yet. Search EDR, proxy and DNS logs.";
+  } else if (strong && (fresh || isHash)) {
+    lane = "block";
+    why = fresh ? `${f}/${t} sources agree, active ${boardAge(seen)}.` : `${f}/${t} sources agree. A known-bad file stays bad, so block the hash.`;
+    if (cloud) why += " Cloud address: time-limit the block.";
+  } else if (f >= 1 && seen != null && seen > 90) {
+    lane = "hunt"; why = `Flagged, but last active ${boardAge(seen)}. Check older logs.`;
+  } else {
+    lane = "mon";
+    why = f === 0 ? `Checked by ${t} source${t > 1 ? "s" : ""}, none flagged it.`
+      : f === 1 ? `Only ${firstFlag} flags it.`
+      : !strong ? `Weak agreement (${f}/${t}).`
+      : seen == null ? `${f}/${t} agree, but no date to judge freshness.`
+      : `${f}/${t} agree, last active ${boardAge(seen)}.`;
+  }
+
+  // Priority within a lane: agreement + freshness + novelty bonus; collateral caps it.
+  const fr = seen == null ? 0.3 : Math.max(0, 1 - Math.log10(1 + seen) / Math.log10(731));
+  let score = Math.round((r * 0.55 + fr * 0.35 + (t === 0 ? 0.45 : 0) + Math.min(f, 4) * 0.025) * 100);
+  if (lane === "dont") score = Math.min(score, 15);
+
+  const factors = [
+    { k: "Agreement", ok: strong, t: t ? `${f}/${t} sources flagged it` : "No source has an opinion", d: f ? det.flagged.join(", ") : t ? "Checked, nothing flagged" : "Not in any feed we query" },
+    { k: "Freshness", ok: isHash ? strong || fresh : fresh, t: seen == null ? "Freshness unknown" : `Last activity ${boardAge(seen)}`,
+      d: last ? `${last.label}${isHash ? " · hashes don't go stale" : seen <= 30 ? " · inside the 30-day block window" : seen > 90 ? " · older than 90 days, likely rotated" : " · between 30 and 90 days"}` : "No source returned a date" },
+    { k: "Collateral", ok: !shared, t: shared ? "Shared infrastructure" : cloud ? "Cloud-hosted address" : "No collateral risk found",
+      d: shared || (cloud ? `${host}. The address may be re-assigned, so time-limit the block.` : host || "—") },
+    { k: "Novelty", ok: t > 0, t: t ? `Known to ${t} source${t > 1 ? "s" : ""}` : "New to OSINT", d: t ? "Vendor feeds may already cover it" : "Feeds won't block it, high hunting value" },
+  ];
+  return { key: `${cat}::${value}`, cat, value, verdict, f, t, seen, host, lane, why, score: Math.min(99, score), factors, clean: det?.clean || [] };
+};
+
+// Ready-to-paste next step for one indicator.
+const boardNextStep = (x) => {
+  const v = x.value, isIP = x.cat === "IPV4" || x.cat === "IPV6", isHash = BOARD_HASH.has(x.cat);
+  const hashField = { MD5: "MD5", SHA1: "SHA1", SHA256: "SHA256", SHA512: "SHA256" }[x.cat];
+  const huntQ = isIP ? `DeviceNetworkEvents\n| where Timestamp > ago(${Math.min(180, Math.max(30, (x.seen || 30) + 30))}d)\n| where RemoteIP == "${v}"`
+    : isHash ? `DeviceFileEvents\n| where ${hashField} == "${v}"`
+    : x.cat === "EMAIL" ? `EmailEvents\n| where SenderFromAddress =~ "${v}"`
+    : `DeviceNetworkEvents\n| where RemoteUrl has "${x.cat === "URL" ? boardHost(v) : v}"`;
+  if (x.lane === "block") return { text: "Push to firewall, proxy and EDR block lists.", code: isIP ? `deny ip any host ${v}` : isHash ? `${x.cat} ${v}` : v };
+  if (x.lane === "hunt") return { text: x.t ? `Search logs from before it went quiet (${boardAge(x.seen)}).` : "Search EDR, proxy and DNS logs for any sighting.", code: huntQ };
+  if (x.lane === "mon") return { text: "Add to a watchlist and alert on hits. Re-check in 7 days.", code: huntQ };
+  return { text: x.f ? "Don't block the shared host. Block the specific URL path if one was reported." : "Leave it off block lists. Keep it in the report as context.", code: null };
+};
+
+function DecisionBoard({ entries, enrichCache, onReveal }) {
+  const [open, setOpen] = useState(null);
+  const [showAll, setShowAll] = useState({});
+  const [copied, setCopied] = useState(null);
+  const [rulesOpen, setRulesOpen] = useState(false);
+
+  const { items, pending, family } = useMemo(() => {
+    const items = [];
+    let pending = 0;
+    const fam = new Map();
+    entries.forEach(([cat, arr]) => {
+      if (!BOARD_CATS.has(cat)) return;
+      arr.forEach((v) => {
+        const d = enrichCache[`${cat}::${v}`]?.data;
+        if (!d) { pending++; return; }
+        if (d._transferredTo) return; // its evidence lives on the SHA256 card
+        items.push(assessIoc(cat, v, d));
+        const top = deriveFamilyConsensus(d)[0];
+        if (top) { const k = famKey(top.name); const e = fam.get(k) || { name: top.name, n: 0 }; e.n++; fam.set(k, e); }
+      });
+    });
+    const family = [...fam.values()].sort((a, b) => b.n - a.n)[0] || null;
+    return { items, pending, family };
   }, [entries, enrichCache]);
 
-  const shown = expanded ? lanes : lanes.slice(0, MAX_LANES);
-  const selKey = (selected && shown.some((l) => l.key === selected)) ? selected : (shown.find((l) => l.events.length)?.key || null);
+  const lanes = useMemo(() => {
+    const m = Object.fromEntries(BOARD_ORDER.map((k) => [k, []]));
+    items.forEach((x) => m[x.lane].push(x));
+    BOARD_ORDER.forEach((k) => m[k].sort((a, b) => b.score - a.score));
+    return m;
+  }, [items]);
 
-  // Day grid: column j covers the day (range-1-j) days before today.
-  const grid = useMemo(() => {
-    const today = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate());
-    const sigma = Math.max(0.7, range / 45);
-    let max = 0;
-    const rows = shown.map((l) => {
-      const row = new Float32Array(range);
-      l.events.forEach((e) => {
-        const t = Date.parse(e.day + "T00:00:00Z");
-        if (isNaN(t)) return;
-        const ago = Math.round((today - t) / 86400000);
-        if (ago < 0 || ago > range - 1) return;
-        const idx = range - 1 - ago;
-        const reach = Math.ceil(sigma * 3);
-        for (let j = Math.max(0, idx - reach); j <= Math.min(range - 1, idx + reach); j++) {
-          row[j] += e.w * Math.exp(-((j - idx) ** 2) / (2 * sigma * sigma));
-        }
-      });
-      for (let j = 0; j < range; j++) if (row[j] > max) max = row[j];
-      return row;
-    });
-    return { rows, max: Math.max(max, 1), today };
-  }, [shown, range]);
-
-  const inWindow = useMemo(() => lanes.reduce((n, l) => n + l.events.filter((e) => {
-    const t = Date.parse(e.day + "T00:00:00Z"); return !isNaN(t) && (grid.today - t) / 86400000 <= range - 1 && t <= grid.today;
-  }).length, 0), [lanes, grid.today, range]);
-
-  useEffect(() => {
-    const el = boxRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => setWidth(Math.max(240, el.clientWidth)));
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  useEffect(() => {
-    const cv = canvasRef.current;
-    if (!cv) return;
-    const dpr = window.devicePixelRatio || 1;
-    const h = shown.length * LANE_H;
-    cv.width = Math.round(width * dpr); cv.height = Math.round(h * dpr);
-    cv.style.width = width + "px"; cv.style.height = h + "px";
-    const ctx = cv.getContext("2d");
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const cw = width / range;
-    const sel = shown.findIndex((l) => l.key === selKey);
-    const selEvents = sel > -1 ? shown[sel].events : [];
-    let raf = 0, last = 0, visible = true;
-    const io = new IntersectionObserver(([e]) => { visible = e.isIntersecting; });
-    io.observe(cv);
-    const draw = (t) => {
-      ctx.clearRect(0, 0, width, h);
-      shown.forEach((l, L) => {
-        const row = grid.rows[L];
-        for (let j = 0; j < range; j++) {
-          const base = Math.pow(row[j] / grid.max, 0.65);
-          const v = l.enriched ? 0.05 + base * 0.95 : base * 0.6;
-          for (let r = 0; r < 2; r++) {
-            const shimmer = reduce || v < 0.12 ? 1 : 0.9 + 0.1 * Math.sin(t / 650 + j * 0.85 + r * 2.2 + L * 1.7);
-            const [cr, cg, cb] = spectrumRGB(v * shimmer);
-            ctx.fillStyle = `rgb(${cr},${cg},${cb})`;
-            ctx.fillRect(j * cw, L * LANE_H + r * (LANE_H / 2), cw + 0.6, LANE_H / 2 + 0.6);
-          }
-        }
-        ctx.fillStyle = "rgba(8,7,14,0.92)";
-        ctx.fillRect(0, (L + 1) * LANE_H - 1.5, width, 2);
-        if (L === sel) {
-          ctx.strokeStyle = "rgba(252,255,164,0.55)"; ctx.lineWidth = 1;
-          ctx.strokeRect(0.5, L * LANE_H + 0.5, width - 1, LANE_H - 2);
-        }
-      });
-      // Event markers for the selected lane
-      ctx.strokeStyle = "rgba(252,255,164,0.5)"; ctx.lineWidth = 1;
-      selEvents.forEach((e) => {
-        const tt = Date.parse(e.day + "T00:00:00Z"); const ago = Math.round((grid.today - tt) / 86400000);
-        if (ago < 0 || ago > range - 1) return;
-        const x = Math.round((range - 1 - ago + 0.5) * cw) + 0.5;
-        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
-      });
-    };
-    const loop = (t) => {
-      if (visible && t - last > 80) { draw(t); last = t; }
-      raf = requestAnimationFrame(loop);
-    };
-    draw(0);
-    if (!reduce) raf = requestAnimationFrame(loop);
-    return () => { cancelAnimationFrame(raf); io.disconnect(); };
-  }, [grid, shown, width, range, selKey]);
-
-  // Labels for the selected lane's events, staggered onto three rows so they never collide.
-  const markers = useMemo(() => {
-    const l = shown.find((x) => x.key === selKey);
-    if (!l) return [];
-    const cw = width / range;
-    const byDay = new Map();
-    l.events.forEach((e) => {
-      const tt = Date.parse(e.day + "T00:00:00Z"); const ago = Math.round((grid.today - tt) / 86400000);
-      if (ago < 0 || ago > range - 1) return;
-      const x = (range - 1 - ago + 0.5) * cw;
-      if (!byDay.has(e.day)) byDay.set(e.day, { x, labels: [] });
-      byDay.get(e.day).labels.push(e.label);
-    });
-    // Labels are placed on up to three rows; one that can't fit without
-    // touching a neighbour is dropped (its tick line and the hover tooltip
-    // still carry it), so the strip never turns into overlapping text.
-    const rowsEnd = [-1e9, -1e9, -1e9];
-    const out = [];
-    [...byDay.entries()].sort((a, b) => a[1].x - b[1].x).forEach(([day, m]) => {
-      let first = m.labels[0];
-      if (first.length > 26) first = first.slice(0, 25) + "…";
-      const text = m.labels.length > 1 ? `${first} +${m.labels.length - 1}` : first;
-      const wpx = text.length * 6.3 + 10;
-      if (wpx > width) return;
-      const left = Math.max(0, Math.min(width - wpx, m.x - wpx / 2));
-      const row = rowsEnd.findIndex((end) => left > end + 8);
-      if (row === -1) return;
-      rowsEnd[row] = left + wpx;
-      out.push({ day, x: m.x, left, text, row, all: m.labels });
-    });
-    return out;
-  }, [shown, selKey, width, range, grid.today]);
+  const copy = (id, text) => {
+    try {
+      navigator.clipboard.writeText(text).then(() => { setCopied(id); setTimeout(() => setCopied((c) => (c === id ? null : c)), 1400); }, () => {});
+    } catch { /* clipboard unavailable */ }
+  };
 
   const jump = (key) => {
-    setSelected(key);
-    // If the side menu is focused on another type, switch it first so the row exists.
     if (onReveal) onReveal(key.split("::")[0]);
     setTimeout(() => {
       const el = document.querySelector(`[data-ioc="${(window.CSS && CSS.escape) ? CSS.escape(key) : key}"]`);
@@ -13846,97 +13831,136 @@ function CaseSpectrum({ entries, enrichCache, onReveal }) {
     }, 60);
   };
 
-  const onMove = (e) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    const L = Math.floor((e.clientY - r.top) / LANE_H);
-    const j = Math.floor((e.clientX - r.left) / (r.width / range));
-    if (L < 0 || L >= shown.length || j < 0 || j >= range) { setHover(null); return; }
-    const dayMs = grid.today - (range - 1 - j) * 86400000;
-    const day = new Date(dayMs).toISOString().slice(0, 10);
-    const evs = shown[L].events.filter((ev) => ev.day === day).map((ev) => ev.label);
-    setHover({ L, x: e.clientX - r.left, y: L * LANE_H, day, evs, lane: shown[L] });
-  };
-
-  const ticks = (width < 360 ? [0, 0.5, 1] : [0, 0.25, 0.5, 0.75, 1]).map((f) => {
-    const ago = Math.round((1 - f) * (range - 1));
-    return { f, label: ago === 0 ? "today" : range >= 365 && ago >= 30 ? `−${Math.round(ago / 30.4)}mo` : `−${ago}d` };
-  });
-  const anyEnriched = lanes.some((l) => l.enriched);
+  const novel = items.filter((x) => x.t === 0).length;
+  const btn = { color: "#d6c8ff", border: "1px solid rgba(185,165,255,0.28)" };
 
   return (
-    <div className="rounded-2xl mb-5 overflow-hidden" style={{ backgroundColor: "rgba(15,13,25,0.82)", border: "1px solid rgba(132,116,190,0.18)" }}>
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 pt-3.5 pb-2.5">
+    <div className="rounded-2xl mb-5" style={{ backgroundColor: "rgba(15,13,25,0.82)", border: "1px solid rgba(132,116,190,0.18)" }}>
+      <div className="flex flex-wrap items-start gap-x-4 gap-y-2 px-4 pt-3.5 pb-3">
         <div className="min-w-0">
-          <div className="text-sm font-semibold" style={{ color: "#f4f1fb" }}>Case activity</div>
-          <div className="text-[11.5px]" style={{ color: "#8b84a6" }}>
-            {anyEnriched
-              ? `One lane per indicator · brightness is dated sightings, reports and detections per day · ${inWindow} event${inWindow !== 1 ? "s" : ""} in view`
-              : "Enrich indicators to light up their lanes with dated sightings, reports and detections"}
-          </div>
-        </div>
-        <div className="flex items-center gap-3 ml-auto">
-          <div className="flex items-center gap-1.5 text-[10.5px]" style={{ color: "#8b84a6" }} aria-hidden="true">
-            <span>quiet</span>
-            <span className="rounded-full" style={{ width: 84, height: 6, background: "linear-gradient(90deg, #0c0a16, #46106b, #982c68, #e0553a, #fca50a, #fcffa4)" }} />
-            <span>busy</span>
-          </div>
-          <div className="inline-flex rounded-full p-0.5" style={{ background: "rgba(8,7,14,0.7)", border: "1px solid rgba(132,116,190,0.2)" }} role="group" aria-label="Time range">
-            {[[30, "30d"], [90, "90d"], [365, "1y"]].map(([r, label]) => (
-              <button key={r} onClick={() => setRange(r)} aria-pressed={range === r}
-                className="rounded-full px-2.5 py-1 text-[11px] font-medium whitespace-nowrap"
-                style={{ color: range === r ? "#f4f1fb" : "#8b84a6", background: range === r ? "#1d1830" : "transparent" }}>{label}</button>
-            ))}
-          </div>
-        </div>
-      </div>
-      <div className="px-4 pb-3">
-        <div className="flex gap-3">
-          <div className="shrink-0 flex flex-col w-28 sm:w-[186px]" style={{ paddingTop: 38 }}>
-            {shown.map((l) => (
-              <button key={l.key} onClick={() => jump(l.key)} title={`${l.cat} · ${l.value} — click to open its evidence`}
-                className="flex items-center gap-2 rounded-md px-2 text-left min-w-0"
-                style={{ height: LANE_H, background: l.key === selKey ? "#1d1830" : "transparent" }}>
-                <span className="shrink-0 rounded-full" style={{ width: 7, height: 7, background: l.verdict ? SPECTRUM_VERDICT_COLOR[l.verdict] || "#6a6385" : "#3c3654" }} />
-                <span className="ie-mono truncate text-[11px]" style={{ color: l.key === selKey ? "#f4f1fb" : "#cfc9e4" }}>{l.value}</span>
-              </button>
-            ))}
-          </div>
-          <div ref={boxRef} className="relative flex-1 min-w-0">
-            <div className="relative" style={{ height: 38 }} aria-hidden="true">
-              {markers.map((m) => (
-                <span key={m.day} className="ie-label absolute whitespace-nowrap rounded px-1 text-[9px]"
-                  title={m.all.join(" · ")}
-                  style={{ left: m.left, top: 2 + m.row * 12, color: "#fcffa4", background: "rgba(15,13,25,0.95)" }}>
-                  {m.text}
+          <div className="text-sm font-semibold" style={{ color: "#f4f1fb" }}>Decision board</div>
+          {items.length ? (
+            <div className="text-[13.5px] mt-0.5" style={{ color: "#efecf8" }}>
+              {BOARD_ORDER.map((k, i) => (
+                <span key={k}>
+                  {i > 0 && <span style={{ color: "#6a6385" }}> · </span>}
+                  <span className="ie-mono font-semibold" style={{ color: BOARD_LANES[k].color }}>{lanes[k].length}</span>
+                  {" "}{k === "block" ? "to block" : k === "hunt" ? "to hunt" : k === "mon" ? "to monitor" : "safe to drop"}
                 </span>
               ))}
             </div>
-            <canvas ref={canvasRef} className="block rounded-lg" style={{ cursor: "crosshair" }}
-              onMouseMove={onMove} onMouseLeave={() => setHover(null)}
-              onClick={() => { if (hover) jump(hover.lane.key); }}
-              role="img" aria-label={`Case activity over the last ${range} days for ${shown.length} indicators`} />
-            {hover && (
-              <div className="pointer-events-none absolute z-10 rounded-lg px-2.5 py-1.5 text-[11px] shadow-xl"
-                style={{ left: Math.min(Math.max(hover.x + 12, 0), width - 230), top: 38 + hover.y + LANE_H + 4, width: 220, background: "#141122", border: "1px solid rgba(132,116,190,0.35)", color: "#efecf8" }}>
-                <div className="ie-mono truncate" style={{ color: "#fcffa4" }}>{hover.lane.value}</div>
-                <div className="ie-label text-[9.5px] mb-0.5" style={{ color: "#8b84a6" }}>{hover.day}</div>
-                {hover.evs.length ? hover.evs.map((t, k) => <div key={k}>{t}</div>) : <div style={{ color: "#8b84a6" }}>No dated activity this day</div>}
-              </div>
-            )}
-            <div className="ie-label relative mt-1.5" style={{ height: 14 }} aria-hidden="true">
-              {ticks.map((t) => (
-                <span key={t.f} className="absolute text-[9.5px]" style={{ left: `${t.f * 100}%`, transform: t.f === 0 ? "none" : t.f === 1 ? "translateX(-100%)" : "translateX(-50%)", color: "#8b84a6" }}>{t.label}</span>
-              ))}
-            </div>
+          ) : null}
+          <div className="text-[11.5px] mt-0.5" style={{ color: "#8b84a6" }}>
+            {items.length
+              ? [`${items.length} enriched indicator${items.length !== 1 ? "s" : ""}`, family && family.n > 1 ? `main family ${family.name} (${family.n})` : null, novel ? `${novel} new to OSINT` : null, pending ? `${pending} not enriched yet` : null].filter(Boolean).join(" · ")
+              : "Enrich indicators to sort them into Block now, Hunt, Monitor and Don't block"}
           </div>
         </div>
-        {lanes.length > MAX_LANES && (
-          <button onClick={() => setExpanded((v) => !v)} className="mt-2 rounded-full px-3 py-1 text-[11px] font-medium"
-            style={{ color: "#d6c8ff", border: "1px solid rgba(185,165,255,0.28)", background: "rgba(185,165,255,0.06)" }}>
-            {expanded ? "Show top 8 lanes" : `Show all ${lanes.length} lanes`}
+        {items.length > 0 && (
+          <button onClick={() => setRulesOpen((v) => !v)} aria-expanded={rulesOpen} className="ml-auto rounded-full px-3 py-1 text-[11px] font-medium whitespace-nowrap" style={btn}>
+            {rulesOpen ? "Hide rules" : "How lanes are decided"}
           </button>
         )}
       </div>
+      {items.length > 0 && (
+        <>
+          <div className="flex gap-0.5 mx-4 mb-3 rounded-full overflow-hidden" style={{ height: 6 }} aria-hidden="true">
+            {BOARD_ORDER.map((k) => lanes[k].length > 0 && <span key={k} style={{ flex: lanes[k].length, background: BOARD_LANES[k].color }} />)}
+          </div>
+          {rulesOpen && (
+            <ol className="mx-4 mb-3 rounded-xl px-5 py-3 text-[12.5px] list-decimal grid gap-1.5" style={{ background: "rgba(8,7,14,0.5)", border: "1px solid rgba(132,116,190,0.16)", color: "#efecf8" }}>
+              <li><b style={{ color: BOARD_LANES.dont.color }}>Don't block</b> <span style={{ color: "#8b84a6" }}>if it's whitelisted, sits on a CDN edge, is a top-ranked or OTX-whitelisted domain, or is a known-legitimate file.</span></li>
+              <li><b style={{ color: BOARD_LANES.hunt.color }}>Hunt</b> <span style={{ color: "#8b84a6" }}>if no source has ever seen it (new to OSINT).</span></li>
+              <li><b style={{ color: BOARD_LANES.block.color }}>Block now</b> <span style={{ color: "#8b84a6" }}>if 2+ sources flag it, they're at least half of the sources with an opinion, and it was active within 30 days. Hashes skip the freshness check: a known-bad file stays bad.</span></li>
+              <li><b style={{ color: BOARD_LANES.hunt.color }}>Hunt</b> <span style={{ color: "#8b84a6" }}>if it's flagged but last active more than 90 days ago.</span></li>
+              <li><b style={{ color: BOARD_LANES.mon.color }}>Monitor</b> <span style={{ color: "#8b84a6" }}>everything else: one source, weak agreement, a 30 to 90 day gap, or no date to judge by.</span></li>
+            </ol>
+          )}
+          <div className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-4 gap-3 px-4 pb-4">
+            {BOARD_ORDER.map((k) => {
+              const L = BOARD_LANES[k], all = lanes[k];
+              const list = showAll[k] ? all : all.slice(0, BOARD_LANE_CAP);
+              const ips = all.filter((x) => x.cat === "IPV4" || x.cat === "IPV6");
+              return (
+                <section key={k} aria-label={L.name} className="rounded-xl p-2.5 flex flex-col gap-1 min-w-0"
+                  style={{ background: "rgba(8,7,14,0.45)", border: "1px solid rgba(132,116,190,0.14)", borderTop: `2px solid ${L.color}` }}>
+                  <div className="flex items-center gap-2 px-1 pt-0.5">
+                    <h3 className="text-[12px] font-semibold uppercase" style={{ color: L.color, letterSpacing: "0.04em" }}>{L.name}</h3>
+                    <span className="ie-mono text-[12.5px]" style={{ color: "#f4f1fb" }}>{all.length}</span>
+                    {all.length > 0 && (
+                      <span className="ml-auto flex gap-1.5">
+                        <button onClick={() => copy(`${k}-list`, all.map((x) => x.value).join("\n"))} className="rounded-full px-2.5 py-0.5 text-[11px] font-medium" style={btn}>
+                          {copied === `${k}-list` ? "Copied" : "Copy"}
+                        </button>
+                        {k === "block" && ips.length > 0 && (
+                          <button onClick={() => copy("fw", ips.map((x) => `deny ip any host ${x.value}`).join("\n"))} title="Firewall deny lines for the IPs in this lane" className="rounded-full px-2.5 py-0.5 text-[11px] font-medium" style={btn}>
+                            {copied === "fw" ? "Copied" : "Firewall"}
+                          </button>
+                        )}
+                        {k === "hunt" && (
+                          <button onClick={() => copy("kql", `let iocs = dynamic([${all.map((x) => JSON.stringify(x.value)).join(", ")}]);`)} title="KQL list of every indicator in this lane" className="rounded-full px-2.5 py-0.5 text-[11px] font-medium" style={btn}>
+                            {copied === "kql" ? "Copied" : "KQL"}
+                          </button>
+                        )}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11.5px] px-1 pb-1.5 mb-0.5" style={{ color: "#8b84a6", borderBottom: "1px solid rgba(132,116,190,0.14)" }}>{L.sub}</div>
+                  {all.length === 0 && <div className="text-[12px] px-1 py-2" style={{ color: "#6a6385" }}>Nothing here.</div>}
+                  {list.map((x) => {
+                    const isOpen = open === x.key;
+                    const next = isOpen ? boardNextStep(x) : null;
+                    return (
+                      <div key={x.key} className="rounded-lg" style={{ background: isOpen ? "#1a1630" : "transparent", border: `1px solid ${isOpen ? "rgba(132,116,190,0.32)" : "transparent"}` }}>
+                        <button onClick={() => setOpen(isOpen ? null : x.key)} aria-expanded={isOpen}
+                          className="w-full text-left grid gap-x-2 gap-y-0.5 px-2 py-1.5 rounded-lg hover:bg-white/[0.03]" style={{ gridTemplateColumns: "auto minmax(0,1fr) auto" }}>
+                          <span className="rounded-full self-center" style={{ width: 8, height: 8, background: BOARD_VERDICT_COLOR[x.verdict] || "#6a6385" }} title={x.verdict} />
+                          <span className="ie-mono text-[12px] truncate" style={{ color: "#f4f1fb" }} title={x.value}>{x.value}</span>
+                          <span className="ie-label text-[9px] rounded px-1.5 py-0.5 self-center" style={{ color: "#8b84a6", border: "1px solid rgba(132,116,190,0.3)" }}>{x.cat}</span>
+                          <span className="col-start-2 col-span-2 flex flex-wrap gap-x-2.5 ie-mono text-[10.5px]" style={{ color: "#8b84a6" }}>
+                            <span><span style={{ color: "#efecf8" }}>{x.t ? `${x.f}/${x.t}` : "0 src"}</span> flagged</span>
+                            <span style={{ color: "#efecf8" }}>{boardAge(x.seen)}</span>
+                            {x.host && <span className="truncate max-w-full">{x.host}</span>}
+                          </span>
+                          <span className="col-start-2 col-span-2 text-[11.5px]" style={{ color: "#8b84a6" }}>{x.why}</span>
+                        </button>
+                        {isOpen && (
+                          <div className="px-2.5 pb-2.5 pt-1 grid gap-2.5">
+                            <div className="grid gap-2">
+                              {x.factors.map((fc) => (
+                                <div key={fc.k} className="grid gap-x-2" style={{ gridTemplateColumns: "16px minmax(0,1fr)" }}>
+                                  <span className="rounded-full grid place-items-center text-[9px] font-bold mt-0.5" style={{ width: 14, height: 14, background: fc.ok ? "#efecf8" : "#3a3452", color: fc.ok ? "#08070e" : "#8b84a6" }}>{fc.ok ? "✓" : "–"}</span>
+                                  <div className="min-w-0">
+                                    <div className="text-[12px]" style={{ color: "#efecf8" }}><span className="ie-label text-[9px] uppercase mr-1.5" style={{ color: "#8b84a6", letterSpacing: "0.1em" }}>{fc.k}</span>{fc.t}</div>
+                                    <div className="text-[11.5px] break-words" style={{ color: "#8b84a6" }}>{fc.d}</div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                            {x.clean.length > 0 && <div className="text-[11.5px]" style={{ color: "#8b84a6" }}><span style={{ color: "#efecf8" }}>No detection:</span> {x.clean.join(", ")}</div>}
+                            <div className="text-[12px]" style={{ color: "#efecf8" }}>{next.text}</div>
+                            {next.code && <pre className="ie-mono text-[11px] rounded-lg px-2.5 py-2 whitespace-pre-wrap break-all m-0" style={{ background: "#0b0914", border: "1px solid rgba(132,116,190,0.18)", color: "#d6c8ff" }}>{next.code}</pre>}
+                            <div className="flex flex-wrap gap-1.5">
+                              {next.code && <button onClick={() => copy(`code-${x.key}`, next.code)} className="rounded-full px-2.5 py-0.5 text-[11px] font-medium" style={btn}>{copied === `code-${x.key}` ? "Copied" : "Copy"}</button>}
+                              <button onClick={() => jump(x.key)} className="rounded-full px-2.5 py-0.5 text-[11px] font-medium" style={btn}>Open in box</button>
+                              <span className="ml-auto ie-mono text-[10.5px] self-center" style={{ color: "#8b84a6" }}>priority <span style={{ color: "#f4f1fb" }}>{x.score}</span></span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {all.length > BOARD_LANE_CAP && (
+                    <button onClick={() => setShowAll((m) => ({ ...m, [k]: !m[k] }))} className="mt-1 self-start rounded-full px-2.5 py-0.5 text-[11px] font-medium" style={btn}>
+                      {showAll[k] ? `Show top ${BOARD_LANE_CAP}` : `Show all ${all.length}`}
+                    </button>
+                  )}
+                </section>
+              );
+            })}
+          </div>
+        </>
+      )}
     </div>
   );
 }
