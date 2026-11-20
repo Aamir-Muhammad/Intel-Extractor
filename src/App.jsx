@@ -56,7 +56,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v154";
+const APP_VERSION = "v155";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -13681,8 +13681,8 @@ const BOARD_EDGE_RE = /cloudflare|akamai|fastly|cloudfront|incapsula|imperva|edg
 // Hyperscale clouds: the address is rented by the hour and re-assigned after a takedown.
 const BOARD_CLOUD_RE = /amazon|\baws\b|google|microsoft|azure|oracle|alibaba|tencent/i;
 const BOARD_LANES = {
-  block: { name: "Block now", color: "#ff6fa8", sub: "Strong agreement, active recently, attacker-owned infrastructure" },
-  hunt: { name: "Hunt", color: "#8fb4ff", sub: "Feeds won't catch it, or it's old: search your historical logs" },
+  block: { name: "Block now", color: "#ff6fa8", sub: "Malicious verdict or strong recent agreement, attacker-owned infrastructure" },
+  hunt: { name: "Hunt", color: "#8fb4ff", sub: "New to feeds, gone quiet, or taken down: search your historical logs" },
   mon: { name: "Monitor", color: "#c9b8ff", sub: "Weak or single-source signal: watchlist and alert, don't block" },
   dont: { name: "Don't block", color: "#9a93b5", sub: "Shared or legitimate infrastructure: blocking breaks real traffic" },
 };
@@ -13728,18 +13728,36 @@ const assessIoc = (cat, value, d) => {
 
   const strong = f >= 2 && r >= 0.5;
   const firstFlag = (det?.flagged?.[0] || "").replace(/ \(.*/, "");
-  let lane, why;
+  // Registry state (same rules as the card's Deleted / Suspended / Pending Deletion badges).
+  const dr = (cat === "DOMAIN" || cat === "URL") ? d.domainReg : null;
+  const drStatus = String(dr?.status || "");
+  const deadDomain = !dr ? null
+    : dr.state === "deleted" ? "deleted / taken down"
+    : /client.?hold|server.?hold/i.test(drStatus) ? "suspended (registrar hold)"
+    : /withheld/i.test(drStatus) ? "withheld by the registry"
+    : /redemption.?period|pending.?delete/i.test(drStatus) ? "pending deletion"
+    : null;
+  let lane, why, stale = false;
   if (verdict === "Whitelisted" || shared) {
     lane = "dont";
     why = !shared ? "Whitelisted: legitimate service."
       : !f ? `${shared}.`
       : isHash ? `${shared}. Detections are likely false positives.`
       : `${shared}. Block the exact URL, not the ${isIP ? "IP" : "domain"}.`;
+  } else if (deadDomain) {
+    // Taken down / suspended / withheld: it can't resolve now, so a block adds
+    // little. The value is finding hosts that talked to it while it was live.
+    lane = "hunt"; why = `Domain ${deadDomain}. It no longer resolves, so search older DNS and proxy logs for past contact.`;
   } else if (t === 0) {
     lane = "hunt"; why = "No source knows it yet. Search EDR, proxy and DNS logs.";
-  } else if (strong && (fresh || isHash)) {
+  } else if (verdict === "Malicious" || (strong && (fresh || isHash))) {
+    // A Malicious verdict is always blocked; age only changes how (expiry + hunt).
     lane = "block";
-    why = fresh ? `${f}/${t} sources agree, active ${boardAge(seen)}.` : `${f}/${t} sources agree. A known-bad file stays bad, so block the hash.`;
+    const agree = f >= 2 ? `${f}/${t} sources agree` : f === 1 ? `Malicious per ${firstFlag}` : "Malicious verdict";
+    if (isHash) why = fresh ? `${agree}, active ${boardAge(seen)}.` : `${agree}. A known-bad file stays bad, so block the hash.`;
+    else if (seen == null) why = `${agree}. No date to judge age, so set an expiry on the block.`;
+    else if (seen <= 90) why = `${agree}, last active ${boardAge(seen)}.`;
+    else { why = `${agree}, but last active ${boardAge(seen)}. Block with an expiry and hunt older logs.`; stale = true; }
     if (cloud) why += " Cloud address: time-limit the block.";
   } else if (f >= 1 && seen != null && seen > 90) {
     lane = "hunt"; why = `Flagged, but last active ${boardAge(seen)}. Check older logs.`;
@@ -13765,7 +13783,7 @@ const assessIoc = (cat, value, d) => {
       d: shared || (cloud ? `${host}. The address may be re-assigned, so time-limit the block.` : host || "—") },
     { k: "Novelty", ok: t > 0, t: t ? `Known to ${t} source${t > 1 ? "s" : ""}` : "New to OSINT", d: t ? "Vendor feeds may already cover it" : "Feeds won't block it, high hunting value" },
   ];
-  return { key: `${cat}::${value}`, cat, value, verdict, f, t, seen, host, lane, why, score: Math.min(99, score), factors, clean: det?.clean || [] };
+  return { key: `${cat}::${value}`, cat, value, verdict, f, t, seen, host, lane, why, stale, score: Math.min(99, score), factors, clean: det?.clean || [] };
 };
 
 // Ready-to-paste next step for one indicator.
@@ -13776,7 +13794,11 @@ const boardNextStep = (x) => {
     : isHash ? `DeviceFileEvents\n| where ${hashField} == "${v}"`
     : x.cat === "EMAIL" ? `EmailEvents\n| where SenderFromAddress =~ "${v}"`
     : `DeviceNetworkEvents\n| where RemoteUrl has "${x.cat === "URL" ? boardHost(v) : v}"`;
-  if (x.lane === "block") return { text: "Push to firewall, proxy and EDR block lists.", code: isIP ? `deny ip any host ${v}` : isHash ? `${x.cat} ${v}` : v };
+  if (x.lane === "block") return {
+    text: x.stale ? "Block with a 30-day expiry (the address may have changed hands), then run the hunt query over older logs." : "Push to firewall, proxy and EDR block lists.",
+    code: isIP ? `deny ip any host ${v}` : isHash ? `${x.cat} ${v}` : v,
+    code2: x.stale ? huntQ : null,
+  };
   if (x.lane === "hunt") return { text: x.t ? `Search logs from before it went quiet (${boardAge(x.seen)}).` : "Search EDR, proxy and DNS logs for any sighting.", code: huntQ };
   if (x.lane === "mon") return { text: "Add to a watchlist and alert on hits. Re-check in 7 days.", code: huntQ };
   return { text: x.f ? "Don't block the shared host. Block the specific URL path if one was reported." : "Leave it off block lists. Keep it in the report as context.", code: null };
@@ -13870,9 +13892,10 @@ function DecisionBoard({ entries, enrichCache, onReveal }) {
           {rulesOpen && (
             <ol className="mx-4 mb-3 rounded-xl px-5 py-3 text-[12.5px] list-decimal grid gap-1.5" style={{ background: "rgba(8,7,14,0.5)", border: "1px solid rgba(132,116,190,0.16)", color: "#efecf8" }}>
               <li><b style={{ color: BOARD_LANES.dont.color }}>Don't block</b> <span style={{ color: "#8b84a6" }}>if it's whitelisted, sits on a CDN edge, is a top-ranked or OTX-whitelisted domain, or is a known-legitimate file.</span></li>
+              <li><b style={{ color: BOARD_LANES.hunt.color }}>Hunt</b> <span style={{ color: "#8b84a6" }}>if the domain is deleted, suspended (registrar hold), withheld or pending deletion: it no longer resolves, so look for past contact instead.</span></li>
               <li><b style={{ color: BOARD_LANES.hunt.color }}>Hunt</b> <span style={{ color: "#8b84a6" }}>if no source has ever seen it (new to OSINT).</span></li>
-              <li><b style={{ color: BOARD_LANES.block.color }}>Block now</b> <span style={{ color: "#8b84a6" }}>if 2+ sources flag it, they're at least half of the sources with an opinion, and it was active within 30 days. Hashes skip the freshness check: a known-bad file stays bad.</span></li>
-              <li><b style={{ color: BOARD_LANES.hunt.color }}>Hunt</b> <span style={{ color: "#8b84a6" }}>if it's flagged but last active more than 90 days ago.</span></li>
+              <li><b style={{ color: BOARD_LANES.block.color }}>Block now</b> <span style={{ color: "#8b84a6" }}>if the verdict is Malicious (at any age), or 2+ sources flag it, they're at least half of the sources with an opinion, and it was active within 30 days. Malicious network indicators older than 90 days are marked +HUNT: block with an expiry and search older logs. Hashes skip the freshness check: a known-bad file stays bad.</span></li>
+              <li><b style={{ color: BOARD_LANES.hunt.color }}>Hunt</b> <span style={{ color: "#8b84a6" }}>if it's flagged (not Malicious) but last active more than 90 days ago.</span></li>
               <li><b style={{ color: BOARD_LANES.mon.color }}>Monitor</b> <span style={{ color: "#8b84a6" }}>everything else: one source, weak agreement, a 30 to 90 day gap, or no date to judge by.</span></li>
             </ol>
           )}
@@ -13916,7 +13939,10 @@ function DecisionBoard({ entries, enrichCache, onReveal }) {
                           className="w-full text-left grid gap-x-2 gap-y-0.5 px-2 py-1.5 rounded-lg hover:bg-white/[0.03]" style={{ gridTemplateColumns: "auto minmax(0,1fr) auto" }}>
                           <span className="rounded-full self-center" style={{ width: 8, height: 8, background: BOARD_VERDICT_COLOR[x.verdict] || "#6a6385" }} title={x.verdict} />
                           <span className="ie-mono text-[12px] truncate" style={{ color: "#f4f1fb" }} title={x.value}>{x.value}</span>
-                          <span className="ie-label text-[9px] rounded px-1.5 py-0.5 self-center" style={{ color: "#8b84a6", border: "1px solid rgba(132,116,190,0.3)" }}>{x.cat}</span>
+                          <span className="flex gap-1 self-center">
+                            {x.stale && <span className="ie-label text-[9px] rounded px-1.5 py-0.5" title="Old activity: block with an expiry and hunt older logs" style={{ color: BOARD_LANES.hunt.color, border: "1px solid rgba(143,180,255,0.4)" }}>+HUNT</span>}
+                            <span className="ie-label text-[9px] rounded px-1.5 py-0.5" style={{ color: "#8b84a6", border: "1px solid rgba(132,116,190,0.3)" }}>{x.cat}</span>
+                          </span>
                           <span className="col-start-2 col-span-2 flex flex-wrap gap-x-2.5 ie-mono text-[10.5px]" style={{ color: "#8b84a6" }}>
                             <span><span style={{ color: "#efecf8" }}>{x.t ? `${x.f}/${x.t}` : "0 src"}</span> flagged</span>
                             <span style={{ color: "#efecf8" }}>{boardAge(x.seen)}</span>
@@ -13940,8 +13966,10 @@ function DecisionBoard({ entries, enrichCache, onReveal }) {
                             {x.clean.length > 0 && <div className="text-[11.5px]" style={{ color: "#8b84a6" }}><span style={{ color: "#efecf8" }}>No detection:</span> {x.clean.join(", ")}</div>}
                             <div className="text-[12px]" style={{ color: "#efecf8" }}>{next.text}</div>
                             {next.code && <pre className="ie-mono text-[11px] rounded-lg px-2.5 py-2 whitespace-pre-wrap break-all m-0" style={{ background: "#0b0914", border: "1px solid rgba(132,116,190,0.18)", color: "#d6c8ff" }}>{next.code}</pre>}
+                            {next.code2 && <pre className="ie-mono text-[11px] rounded-lg px-2.5 py-2 whitespace-pre-wrap break-all m-0" style={{ background: "#0b0914", border: "1px solid rgba(143,180,255,0.25)", color: "#8fb4ff" }}>{next.code2}</pre>}
                             <div className="flex flex-wrap gap-1.5">
-                              {next.code && <button onClick={() => copy(`code-${x.key}`, next.code)} className="rounded-full px-2.5 py-0.5 text-[11px] font-medium" style={btn}>{copied === `code-${x.key}` ? "Copied" : "Copy"}</button>}
+                              {next.code && <button onClick={() => copy(`code-${x.key}`, next.code)} className="rounded-full px-2.5 py-0.5 text-[11px] font-medium" style={btn}>{copied === `code-${x.key}` ? "Copied" : next.code2 ? "Copy block" : "Copy"}</button>}
+                              {next.code2 && <button onClick={() => copy(`hunt-${x.key}`, next.code2)} className="rounded-full px-2.5 py-0.5 text-[11px] font-medium" style={btn}>{copied === `hunt-${x.key}` ? "Copied" : "Copy hunt query"}</button>}
                               <button onClick={() => jump(x.key)} className="rounded-full px-2.5 py-0.5 text-[11px] font-medium" style={btn}>Open in box</button>
                               <span className="ml-auto ie-mono text-[10.5px] self-center" style={{ color: "#8b84a6" }}>priority <span style={{ color: "#f4f1fb" }}>{x.score}</span></span>
                             </div>
