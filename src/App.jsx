@@ -56,7 +56,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v152";
+const APP_VERSION = "v153";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -8733,7 +8733,7 @@ export default function App() {
         @keyframes sitroomPing { 0% { transform: scale(1); opacity: .55; } 100% { transform: scale(6.5); opacity: 0; } }
         @media (prefers-reduced-motion: reduce) { .sitroom-sonar i { animation: none; opacity: 0; } }
       `}</style>
-      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
+      <div className="w-full px-4 py-6 sm:px-6 lg:px-8">
         {!tokenBannerDismissed && expiringTokens.length > 0 && (() => {
           const mostUrgent = expiringTokens.reduce((a, b) => (a.daysLeft <= b.daysLeft ? a : b));
           const isCritical = mostUrgent.daysLeft <= 7;
