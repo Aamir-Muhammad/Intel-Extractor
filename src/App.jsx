@@ -56,7 +56,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v156";
+const APP_VERSION = "v157";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -1360,6 +1360,8 @@ const buildIntelBrief = (cat, value, d) => {
   const fam = deriveFamilyConsensus(d);
   add("Malware family", fam.map((f) => `${f.name} [${f.sources.join(", ")}]`).join("; "));
   add("Infrastructure role", deriveInfraRole(d, cat).map((r) => `${r.role} [${r.sources.join(", ")}]`).join("; "));
+  if (d.spamhaus?.netblock) add("Spamhaus DROP", `inside ${d.spamhaus.netblock.cidr}${d.spamhaus.netblock.sbl ? ` (${d.spamhaus.netblock.sbl})` : ""}, a range Spamhaus lists as criminal-controlled or hijacked`);
+  else if (d.spamhaus?.asn) add("Spamhaus DROP", `${d.spamhaus.asn.asn}${d.spamhaus.asn.name ? ` ${d.spamhaus.asn.name}` : ""} is on ASN-DROP (network run by cyber-criminals)`);
   if (cat !== "CVE") add("Exploits", deriveExploitedCves(d).map((c) => `${c.id} [${c.sources.join(", ")}]`).join("; "));
   const risk = deriveRiskContext(d);
   if (risk.reasons.length) {
@@ -6304,6 +6306,7 @@ export default function App() {
   const [reportSections, setReportSections] = useState([
     { id: "cover",       name: "Cover Page",           enabled: true },
     { id: "exec",        name: "Executive Summary",    enabled: true },
+    { id: "decision",    name: "Decision Board",       enabled: true },
     { id: "technical",   name: "Technical IOC Report", enabled: true },
     { id: "intel",       name: "Indicator Intelligence", enabled: true },
     { id: "graph",       name: "Shared-Pivot Graph",   enabled: true },
@@ -7265,8 +7268,21 @@ export default function App() {
     const allFamilies = new Set();
     const c2Nodes = new Set();
     const contactedHosts = new Set();
-    // Respect IOC-type filter for what enters the report
-    const filteredEntries = entries.filter(([cat]) => reportIocTypes[cat] !== false);
+    // The report follows the indicator filters (verdict / ASN / country / …) set in
+    // the app, then the report's own IOC-type toggles.
+    const filteredEntries = viewEntries.filter(([cat]) => reportIocTypes[cat] !== false);
+    // Decision Board — the same lanes the app shows, over the report's indicators.
+    const board = Object.fromEntries(BOARD_ORDER.map((k) => [k, []]));
+    filteredEntries.forEach(([cat, arr]) => {
+      if (!BOARD_CATS.has(cat)) return;
+      arr.forEach((v) => {
+        const d = enrichCache[`${cat}::${v}`]?.data;
+        if (!d || d._transferredTo) return;
+        const x = assessIoc(cat, v, d);
+        board[x.lane].push(x);
+      });
+    });
+    BOARD_ORDER.forEach((k) => board[k].sort((a, b) => b.score - a.score));
 
     filteredEntries.forEach(([cat, arr]) => {
       typeCounts[cat] = arr.length;
@@ -7316,6 +7332,9 @@ export default function App() {
       entries: filteredEntries,
       enrichCache,
       mergedHashes,
+      board,
+      boardTotal: BOARD_ORDER.reduce((n, k) => n + board[k].length, 0),
+      filterNote: filterActive ? `Filtered view: ${viewTotal} of ${total} indicators match the filters applied in Intel Extractor.` : null,
     };
   };
 
@@ -7353,6 +7372,8 @@ export default function App() {
     if (d?.cisaKev?.listed) parts.push(`CISA KEV: Actively Exploited${d.cisaKev.dateAdded ? ` (added ${d.cisaKev.dateAdded})` : ""}`);
     if (d?.epss?.score != null) parts.push(`EPSS: ${d.epss.score}% (30-day exploitation probability)`);
     if (d?.nvd?.cvss != null) parts.push(`NVD: CVSS ${d.nvd.cvss}${d.nvd.severity ? ` ${d.nvd.severity}` : ""}`);
+    if (d?.spamhaus?.netblock) parts.push(`Spamhaus DROP: inside ${d.spamhaus.netblock.cidr}`);
+    else if (d?.spamhaus?.asn) parts.push(`Spamhaus ASN-DROP: ${d.spamhaus.asn.asn}`);
     if (d?.threatfox?.malware) parts.push(`ThreatFox: ${d.threatfox.malware}${d.threatfox.port ? ` (C2 port ${d.threatfox.port})` : ""}`);
     if (d?.urlhaus?.status) parts.push(`URLhaus: ${d.urlhaus.status}${d.urlhaus.threat ? ` (${String(d.urlhaus.threat).replace(/_/g, " ")})` : ""}`);
     if (d?.malwarebazaar?.family) parts.push(`MalwareBazaar: ${d.malwarebazaar.family}`);
@@ -7542,6 +7563,7 @@ export default function App() {
           <div class="section-badge">FOR LEADERSHIP</div>
         </div>
         ${data.articleHeadline ? `<div class="callout callout-primary"><div class="callout-label">THREAT HEADLINE</div><div class="callout-body">${escapeHtml(data.articleHeadline)}</div></div>` : ""}
+        ${data.filterNote ? `<div class="prose"><p><em>${escapeHtml(data.filterNote)}</em></p></div>` : ""}
         ${data.execSummary ? `<div class="prose"><h3>Business Impact</h3><p>${escapeHtml(data.execSummary)}</p></div>` : ""}
         ${data.aiSummaryPending ? `<div class="prose"><p><em>Generating AI summary…</em></p></div>` : ""}
         <div class="verdict-grid">
@@ -7566,11 +7588,49 @@ export default function App() {
             <div class="verdict-desc">Insufficient telemetry, additional research advised</div>
           </div>
         </div>
+        ${data.boardTotal ? `<div class="prose"><h3>Recommended Actions</h3><p>${BOARD_ORDER.map((k) => `<strong style="color:${BOARD_LANES[k].color}">${data.board[k].length}</strong> ${k === "block" ? "to block" : k === "hunt" ? "to hunt" : k === "mon" ? "to monitor" : "safe to drop"}`).join(" · ")} — see the Decision Board for each indicator and the reason.</p></div>` : ""}
         ${data.families.length ? `<div class="prose"><h3>Malware Families Identified</h3><div class="chip-row">${data.families.slice(0, 12).map(f => `<span class="chip chip-mal">${escapeHtml(f)}</span>`).join("")}</div></div>` : ""}
         ${data.recommendations.length ? `<div class="prose"><h3>Priority Actions</h3><ol class="action-list">${data.recommendations.slice(0, 3).map(r => `<li>${escapeHtml(r)}</li>`).join("")}</ol></div>` : ""}
         <div class="prose"><h3>Bottom Line</h3><p>${data.verdictCounts.Malicious > 0 ? `<strong>Action required.</strong> This analysis identified ${data.verdictCounts.Malicious} confirmed malicious indicator${data.verdictCounts.Malicious !== 1 ? "s" : ""}. Recommend immediate deployment to blocklists, review of endpoint telemetry for the past 30 days, and threat hunting using the queries in the Hunting Playbook.` : data.verdictCounts.Suspicious > 0 ? `<strong>Investigation recommended.</strong> ${data.verdictCounts.Suspicious} suspicious indicator${data.verdictCounts.Suspicious !== 1 ? "s were" : " was"} identified. Deploy to watchlists and correlate with endpoint activity.` : `No confirmed threats identified in this dataset. Standard hygiene applies.`}</p></div>
       </section>
     `;
+
+    // Decision Board — one action per enriched network / file indicator.
+    const laneTable = (k) => data.board[k].map((x) => `<tr>
+          <td class="ioc-val">${escapeHtml(x.value)}${x.stale ? ` <span class="chip">+HUNT</span>` : ""}</td>
+          <td><span class="type-chip" style="color:${colorFor(x.cat)};background:${colorFor(x.cat)}18;border-color:${colorFor(x.cat)}55;">${x.cat}</span></td>
+          <td class="sources">${escapeHtml(x.why)}${x.roles.length ? `<br/>Role: ${escapeHtml(x.roles.join(", "))}` : ""}<br/>${escapeHtml(x.t ? `${x.f}/${x.t} sources flagged` : "No source has an opinion")} · last activity ${escapeHtml(boardAge(x.seen))}${x.host ? ` · ${escapeHtml(x.host)}` : ""}</td>
+        </tr>`).join("");
+    sec.decision = data.boardTotal ? `
+      <section class="page">
+        <div class="section-header">
+          <div class="section-title">Decision Board</div>
+          <div class="section-badge">FOR SOC</div>
+        </div>
+        <div class="prose"><p>Every enriched network and file indicator, sorted into one action. Each lane is decided from source agreement, last activity, collateral risk (shared hosting, popular domains, known-good files), novelty and registry state.</p></div>
+        ${BOARD_ORDER.filter((k) => data.board[k].length).map((k) => `
+          <div class="ioc-block">
+            <div class="ioc-block-header">
+              <span class="type-chip" style="color:${BOARD_LANES[k].color};background:${BOARD_LANES[k].color}18;border-color:${BOARD_LANES[k].color}55;">${escapeHtml(BOARD_LANES[k].name.toUpperCase())}</span>
+              <span class="type-count">${data.board[k].length}</span>
+            </div>
+            <div class="prose"><p>${escapeHtml(BOARD_LANES[k].sub)}.</p></div>
+            <table class="ioc-table">
+              <thead><tr><th>Indicator</th><th>Type</th><th>Why</th></tr></thead>
+              <tbody>${laneTable(k)}</tbody>
+            </table>
+          </div>`).join("")}
+        <div class="prose"><h3>How lanes are decided</h3><ol class="action-list">
+          <li><strong>Don't block</strong> if it's whitelisted, sits on a CDN edge, is a top-ranked or OTX-whitelisted domain, or is a known-legitimate file.</li>
+          <li><strong>Hunt</strong> if the domain is deleted, suspended, withheld or pending deletion: it no longer resolves, so look for past contact instead.</li>
+          <li><strong>Block now</strong> if the IP is inside a Spamhaus DROP range or its network is on Spamhaus ASN-DROP.</li>
+          <li><strong>Hunt</strong> if no source has ever seen it (new to OSINT).</li>
+          <li><strong>Block now</strong> if the verdict is Malicious (any age), or 2+ sources flag it, they are at least half of the sources with an opinion, and it was active within 30 days. Network indicators last active more than 90 days ago are marked +HUNT: block with an expiry and search older logs. Hashes don't go stale.</li>
+          <li><strong>Hunt</strong> if it's flagged (not Malicious) but last active more than 90 days ago.</li>
+          <li><strong>Monitor</strong> everything else: one source, weak agreement, a 30 to 90 day gap, or no date to judge by.</li>
+        </ol></div>
+      </section>
+    ` : "";
 
     // Technical IOC Report
     const iocTables = data.entries.map(([cat, arr]) => {
@@ -7606,7 +7666,7 @@ export default function App() {
           <div class="section-badge">FOR SOC</div>
         </div>
         ${data.techSummary ? `<div class="prose"><h3>Technical Summary</h3><p>${escapeHtml(data.techSummary)}</p></div>` : ""}
-        <div class="prose"><h3>Indicators of Compromise (${data.totalIOCs})</h3></div>
+        <div class="prose"><h3>Indicators of Compromise (${data.totalIOCs})</h3>${data.filterNote ? `<p><em>${escapeHtml(data.filterNote)}</em></p>` : ""}</div>
         ${iocTables || `<div class="empty-state">No IOCs match current filter.</div>`}
       </section>
     `;
@@ -7855,6 +7915,18 @@ export default function App() {
           <div class="glossary-item">
             <div class="glossary-name">SANS ISC / DShield</div>
             <div class="glossary-body">Crowd-sourced firewall/IDS log submissions aggregated by the SANS Internet Storm Center. "Attacks" is a raw count of distinct reporters, not a normalized score — kept to a Suspicious ceiling in verdicts, same restraint as AbuseIPDB's mid-range tier.</div>
+          </div>
+          <div class="glossary-item">
+            <div class="glossary-name">Spamhaus DROP / ASN-DROP</div>
+            <div class="glossary-body">Spamhaus "Don't Route Or Peer" lists: IP ranges and whole networks (ASNs) that are hijacked or run by cyber-criminals. An IP inside a DROP range is treated as Malicious; an IP on an ASN-DROP network as Suspicious. Both go to Block now on the Decision Board, even before any other feed reports the IP.</div>
+          </div>
+          <div class="glossary-item">
+            <div class="glossary-name">Infrastructure role</div>
+            <div class="glossary-body">What the infrastructure is used for: C2, malware delivery, phishing, scanning / brute-force, spam or anonymiser (Tor, VPN, proxy). Built only from what the sources reported (ThreatFox, URLhaus, PhishTank, urlscan.io, VirusTotal engine labels, AbuseIPDB categories, SANS ISC, IPLocate), with each source named.</div>
+          </div>
+          <div class="glossary-item">
+            <div class="glossary-name">Decision Board</div>
+            <div class="glossary-body">Sorts each enriched indicator into Block now, Hunt, Monitor or Don't block. "Sources flagged f/t" counts the sources that flagged the indicator out of those that had an opinion on it; a source that has never seen it is left out rather than counted as clean.</div>
           </div>
           <div class="glossary-item">
             <div class="glossary-name">TLP (Traffic Light Protocol)</div>
@@ -8296,12 +8368,29 @@ export default function App() {
       md += `| Suspicious | ${data.verdictCounts.Suspicious} |\n`;
       md += `| Whitelisted | ${data.verdictCounts.Whitelisted} |\n`;
       md += `| Unknown | ${data.verdictCounts.Unknown} |\n\n`;
+      if (data.filterNote) md += `_${data.filterNote}_\n\n`;
+      if (data.boardTotal) md += `**Recommended actions:** ${BOARD_ORDER.map((k) => `${data.board[k].length} ${k === "block" ? "to block" : k === "hunt" ? "to hunt" : k === "mon" ? "to monitor" : "safe to drop"}`).join(" · ")}\n\n`;
       if (data.families.length) md += `### Malware Families\n\n${data.families.map(f => `- ${f}`).join("\n")}\n\n`;
       if (data.recommendations.length) {
         md += `### Priority Actions\n\n`;
         data.recommendations.forEach((r, i) => { md += `${i + 1}. ${r}\n`; });
         md += `\n`;
       }
+    }
+
+    if (enabledSections.has("decision") && data.boardTotal) {
+      md += `## Decision Board\n\n`;
+      BOARD_ORDER.forEach((k) => {
+        const rows = data.board[k];
+        if (!rows.length) return;
+        md += `### ${BOARD_LANES[k].name} (${rows.length})\n\n_${BOARD_LANES[k].sub}._\n\n`;
+        md += `| Indicator | Type | Why |\n|---|---|---|\n`;
+        rows.forEach((x) => {
+          const why = `${x.why}${x.roles.length ? ` Role: ${x.roles.join(", ")}.` : ""}`.replace(/\|/g, "\\|");
+          md += `| \`${x.value}\`${x.stale ? " (+HUNT)" : ""} | ${x.cat} | ${why} |\n`;
+        });
+        md += `\n`;
+      });
     }
 
     if (enabledSections.has("technical")) {
@@ -8454,7 +8543,7 @@ export default function App() {
           position: "fixed", inset: 0, zIndex: 10000,
           background: "rgba(0,0,0,0.75)", backdropFilter: "blur(8px)",
           display: "flex", alignItems: "center", justifyContent: "center",
-          padding: "20px",
+          padding: "clamp(8px, 2vw, 20px)",
         }} onClick={(e) => { if (e.target === e.currentTarget) setReportOpen(false); }}>
           <div style={{
             background: "#0b0914", border: "1px solid rgba(252,165,10,0.3)", borderRadius: 16,
@@ -8480,7 +8569,7 @@ export default function App() {
                 <div>
                   <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: "#f4f1fb", letterSpacing: "-0.3px" }}>Threat Intelligence Report Builder</h2>
                   <p style={{ margin: 0, fontSize: 10, color: "#6a6385", letterSpacing: 1.5, marginTop: 2 }}>
-                    {total} INDICATORS · {entries.length} TYPES · REPORT ID {reportRefNum || reportId}
+                    {filterActive ? `${viewTotal} OF ${total}` : total} INDICATORS{filterActive ? " (FILTERED)" : ""} · {viewEntries.length} TYPES · REPORT ID {reportRefNum || reportId}
                   </p>
                 </div>
               </div>
@@ -8530,7 +8619,7 @@ export default function App() {
             </div>
 
             {/* Modal Body */}
-            <div style={{ display: "grid", gridTemplateColumns: "240px 1fr 320px", flex: 1, overflow: "hidden" }}>
+            <div className="grid grid-cols-1 auto-rows-max lg:auto-rows-auto lg:grid-cols-[240px_1fr_320px] flex-1 min-h-0 overflow-y-auto lg:overflow-hidden">
 
               {/* Left: Template Presets */}
               <div style={{ padding: 18, borderRight: "1px solid rgba(132,116,190,0.15)", overflowY: "auto" }}>
@@ -8570,7 +8659,7 @@ export default function App() {
               </div>
 
               {/* Center: Preview */}
-              <div style={{ padding: 0, overflow: "hidden", display: "flex", flexDirection: "column", background: reportVariant === "light" ? "#ffffff" : "#08070e" }}>
+              <div className="min-h-[70vh] lg:min-h-0" style={{ padding: 0, overflow: "hidden", display: "flex", flexDirection: "column", background: reportVariant === "light" ? "#ffffff" : "#08070e" }}>
                 <div style={{
                   padding: "10px 16px", borderBottom: "1px solid rgba(132,116,190,0.15)",
                   fontSize: 10, fontWeight: 800, letterSpacing: 2, color: "#8b84a6",
@@ -8592,7 +8681,7 @@ export default function App() {
               </div>
 
               {/* Right: Tabbed configuration */}
-              <div style={{ borderLeft: "1px solid rgba(132,116,190,0.15)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+              <div className="lg:min-h-0" style={{ borderLeft: "1px solid rgba(132,116,190,0.15)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
                 {/* Tab bar */}
                 <div style={{ display: "flex", borderBottom: "1px solid rgba(132,116,190,0.15)" }}>
                   {[
@@ -9682,13 +9771,15 @@ export default function App() {
             const isReg = cat === "REGISTRY";
             return (
               <div key={cat} id={`cat-${cat}`} className="rounded-xl overflow-hidden flex flex-col" style={{ ...panel, borderColor: `${c}40` }}>
-                <div className="flex items-center justify-between px-4 py-2.5 gap-2" style={{ borderBottom: `1px solid ${c}33`, backgroundColor: `${c}0d` }}>
+                <div className="flex flex-wrap items-center justify-between px-3 sm:px-4 py-2.5 gap-2" style={{ borderBottom: `1px solid ${c}33`, backgroundColor: `${c}0d` }}>
                   <div className="flex items-center gap-2 min-w-0">
                     <span style={{ width: 9, height: 9, borderRadius: 99, backgroundColor: c, boxShadow: `0 0 10px ${c}` }} />
                     <span className="font-bold tracking-wide truncate" style={{ color: c, textShadow: `0 0 12px ${c}55` }}>{cat}</span>
                     {filterActive && <span className="shrink-0 text-[11px]" style={{ color: "#8b84a6" }}>{arr.length} of {allArr.length}</span>}
+                    <span className="sm:hidden shrink-0 flex items-center justify-center text-sm font-extrabold tabular-nums rounded-lg px-2 py-0.5"
+                      style={{ backgroundColor: `${c}22`, color: c, border: `1px solid ${c}66` }}>{arr.length}</span>
                   </div>
-                  <div className="flex items-center gap-2 shrink-0">
+                  <div className="flex flex-wrap items-center justify-end gap-1.5 sm:gap-2 min-w-0 ml-auto">
                     {["IPV4","IPV6","DOMAIN","URL","MD5","SHA1","SHA256","SHA512","CVE","FILE_NAME","FILE_PATH","REGISTRY","SCHEDULED_TASK","SERVICE","COMMAND_LINE","EMAIL","MAC_ADDRESS"].includes(cat) && (
                       <button onClick={() => { setCustomAddCat(customAddCat === cat ? null : cat); setCustomAddValue(""); }}
                         title="Add custom IOC"
@@ -9702,7 +9793,7 @@ export default function App() {
                         disabled={!!enrichAllDone[cat]}
                         className="flex items-center gap-1 rounded-md px-2 py-1 text-xs"
                         style={{ color: enrichAllDone[cat] ? "#6a6385" : "#e86aa6", backgroundColor: enrichAllDone[cat] ? "rgba(132,116,190,0.06)" : "rgba(232,106,166,0.10)", border: `1px solid ${enrichAllDone[cat] ? "rgba(132,116,190,0.2)" : "rgba(232,106,166,0.4)"}`, cursor: enrichAllDone[cat] ? "not-allowed" : "pointer" }}>
-                        <Search size={12} /> {enrichAllDone[cat] ? "Enriched" : "Enrich All"}
+                        <Search size={12} /> {enrichAllDone[cat] ? "Enriched" : <>Enrich<span className="hidden sm:inline"> All</span></>}
                       </button>
                     )}
                     <button onClick={() => { setCardCondensed((p) => ({ ...p, [cat]: !inheritedCollapse })); setRowOverride((p) => { const n = { ...p }; arr.forEach((v) => delete n[`${cat}::${v}`]); return n; }); }}
@@ -9773,16 +9864,16 @@ export default function App() {
                           className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-bold"
                           style={{
                             color: "#160b02",
-                            backgroundColor: "#f2545b",
-                            border: "1px solid rgba(242,84,91,0.7)",
-                            boxShadow: "0 0 12px rgba(242,84,91,0.4)",
+                            backgroundColor: "#ff9f43",
+                            border: "1px solid rgba(255,159,67,0.7)",
+                            boxShadow: "0 0 12px rgba(255,159,67,0.4)",
                             cursor: "pointer",
                           }}>
                           <Zap size={11} /> Consolidate as SHA256 ({resolvable.length})
                         </button>
                       );
                     })()}
-                    <span className="flex items-center justify-center text-base font-extrabold tabular-nums rounded-lg px-2.5 py-0.5 min-w-[2.2rem]"
+                    <span className="hidden sm:flex items-center justify-center text-base font-extrabold tabular-nums rounded-lg px-2.5 py-0.5 min-w-[2.2rem]"
                       style={{ backgroundColor: `${c}22`, color: c, border: `1px solid ${c}66`, textShadow: `0 0 10px ${c}66` }}>
                       {arr.length}
                     </span>
@@ -9925,7 +10016,7 @@ export default function App() {
                             )}
                             {enr?.data?.domainReg?.state === "deleted" && (
                               <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle font-bold"
-                                style={{ color: "#f2545b", backgroundColor: "rgba(242,84,91,0.15)", border: "1px solid rgba(242,84,91,0.3)" }}>
+                                style={{ color: "#ff9f43", backgroundColor: "rgba(255,159,67,0.15)", border: "1px solid rgba(255,159,67,0.3)" }}>
                                 ● Domain Deleted / Taken Down
                               </span>
                             )}
@@ -9941,9 +10032,9 @@ export default function App() {
                               return (
                                 <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle font-bold"
                                   style={{
-                                    color: isNew ? "#f2545b" : "#f5b53a",
-                                    backgroundColor: isNew ? "rgba(242,84,91,0.15)" : "rgba(245,181,58,0.15)",
-                                    border: `1px solid ${isNew ? "rgba(242,84,91,0.3)" : "rgba(245,181,58,0.3)"}`,
+                                    color: isNew ? "#ff9f43" : "#f5b53a",
+                                    backgroundColor: isNew ? "rgba(255,159,67,0.15)" : "rgba(245,181,58,0.15)",
+                                    border: `1px solid ${isNew ? "rgba(255,159,67,0.3)" : "rgba(245,181,58,0.3)"}`,
                                   }}>
                                   {isNew ? "● Newly Created Domain" : "● Young Domain"}
                                 </span>
@@ -9972,7 +10063,7 @@ export default function App() {
                             )}
                             {enr?.data?.domainReg?.state === "active" && enr?.data?.domainReg?.status && /redemption.?period|pending.?delete/i.test(enr.data.domainReg.status) && (
                               <span className="ml-1.5 text-[9px] rounded px-1 py-0.5 align-middle font-bold"
-                                style={{ color: "#f2545b", backgroundColor: "rgba(242,84,91,0.15)", border: "1px solid rgba(242,84,91,0.3)" }}>
+                                style={{ color: "#ff9f43", backgroundColor: "rgba(255,159,67,0.15)", border: "1px solid rgba(255,159,67,0.3)" }}>
                                 ● Domain Pending Deletion
                               </span>
                             )}
@@ -10246,7 +10337,7 @@ export default function App() {
                                   )}
                                   {fresh && (
                                     <div className="flex flex-wrap items-center gap-1">
-                                      <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#f2545b")}>Freshly stood-up infrastructure</span>
+                                      <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#ff9f43")}>Freshly stood-up infrastructure</span>
                                       <span style={{ color: "#ddd7f1" }}>{fresh}</span>
                                       <span style={{ color: "#8b84a6" }}>— typical of phishing / C2 kits</span>
                                     </div>
@@ -10258,7 +10349,7 @@ export default function App() {
                             {!isCondensed && cat === "CVE" && (hasCisaKev || hasEpss || hasNvd) && secRow("Vulnerability Brief", (
                               <>
                                   {hasCisaKev && d.cisaKev.listed && (
-                                    <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#f2545b", backgroundColor: "rgba(242,84,91,0.15)", border: "1px solid rgba(242,84,91,0.4)" }}
+                                    <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#ff9f43", backgroundColor: "rgba(255,159,67,0.15)", border: "1px solid rgba(255,159,67,0.4)" }}
                                       title="CISA Known Exploited Vulnerabilities catalog — confirmed active exploitation in the wild">
                                       ● CISA KEV · Actively Exploited{d.cisaKev.dateAdded ? ` · Added ${d.cisaKev.dateAdded}` : ""}{d.cisaKev.dueDate ? ` · Remediate by ${d.cisaKev.dueDate}` : ""}{d.cisaKev.ransomwareUse ? ` · Ransomware use: ${d.cisaKev.ransomwareUse}` : ""}
                                     </span>
@@ -10280,9 +10371,9 @@ export default function App() {
                                   {hasNvd && (
                                     <span className="flex flex-col gap-0.5">
                                       <span className="rounded-full px-2 py-0.5" style={{
-                                        color: (d.nvd.cvss || 0) >= 9 ? "#f2545b" : (d.nvd.cvss || 0) >= 7 ? "#f5b53a" : "#3ee0a1",
-                                        backgroundColor: (d.nvd.cvss || 0) >= 9 ? "rgba(242,84,91,0.10)" : (d.nvd.cvss || 0) >= 7 ? "rgba(245,181,58,0.10)" : "rgba(62,224,161,0.08)",
-                                        border: `1px solid ${(d.nvd.cvss || 0) >= 9 ? "rgba(242,84,91,0.3)" : (d.nvd.cvss || 0) >= 7 ? "rgba(245,181,58,0.3)" : "rgba(62,224,161,0.3)"}`,
+                                        color: (d.nvd.cvss || 0) >= 9 ? "#ff9f43" : (d.nvd.cvss || 0) >= 7 ? "#f5b53a" : "#3ee0a1",
+                                        backgroundColor: (d.nvd.cvss || 0) >= 9 ? "rgba(255,159,67,0.10)" : (d.nvd.cvss || 0) >= 7 ? "rgba(245,181,58,0.10)" : "rgba(62,224,161,0.08)",
+                                        border: `1px solid ${(d.nvd.cvss || 0) >= 9 ? "rgba(255,159,67,0.3)" : (d.nvd.cvss || 0) >= 7 ? "rgba(245,181,58,0.3)" : "rgba(62,224,161,0.3)"}`,
                                       }} title="NVD (National Vulnerability Database) — severity is shown as context only and does not by itself drive the verdict">
                                         NVD · CVSS {d.nvd.cvss ?? "—"}{d.nvd.severity ? ` (${d.nvd.severity})` : ""}{d.nvd.published ? ` · Published ${d.nvd.published}` : ""}
                                       </span>
@@ -10300,9 +10391,9 @@ export default function App() {
                                     const remote = up(n.attackVector) === "NETWORK" && up(n.complexity) === "LOW" && (up(n.privileges) === "NONE") && (!n.userInteraction || up(n.userInteraction) === "NONE");
                                     const title = (x) => { const t = String(x || ""); return t.charAt(0) + t.slice(1).toLowerCase(); };
                                     return (
-                                      <div className="w-full rounded-md p-2 mt-0.5" style={accent(remote ? "#f2545b" : "#b9a5ff")}>
+                                      <div className="w-full rounded-md p-2 mt-0.5" style={accent(remote ? "#ff9f43" : "#b9a5ff")}>
                                         <div className="flex flex-wrap items-center gap-1">
-                                          {remote && <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#f2545b")}>Remotely exploitable · no authentication · no user interaction</span>}
+                                          {remote && <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#ff9f43")}>Remotely exploitable · no authentication · no user interaction</span>}
                                           {n.attackVector && <span className="rounded px-1.5 py-0.5" style={pill("#b9a5ff")}>Attack vector: {title(n.attackVector)}</span>}
                                           {n.complexity && <span className="rounded px-1.5 py-0.5" style={pill("#b9a5ff")}>Complexity: {title(n.complexity)}</span>}
                                           {n.privileges && <span className="rounded px-1.5 py-0.5" style={pill("#b9a5ff")}>Privileges: {title(n.privileges)}</span>}
@@ -10318,7 +10409,7 @@ export default function App() {
                                         {n.refs?.patch?.length > 0 && kvRow("Patch / fix", n.refs.patch.map((r) => extLink(r.url, r.host, "#3ee0a1")), "patch")}
                                         {n.refs?.advisory?.length > 0 && kvRow("Vendor advisory", n.refs.advisory.map((r) => extLink(r.url, r.host, "#e86aa6")), "adv")}
                                         {n.refs?.mitigation?.length > 0 && kvRow("Mitigation", n.refs.mitigation.map((r) => extLink(r.url, r.host, "#f5b53a")), "mit")}
-                                        {n.refs?.exploit?.length > 0 && kvRow("Public exploit", n.refs.exploit.map((r) => extLink(r.url, r.host, "#f2545b")), "exp")}
+                                        {n.refs?.exploit?.length > 0 && kvRow("Public exploit", n.refs.exploit.map((r) => extLink(r.url, r.host, "#ff9f43")), "exp")}
                                         {(n.status || n.modified) && kvRow("Record", <span style={{ color: "#8b84a6" }}>{n.status || ""}{n.modified ? ` · last modified ${fmtDate(n.modified)}` : ""}</span>, "rec")}
                                       </div>
                                     );
@@ -10604,7 +10695,7 @@ export default function App() {
                                   )), "vendor")}
                                   {yara.length > 0 && kvRow("YARA", yara.map((y) => <span key={y} className="rounded px-1.5 py-0.5" style={pill("#b9a5ff")}>{y}</span>), "yara")}
                                   {(sigma.length > 0 || vt.sigmaHits > 0) && kvRow("Sigma", sigma.length
-                                    ? sigma.map((g) => <span key={g.title} className="rounded px-1.5 py-0.5" style={pill(g.level === "critical" || g.level === "high" ? "#f2545b" : "#b9a5ff")}>{g.title}{g.level ? ` · ${g.level}` : ""}</span>)
+                                    ? sigma.map((g) => <span key={g.title} className="rounded px-1.5 py-0.5" style={pill(g.level === "critical" || g.level === "high" ? "#ff9f43" : "#b9a5ff")}>{g.title}{g.level ? ` · ${g.level}` : ""}</span>)
                                     : <span className="rounded px-1.5 py-0.5" style={pill("#b9a5ff")}>{vt.sigmaHits} rule match{vt.sigmaHits !== 1 ? "es" : ""}</span>, "sigma")}
                                   {clam.length > 0 && kvRow("ClamAV", clam.map((c) => <span key={c} className="rounded px-1.5 py-0.5" style={pill("#958fb0")}>{c}</span>), "clam")}
                                   {ids.length > 0 && kvRow("IDS / network", ids.map((x) => <span key={x.msg} className="rounded px-1.5 py-0.5" style={pill("#f5b53a")}>{x.msg}</span>), "ids")}
@@ -10614,7 +10705,7 @@ export default function App() {
                                     </span>
                                   )), "sandbox")}
                                   {sigs.length > 0 && kvRow("Behaviors", sigs.map((g) => (
-                                    <span key={g.name} className="rounded px-1.5 py-0.5" style={pill((g.score || 0) >= 8 ? "#f2545b" : (g.score || 0) >= 5 ? "#f5b53a" : "#958fb0")}>
+                                    <span key={g.name} className="rounded px-1.5 py-0.5" style={pill((g.score || 0) >= 8 ? "#ff9f43" : (g.score || 0) >= 5 ? "#f5b53a" : "#958fb0")}>
                                       {g.name}{g.score != null ? ` · ${g.score}/10` : ""}
                                     </span>
                                   )), "sigs")}
@@ -10654,7 +10745,7 @@ export default function App() {
                                     </span>
                                   )}
                                   {d.rockyRaccoon.mitreAttacks.length > 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#f2545b", backgroundColor: "rgba(242,84,91,0.08)", border: "1px solid rgba(242,84,91,0.25)" }}>
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#ff9f43", backgroundColor: "rgba(255,159,67,0.08)", border: "1px solid rgba(255,159,67,0.25)" }}>
                                       MITRE: {d.rockyRaccoon.mitreAttacks.join(", ")}
                                     </span>
                                   )}
@@ -10665,7 +10756,7 @@ export default function App() {
                                     </span>
                                   )}
                                   {d.rockyRaccoon.abusePatterns?.length > 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#f2545b", backgroundColor: "rgba(242,84,91,0.08)", border: "1px solid rgba(242,84,91,0.25)" }}
+                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#ff9f43", backgroundColor: "rgba(255,159,67,0.08)", border: "1px solid rgba(255,159,67,0.25)" }}
                                       title="Known abuse patterns for this binary (EchoTrail)">
                                       Known abuse: {d.rockyRaccoon.abusePatterns.join(" · ")}
                                     </span>
@@ -10894,7 +10985,7 @@ export default function App() {
                                 <div className="w-full rounded-md p-2" style={accent("#e86aa6")}>
                                   {(rel.adversaries?.length > 0 || rel.families?.length > 0 || rel.industries?.length > 0) && (
                                     <div className="mb-1">
-                                      {rel.adversaries?.length > 0 && kvRow("Threat actors", rel.adversaries.map((x) => <span key={x} className="rounded px-1.5 py-0.5 font-bold" style={pill("#f2545b")}>{x}</span>), "adv")}
+                                      {rel.adversaries?.length > 0 && kvRow("Threat actors", rel.adversaries.map((x) => <span key={x} className="rounded px-1.5 py-0.5 font-bold" style={pill("#ff9f43")}>{x}</span>), "adv")}
                                       {rel.families?.length > 0 && kvRow("Malware", rel.families.map((x) => <span key={x} className="rounded px-1.5 py-0.5" style={pill("#cdb8ff")}>{x}</span>), "fam")}
                                       {rel.industries?.length > 0 && kvRow("Targets", rel.industries.map((x) => <span key={x} className="rounded px-1.5 py-0.5" style={pill("#f5b53a")}>{x}</span>), "ind")}
                                     </div>
@@ -10915,9 +11006,9 @@ export default function App() {
                                           </div>
                                           {(p.adversary || p.families.length > 0 || p.attack.length > 0 || p.industries.length > 0) && (
                                             <div className="flex flex-wrap items-center gap-1 mt-0.5">
-                                              {p.adversary && <span className="rounded px-1.5 py-0.5" style={pill("#f2545b")}>{p.adversary}</span>}
+                                              {p.adversary && <span className="rounded px-1.5 py-0.5" style={pill("#ff9f43")}>{p.adversary}</span>}
                                               {p.families.map((f) => <span key={f} className="rounded px-1.5 py-0.5" style={pill("#cdb8ff")}>{f}</span>)}
-                                              {p.attack.length > 0 && <span className="rounded px-1.5 py-0.5" style={pill("#f2545b")}>{p.attack.join(", ")}</span>}
+                                              {p.attack.length > 0 && <span className="rounded px-1.5 py-0.5" style={pill("#ff9f43")}>{p.attack.join(", ")}</span>}
                                               {p.industries.map((f) => <span key={f} className="rounded px-1.5 py-0.5" style={pill("#f5b53a")}>{f}</span>)}
                                             </div>
                                           )}
@@ -10980,7 +11071,7 @@ export default function App() {
                                       {np.anycast && <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#e86aa6")} title="Anycast: the same IP is announced from many places, so geolocation is not meaningful">Anycast — location unreliable</span>}
                                     </>
                                   ), "loc")}
-                                  {np.flags.length > 0 && kvRow("Flags", np.flags.map((f) => <span key={f} className="rounded px-1.5 py-0.5 font-bold" style={pill(/abuser|tor/i.test(f) ? "#f2545b" : "#f5b53a")}>{f}</span>), "flags")}
+                                  {np.flags.length > 0 && kvRow("Flags", np.flags.map((f) => <span key={f} className="rounded px-1.5 py-0.5 font-bold" style={pill(/abuser|tor/i.test(f) ? "#ff9f43" : "#f5b53a")}>{f}</span>), "flags")}
                                   {np.hostnames.length > 0 && kvRow("Reverse DNS", np.hostnames.map((h) => copyChip(h, `rdns-${h}`, { mono: true })), "rdns")}
                                   {np.abuse && kvRow("Abuse contact", (
                                     <>
@@ -11034,7 +11125,7 @@ export default function App() {
                                     </span>
                                   )}
                                   {hasUrlscan && d.urlscan.brands && d.urlscan.brands.length > 0 && (
-                                    <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#f2545b", backgroundColor: "rgba(242,84,91,0.12)", border: "1px solid rgba(242,84,91,0.4)" }}
+                                    <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#ff9f43", backgroundColor: "rgba(255,159,67,0.12)", border: "1px solid rgba(255,159,67,0.4)" }}
                                       title="urlscan detected this page impersonating a known brand — strong phishing signal">
                                       Impersonates: {d.urlscan.brands.slice(0, 3).join(", ")}
                                     </span>
@@ -11061,7 +11152,7 @@ export default function App() {
                                         {s.tags.length ? ` · ${s.tags.join(", ")}` : ""}
                                         {s.cpes.length ? ` · ${s.cpes.slice(0, 3).join(", ")}${s.cpes.length > 3 ? "…" : ""}` : ""}
                                         {vulnCount ? (
-                                          <> · <span style={{ color: "#f2545b", fontWeight: 700 }}>● {vulnCount} CVE{vulnCount !== 1 ? "s" : ""}: {s.vulns.slice(0, 3).join(", ")}{vulnCount > 3 ? "…" : ""}</span></>
+                                          <> · <span style={{ color: "#ff9f43", fontWeight: 700 }}>● {vulnCount} CVE{vulnCount !== 1 ? "s" : ""}: {s.vulns.slice(0, 3).join(", ")}{vulnCount > 3 ? "…" : ""}</span></>
                                         ) : null}
                                       </span>
                                     );
@@ -11121,14 +11212,14 @@ export default function App() {
                                   )), "tech")}
                                   {certIssuer && kvRow("Certificate", (
                                     <>
-                                      <span className="rounded px-1.5 py-0.5" style={pill(freshCert ? "#f2545b" : "#958fb0")}
+                                      <span className="rounded px-1.5 py-0.5" style={pill(freshCert ? "#ff9f43" : "#958fb0")}
                                         title="A very fresh certificate on a brand-like or newly registered domain is a phishing indicator">
                                         {certIssuer}
                                       </span>
                                       {certFrom && <span style={{ color: "#8b84a6" }}>issued {fmtDate(certFrom)}{certAge != null ? ` (${smartAge(certAge)} ago)` : ""}</span>}
                                       {certTo && <span style={{ color: "#6f6890" }}>· expires {fmtDate(certTo)}</span>}
                                       {prim && u.tlsValidDays != null && <span style={{ color: "#6f6890" }}>· {u.tlsValidDays}-day lifetime</span>}
-                                      {freshCert && <span className="font-bold" style={{ color: "#f2545b" }}>· ● issued &lt;30 days ago</span>}
+                                      {freshCert && <span className="font-bold" style={{ color: "#ff9f43" }}>· ● issued &lt;30 days ago</span>}
                                     </>
                                   ), "cert")}
                                   {sans.length > 0 && kvRow("Cert covers", (
@@ -11208,14 +11299,14 @@ export default function App() {
                                     const isAlert = isNewDomain || isNewSubdomain;
                                     return (
                                       <span className="rounded-full px-2 py-0.5" style={{
-                                        color: isAlert ? "#f2545b" : isYoungDomain ? "#f5b53a" : isUnregistered ? "#8b84a6" : "#958fb0",
-                                        backgroundColor: isAlert ? "rgba(242,84,91,0.10)" : isYoungDomain ? "rgba(245,181,58,0.10)" : "rgba(150,140,180,0.08)",
-                                        border: `1px solid ${isAlert ? "rgba(242,84,91,0.3)" : isYoungDomain ? "rgba(245,181,58,0.35)" : "rgba(150,140,180,0.25)"}`,
+                                        color: isAlert ? "#ff9f43" : isYoungDomain ? "#f5b53a" : isUnregistered ? "#8b84a6" : "#958fb0",
+                                        backgroundColor: isAlert ? "rgba(255,159,67,0.10)" : isYoungDomain ? "rgba(245,181,58,0.10)" : "rgba(150,140,180,0.08)",
+                                        border: `1px solid ${isAlert ? "rgba(255,159,67,0.3)" : isYoungDomain ? "rgba(245,181,58,0.35)" : "rgba(150,140,180,0.25)"}`,
                                       }}>
                                         {dr?.state === "active" && dr.ageDays != null ? ` Domain: ${smartAge(dr.ageDays)} old (Reg. ${fmtDate(dr.date)})` : ""}{isUnregistered ? " ○ Domain Not Registered" : ""}{showSubdomainLine ? ` · Subdomain: ${smartAge(sd.subdomainAgeDays)} old (Active Since ${fmtDate(sd.subdomainCreated)})` : ""}{dr?.status ? ` · Status: ${dr.status}` : ""}
-                                        {isNewDomain && <span style={{ color: "#f2545b", fontWeight: 700 }}>{" · "}● Newly Created Domain</span>}
+                                        {isNewDomain && <span style={{ color: "#ff9f43", fontWeight: 700 }}>{" · "}● Newly Created Domain</span>}
                                         {isYoungDomain && <span style={{ color: "#f5b53a", fontWeight: 700 }}>{" · "}● Young Domain</span>}
-                                        {isNewSubdomain && <span style={{ color: "#f2545b", fontWeight: 700 }}>{" · "}● Newly Created Subdomain</span>}
+                                        {isNewSubdomain && <span style={{ color: "#ff9f43", fontWeight: 700 }}>{" · "}● Newly Created Subdomain</span>}
                                       </span>
                                     );
                                   })()}
@@ -11228,12 +11319,12 @@ export default function App() {
                                     const isYoungApex = sd.apexAgeDays >= 90 && sd.apexAgeDays < 180;
                                     return (
                                       <span className="rounded-full px-2 py-0.5" style={{
-                                        color: isNewApex ? "#f2545b" : isYoungApex ? "#f5b53a" : "#8b84a6",
-                                        backgroundColor: isNewApex ? "rgba(242,84,91,0.10)" : isYoungApex ? "rgba(245,181,58,0.10)" : "rgba(150,140,180,0.05)",
-                                        border: `1px dashed ${isNewApex ? "rgba(242,84,91,0.35)" : isYoungApex ? "rgba(245,181,58,0.35)" : "rgba(150,140,180,0.3)"}`,
+                                        color: isNewApex ? "#ff9f43" : isYoungApex ? "#f5b53a" : "#8b84a6",
+                                        backgroundColor: isNewApex ? "rgba(255,159,67,0.10)" : isYoungApex ? "rgba(245,181,58,0.10)" : "rgba(150,140,180,0.05)",
+                                        border: `1px dashed ${isNewApex ? "rgba(255,159,67,0.35)" : isYoungApex ? "rgba(245,181,58,0.35)" : "rgba(150,140,180,0.3)"}`,
                                       }} title="Observational — urlscan first-sighting, not registry data">
                                         Domain: ~{smartAge(sd.apexAgeDays)} old (First Observed {fmtDate(sd.apexFirstSeen)}){showSub ? ` · Subdomain: ${smartAge(sd.subdomainAgeDays)} old (Active Since ${fmtDate(sd.subdomainCreated)})` : ""}
-                                        {isNewApex && <span style={{ color: "#f2545b", fontWeight: 700 }}>{" · "}● Newly Created Domain</span>}
+                                        {isNewApex && <span style={{ color: "#ff9f43", fontWeight: 700 }}>{" · "}● Newly Created Domain</span>}
                                         {isYoungApex && <span style={{ color: "#f5b53a", fontWeight: 700 }}>{" · "}● Young Domain</span>}
                                       </span>
                                     );
@@ -13784,7 +13875,7 @@ function IocFilterBar({ options, filter, setFilter, shown, total }) {
     border: `1px solid ${on ? "transparent" : "rgba(132,116,190,0.28)"}`,
   });
   return (
-    <div ref={barRef} className="sticky z-30 mb-4 rounded-2xl px-4 py-3"
+    <div ref={barRef} className="md:sticky z-30 mb-4 rounded-2xl px-4 py-3"
       style={{ top: 8, background: "rgba(15,13,25,0.9)", border: "1px solid rgba(132,116,190,0.18)", backdropFilter: "blur(12px)" }}>
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm font-semibold mr-1" style={{ color: "#f4f1fb" }}>Filter indicators</span>
