@@ -56,7 +56,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v155";
+const APP_VERSION = "v156";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -1066,6 +1066,8 @@ const deriveVerdictSignals = (d, cat) => {
   if (d.domainReg?.status && /hold|withheld|pendingdelete|redemption/i.test(d.domainReg.status)) add("susp", "Registry", d.domainReg.status, 2);
   if (d.validin?.verdict === "malicious" || (d.validin?.maliciousCount || 0) > 0) add("mal", "Validin", "malicious annotations", 2);
   else if (d.validin?.verdict === "suspicious") add("susp", "Validin", "suspicious", 1);
+  if (d.spamhaus?.netblock) add("mal", "Spamhaus DROP", `inside ${d.spamhaus.netblock.cidr}${d.spamhaus.netblock.sbl ? ` (${d.spamhaus.netblock.sbl})` : ""}`, 4);
+  else if (d.spamhaus?.asn) add("susp", "Spamhaus DROP", `${d.spamhaus.asn.asn} is on ASN-DROP`, 3);
   return S;
 };
 
@@ -1104,6 +1106,132 @@ const deriveRiskContext = (d) => {
   if (d.circl?.legit) reasons.push("Known-legitimate file (CIRCL / NSRL)");
   if (d.whoisASN?.anycast) reasons.push("Anycast address — shared by many hosts, geolocation unreliable");
   return { reasons, best, strong: !!(best && best.rank <= 10000) || d.otx?.whitelisted === true || !!d.circl?.legit };
+};
+
+// ── Spamhaus DROP / ASN-DROP — networks run by, or hijacked for, cyber-crime ──
+// Keyless. The worker shrinks the three Spamhaus feeds into one cached list; the
+// browser downloads it once per session and matches every IP locally (no per-IP call).
+const _ip4Int = (ip) => {
+  const p = String(ip).split(".");
+  if (p.length !== 4) return null;
+  let n = 0;
+  for (const x of p) { if (!/^\d{1,3}$/.test(x) || +x > 255) return null; n = n * 256 + +x; }
+  return n;
+};
+const _ip6Big = (ip) => {
+  const str = String(ip).toLowerCase();
+  if (str.includes(".")) return null;
+  const halves = str.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  if (fill < 0) return null;
+  const parts = [...head, ...Array(fill).fill("0"), ...tail];
+  if (parts.length !== 8) return null;
+  let n = BigInt(0);
+  for (const x of parts) { if (!/^[0-9a-f]{1,4}$/.test(x)) return null; n = (n << BigInt(16)) + BigInt(parseInt(x, 16)); }
+  return n;
+};
+let _spamhausP = null;
+const loadSpamhausDrop = () => {
+  if (!_spamhausP) {
+    _spamhausP = fetch(`${WORKER_BASE}/enrich`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api: "spamhaus_drop", value: "lists", session_id: SESSION_ID }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (!j || !j.asn) return null;
+        const v4 = (j.v4 || []).map(([cidr, sbl]) => {
+          const [ip, bits] = String(cidr).split("/"); const n = _ip4Int(ip); const b = +bits;
+          if (n == null || !(b >= 0 && b <= 32)) return null;
+          const mask = b === 0 ? 0 : (0xFFFFFFFF << (32 - b)) >>> 0;
+          const start = (n & mask) >>> 0;
+          return { start, end: (start | (~mask >>> 0)) >>> 0, cidr, sbl };
+        }).filter(Boolean);
+        const v6 = (j.v6 || []).map(([cidr, sbl]) => {
+          const [ip, bits] = String(cidr).split("/"); const n = _ip6Big(ip); const b = +bits;
+          if (n == null || !(b >= 0 && b <= 128)) return null;
+          return { pre: n >> BigInt(128 - b), b, cidr, sbl };
+        }).filter(Boolean);
+        return { asn: j.asn, v4, v6, updated: j.updated || null };
+      })
+      .catch(() => null);
+    _spamhausP.then((v) => { if (!v) _spamhausP = null; }); // a failed load is retried on the next IP
+  }
+  return _spamhausP;
+};
+const matchSpamhaus = (L, cat, ip, asnRaw) => {
+  if (!L) return null;
+  const asnNum = parseInt(String(asnRaw || "").replace(/^AS/i, ""), 10);
+  const a = Number.isFinite(asnNum) ? L.asn[asnNum] : null;
+  let net = null;
+  if (cat === "IPV4") { const n = _ip4Int(ip); if (n != null) net = L.v4.find((r) => n >= r.start && n <= r.end) || null; }
+  else if (cat === "IPV6") { const n = _ip6Big(ip); if (n != null) net = L.v6.find((r) => (n >> BigInt(128 - r.b)) === r.pre) || null; }
+  if (!a && !net) return null;
+  return {
+    asn: a ? { asn: `AS${asnNum}`, name: a[0] || null, cc: a[1] || null, domain: a[2] || null } : null,
+    netblock: net ? { cidr: net.cidr, sbl: net.sbl || null } : null,
+    listUpdated: L.updated,
+  };
+};
+
+// What job the infrastructure does — "this shapes the response". Built only from
+// data the engines already returned; each role lists the sources that said so.
+const INFRA_ROLE_COLOR = { "C2": "#ff9f43", "Malware delivery": "#f6a5d8", "Phishing": "#f0a6ff", "Scanner / brute-force": "#8fb4ff", "Spam": "#c9b8ff", "Anonymiser": "#9ad0ff" };
+const deriveInfraRole = (d, cat) => {
+  if (!d || cat === "CVE" || ["MD5", "SHA1", "SHA256", "SHA512"].includes(cat)) return [];
+  const m = new Map();
+  const add = (role, src) => { const e = m.get(role) || new Set(); e.add(src); m.set(role, e); };
+  const tf = String(d.threatfox?.threat || "");
+  if (/c&c|\bc2\b|botnet_cc|command/i.test(tf)) add("C2", "ThreatFox");
+  if (/payload/i.test(tf)) add("Malware delivery", "ThreatFox");
+  if (d.urlhaus) add("Malware delivery", "URLhaus");
+  if (d.phishtank?.verified && d.phishtank?.valid) add("Phishing", "PhishTank");
+  if (d.urlscan?.brands?.length) add("Phishing", "urlscan.io");
+  const vf = d.virustotal?.engineFlags || [];
+  if (vf.filter((f) => /phish/i.test(f.result || "")).length >= 2) add("Phishing", "VirusTotal");
+  if (vf.filter((f) => /\bc2\b|c&c|command.?and.?control|botnet/i.test(f.result || "")).length >= 2) add("C2", "VirusTotal");
+  const ac = String(d.abuseipdb?.categories || "");
+  if (/Phishing/.test(ac)) add("Phishing", "AbuseIPDB");
+  if (/Port Scan|Brute-Force|SSH|Hacking|Web App Attack|SQL Injection|IoT Targeted|Bad Web Bot/.test(ac)) add("Scanner / brute-force", "AbuseIPDB");
+  if (/Spam/.test(ac)) add("Spam", "AbuseIPDB");
+  if ((d.sansIsc?.attacks || 0) > 0) add("Scanner / brute-force", "SANS ISC");
+  const priv = String(d.whoisASN?.privacy || "").split(", ").filter((x) => /Tor|VPN|Proxy/.test(x));
+  if (priv.length) add("Anonymiser", `IPLocate (${priv.join(", ")})`);
+  if (d.abuseipdb?.isTor) add("Anonymiser", "AbuseIPDB (Tor)");
+  if (/VPN IP|Open Proxy/.test(ac)) add("Anonymiser", "AbuseIPDB");
+  const order = Object.keys(INFRA_ROLE_COLOR);
+  return [...m.entries()].map(([role, src]) => ({ role, sources: [...src] })).sort((a, b) => order.indexOf(a.role) - order.indexOf(b.role));
+};
+
+// CVE IDs named in detections / tags / rules for a file (weaponised documents,
+// exploit kits). Read from data already returned — no extra lookups.
+const deriveExploitedCves = (d) => {
+  if (!d) return [];
+  const map = new Map();
+  const maxYear = new Date().getFullYear() + 1;
+  const scan = (str, src) => {
+    String(str || "").replace(/CVE[-_.\s]?(\d{4})[-_.\s]?(\d{4,7})(?!\d)/gi, (whole, y, n) => {
+      if (+y >= 1999 && +y <= maxYear) { const id = `CVE-${y}-${n}`; const e = map.get(id) || new Set(); e.add(src); map.set(id, e); }
+      return whole;
+    });
+  };
+  const vt = d.virustotal || {};
+  (vt.engineFlags || []).forEach((f) => scan(f.result, "VirusTotal"));
+  [vt.threatLabel, ...(vt.fileTags || []), ...(vt.tags || []), ...(vt.capabilities || [])].forEach((t) => scan(t, "VirusTotal"));
+  (vt.sandboxVerdicts || []).forEach((x) => (x.names || []).forEach((n) => scan(n, "VirusTotal sandboxes")));
+  (vt.yaraDetail || []).forEach((y) => scan(y.rule, "YARA"));
+  (vt.ids || []).forEach((x) => scan(x.msg, "IDS rules"));
+  scan(d.kaspersky?.detections, "Kaspersky");
+  scan(d.malwarebazaar?.detections, "MalwareBazaar"); scan(d.malwarebazaar?.tags, "MalwareBazaar");
+  (d.malwarebazaar?.yara || []).forEach((y) => scan(y, "YARA"));
+  (d.triage?.tags || []).forEach((t) => scan(t, "Tri.age"));
+  (d.triage?.signatures || []).forEach((x) => scan(typeof x === "string" ? x : (x?.name || x?.label || ""), "Tri.age"));
+  scan(d.threatfox?.tags, "ThreatFox"); scan(d.urlhaus?.tags, "URLhaus");
+  return [...map.entries()].map(([id, src]) => ({ id, sources: [...src] }))
+    .sort((a, b) => b.sources.length - a.sources.length || b.id.localeCompare(a.id)).slice(0, 8);
 };
 
 // One File Identity: names ranked by how many engines agree, one type/size/signer.
@@ -1231,6 +1359,8 @@ const buildIntelBrief = (cat, value, d) => {
   }
   const fam = deriveFamilyConsensus(d);
   add("Malware family", fam.map((f) => `${f.name} [${f.sources.join(", ")}]`).join("; "));
+  add("Infrastructure role", deriveInfraRole(d, cat).map((r) => `${r.role} [${r.sources.join(", ")}]`).join("; "));
+  if (cat !== "CVE") add("Exploits", deriveExploitedCves(d).map((c) => `${c.id} [${c.sources.join(", ")}]`).join("; "));
   const risk = deriveRiskContext(d);
   if (risk.reasons.length) {
     const flagged = d._verdict === "Malicious" || d._verdict === "Suspicious";
@@ -3929,6 +4059,40 @@ export default function App() {
     if (e.target) e.target.value = ""; // allow re-uploading same file
   };
 
+  // VirusTotal community comments — loaded on demand, since each load is one
+  // VirusTotal call from the shared daily quota (and goes through vtPaceGate).
+  const loadVtComments = async (cat, value) => {
+    const key = `${cat}::${value}`;
+    const vtType = ["IPV4", "IPV6"].includes(cat) ? "ip" : cat === "DOMAIN" ? "domain" : ["MD5", "SHA1", "SHA256", "SHA512"].includes(cat) ? "file" : null;
+    if (!vtType) return;
+    const patch = (comments) => setEnrichCache((prev) => {
+      const e = prev[key];
+      if (!e?.data?.virustotal) return prev;
+      return { ...prev, [key]: { ...e, data: { ...e.data, virustotal: { ...e.data.virustotal, comments } } } };
+    });
+    patch({ loading: true, items: [] });
+    try {
+      await vtPaceGate();
+      const r = await fetch(`${WORKER_BASE}/enrich`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api: "virustotal", value, cat, session_id: SESSION_ID, vt_type: vtType, vt_rel: "comments" }),
+      });
+      const j = await r.json().catch(() => null);
+      if (!r.ok) throw new Error(j?.message || j?.error?.message || (typeof j?.error === "string" ? j.error : `HTTP ${r.status}`));
+      const items = (Array.isArray(j?.data) ? j.data : []).map((c) => {
+        const a = c?.attributes || {};
+        return {
+          date: a.date ? new Date(a.date * 1000).toISOString().slice(0, 10) : null,
+          text: String(a.text || "").replace(/\s+/g, " ").trim().slice(0, 600),
+          up: a.votes?.positive || 0, down: a.votes?.negative || 0,
+        };
+      }).filter((c) => c.text);
+      patch({ loading: false, items });
+    } catch (e) {
+      patch({ loading: false, items: [], error: String(e?.message || e).slice(0, 140) });
+    }
+  };
+
   // ---- IOC Enrichment: ThreatFox + URLhaus + MalwareBazaar via Worker proxy ----
   const enrichIOC = async (cat, value) => {
     const key = `${cat}::${value}`;
@@ -5726,6 +5890,17 @@ export default function App() {
         };
       }
 
+      // Spamhaus DROP / ASN-DROP — matched locally against the session's cached list.
+      if (["IPV4","IPV6"].includes(cat)) {
+        try {
+          const asnRaw = results.whoisASN?.asn
+            || (results.sansIsc?.asn ? `AS${results.sansIsc.asn}` : null)
+            || (results.virustotal?.asn != null ? `AS${results.virustotal.asn}` : null);
+          const sh = matchSpamhaus(await loadSpamhausDrop(), cat, value, asnRaw);
+          if (sh) results.spamhaus = sh;
+        } catch (e) { console.warn("Spamhaus DROP check failed:", e.message); }
+      }
+
       // ---- Derive combined verdict ----
       // Tiered by confidence, checked top to bottom — first match wins:
       //   TIER 0  CrowdStrike Malicious only. A first-party EDR vendor's ML
@@ -5766,6 +5941,8 @@ export default function App() {
       // PhishTank verified+valid = a human moderator confirmed this exact URL
       // as phishing — as high-confidence as ThreatFox/URLhaus.
       else if (results.phishtank?.verified && results.phishtank?.valid) verdict = "Malicious";
+      // Spamhaus DROP range = the netblock itself is criminal-controlled or hijacked.
+      else if (results.spamhaus?.netblock) verdict = "Malicious";
       // VirusTotal multi-vendor consensus — 5+ engines flagging malicious is a
       // strong enough signal to sit in Tier 1, same confidence class as
       // ThreatFox/URLhaus. Weaker counts (1-4 malicious, or suspicious-only)
@@ -5785,6 +5962,8 @@ export default function App() {
       else if (results.hybridAnalysis?.verdict === "suspicious" || (results.hybridAnalysis?.threatScore || 0) >= 30) verdict = "Suspicious";
       else if (results.urlscan?.overallMalicious) verdict = "Malicious";
       else if (results.urlhaus?.status === "offline") verdict = "Suspicious";
+      // ASN-DROP = the whole network is listed; the specific IP may not be seen yet.
+      else if (results.spamhaus?.asn) verdict = "Suspicious";
       // Brand impersonation detected by urlscan (page mimics Microsoft/PayPal/etc).
       else if (results.urlscan?.brands && results.urlscan.brands.length) verdict = "Suspicious";
 
@@ -9995,7 +10174,9 @@ export default function App() {
                               const certAge = d.urlscan?.tlsAgeDays ?? (vtCertDays != null && !isNaN(vtCertDays) ? vtCertDays : null);
                               const fresh = isDomUrl && !isIpAsDomain && dr?.state === "active" && dr.ageDays != null && dr.ageDays < 90 && certAge != null && certAge < 30
                                 ? `Domain ${smartAge(dr.ageDays)} old · TLS certificate ${smartAge(certAge)} old` : null;
-                              if (!drivers.length && !family.length && !risk.reasons.length && !fresh) return null;
+                              const roles = deriveInfraRole(d, cat);
+                              const cves = cat === "CVE" ? [] : deriveExploitedCves(d);
+                              if (!drivers.length && !family.length && !risk.reasons.length && !fresh && !roles.length && !cves.length) return null;
                               return secRow("Why This Verdict", (
                                 <div className="w-full rounded-md p-2 flex flex-col gap-1.5" style={accent(vc)}>
                                   {drivers.length > 0 && (
@@ -10024,6 +10205,32 @@ export default function App() {
                                           <b>{f.name}</b> <span style={{ color: "#8b84a6" }}>· {f.sources.join(", ")}</span>
                                         </span>
                                       ))}
+                                    </div>
+                                  )}
+                                  {roles.length > 0 && (
+                                    <div className="flex flex-wrap items-center gap-1">
+                                      <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#9ad0ff")} title="What this infrastructure is used for, from the sources that reported it">Infrastructure role</span>
+                                      {roles.map((r) => (
+                                        <span key={r.role} className="rounded px-1.5 py-0.5" style={pill(INFRA_ROLE_COLOR[r.role] || "#9ad0ff")}>
+                                          <b>{r.role}</b> <span style={{ color: "#8b84a6" }}>· {r.sources.join(", ")}</span>
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
+                                  {cves.length > 0 && (
+                                    <div className="flex flex-wrap items-center gap-1">
+                                      <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#f0a6ff")} title="CVE IDs named in this indicator's detections, tags or rules">Exploits</span>
+                                      {cves.map((c) => {
+                                        const inList = (iocData?.CVE || []).some((x) => String(x).toUpperCase() === c.id);
+                                        return (
+                                          <button key={c.id} type="button"
+                                            onClick={() => { if (!inList) mergeIntoResults({ CVE: [c.id] }, { CVE: { [c.id]: "custom" } }, "custom"); enrichIOC("CVE", c.id); }}
+                                            title={inList ? `${c.id} is already in the CVE list` : `Add ${c.id} to the CVE list and enrich it (CISA KEV, EPSS, NVD)`}
+                                            className="rounded px-1.5 py-0.5 text-left" style={{ ...pill("#f0a6ff"), cursor: "pointer" }}>
+                                            <b className="ie-mono">{c.id}</b> <span style={{ color: "#8b84a6" }}>· {c.sources.join(", ")}{inList ? " · in CVE list" : " · + add & enrich"}</span>
+                                          </button>
+                                        );
+                                      })}
                                     </div>
                                   )}
                                   {risk.reasons.length > 0 && (
@@ -10540,6 +10747,29 @@ export default function App() {
                                       Community: {d.virustotal.votes.harmless} harmless / {d.virustotal.votes.malicious} malicious
                                     </span>
                                   )}
+                                  {hasVT && ["IPV4","IPV6","DOMAIN","MD5","SHA1","SHA256","SHA512"].includes(cat) && (() => {
+                                    const cm = d.virustotal.comments;
+                                    const loadBtn = (label) => (
+                                      <button type="button" onClick={() => loadVtComments(cat, arr[i])} className="rounded-full px-2 py-0.5 text-[9.5px]"
+                                        title="Analyst notes from the VirusTotal community. Uses one VirusTotal lookup from the shared daily quota."
+                                        style={{ color: "#d6c8ff", border: "1px solid rgba(185,165,255,0.3)", backgroundColor: "rgba(185,165,255,0.06)", cursor: "pointer" }}>{label}</button>
+                                    );
+                                    if (!cm) return loadBtn("Load VirusTotal comments");
+                                    if (cm.loading) return <span className="rounded-full px-2 py-0.5 text-[9.5px]" style={{ color: "#8b84a6" }}>Loading VirusTotal comments…</span>;
+                                    if (cm.error) return <span className="flex items-center gap-1.5 text-[9.5px]" style={{ color: "#f5b53a" }}>VirusTotal comments failed: {cm.error} {loadBtn("Retry")}</span>;
+                                    if (!cm.items.length) return <span className="rounded-full px-2 py-0.5 text-[9.5px]" style={{ color: "#8b84a6", border: "1px solid rgba(150,140,180,0.2)" }}>No VirusTotal community comments</span>;
+                                    return (
+                                      <span className="w-full rounded-md px-2 py-1 text-[9.5px] flex flex-col gap-1" style={{ color: "#cfc9e4", backgroundColor: "rgba(150,140,180,0.04)", border: "1px solid rgba(150,140,180,0.15)" }}
+                                        title="Latest VirusTotal community comments — free text written by other analysts">
+                                        <span className="font-bold" style={{ color: "#d6c8ff" }}>VirusTotal comments ({cm.items.length})</span>
+                                        {cm.items.map((c, ci) => (
+                                          <span key={ci} className="break-words">
+                                            <span style={{ color: "#8b84a6" }}>{c.date || ""}{c.up || c.down ? ` · +${c.up}/−${c.down}` : ""}</span> — {defangProse(c.text)}
+                                          </span>
+                                        ))}
+                                      </span>
+                                    );
+                                  })()}
                                   {(hasVT ? (d.virustotal.communicatingFiles?.length > 0 || d.virustotal.downloadedFiles?.length > 0) && !d.virustotal.linkedFiles : false) && (
                                     <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#cdb8ff", backgroundColor: "rgba(205,184,255,0.10)", border: "1px solid rgba(205,184,255,0.3)" }}
                                       title="Pivotable in ThreatGraph">
@@ -11618,6 +11848,7 @@ const graphDetectionOf = (d, cat) => {
     "CIRCL": !!d.circl,
     "CrowdStrike Falcon ML": !!d.crowdstrike,
     "Validin": !!d.validin,
+    "Spamhaus DROP": !!d.spamhaus,
   };
   const responded = new Set(Object.keys(hadOpinion).filter((k) => hadOpinion[k]));
   const flagged = new Set();
@@ -13748,6 +13979,12 @@ const assessIoc = (cat, value, d) => {
     // Taken down / suspended / withheld: it can't resolve now, so a block adds
     // little. The value is finding hosts that talked to it while it was live.
     lane = "hunt"; why = `Domain ${deadDomain}. It no longer resolves, so search older DNS and proxy logs for past contact.`;
+  } else if (isIP && d.spamhaus) {
+    // The network itself is criminal-run, so the IP is blockable before any feed reports it.
+    lane = "block";
+    why = d.spamhaus.netblock
+      ? `Inside ${d.spamhaus.netblock.cidr}, a Spamhaus DROP range (criminal-controlled). Block regardless of other sources.`
+      : `${d.spamhaus.asn.asn}${d.spamhaus.asn.name ? ` (${d.spamhaus.asn.name})` : ""} is on Spamhaus ASN-DROP. Block regardless of other sources.`;
   } else if (t === 0) {
     lane = "hunt"; why = "No source knows it yet. Search EDR, proxy and DNS logs.";
   } else if (verdict === "Malicious" || (strong && (fresh || isHash))) {
@@ -13783,7 +14020,7 @@ const assessIoc = (cat, value, d) => {
       d: shared || (cloud ? `${host}. The address may be re-assigned, so time-limit the block.` : host || "—") },
     { k: "Novelty", ok: t > 0, t: t ? `Known to ${t} source${t > 1 ? "s" : ""}` : "New to OSINT", d: t ? "Vendor feeds may already cover it" : "Feeds won't block it, high hunting value" },
   ];
-  return { key: `${cat}::${value}`, cat, value, verdict, f, t, seen, host, lane, why, stale, score: Math.min(99, score), factors, clean: det?.clean || [] };
+  return { key: `${cat}::${value}`, cat, value, verdict, f, t, seen, host, lane, why, stale, score: Math.min(99, score), factors, clean: det?.clean || [], roles: deriveInfraRole(d, cat).map((x) => x.role) };
 };
 
 // Ready-to-paste next step for one indicator.
@@ -13893,6 +14130,7 @@ function DecisionBoard({ entries, enrichCache, onReveal }) {
             <ol className="mx-4 mb-3 rounded-xl px-5 py-3 text-[12.5px] list-decimal grid gap-1.5" style={{ background: "rgba(8,7,14,0.5)", border: "1px solid rgba(132,116,190,0.16)", color: "#efecf8" }}>
               <li><b style={{ color: BOARD_LANES.dont.color }}>Don't block</b> <span style={{ color: "#8b84a6" }}>if it's whitelisted, sits on a CDN edge, is a top-ranked or OTX-whitelisted domain, or is a known-legitimate file.</span></li>
               <li><b style={{ color: BOARD_LANES.hunt.color }}>Hunt</b> <span style={{ color: "#8b84a6" }}>if the domain is deleted, suspended (registrar hold), withheld or pending deletion: it no longer resolves, so look for past contact instead.</span></li>
+              <li><b style={{ color: BOARD_LANES.block.color }}>Block now</b> <span style={{ color: "#8b84a6" }}>if the IP is inside a Spamhaus DROP range, or its network is on Spamhaus ASN-DROP: the network is criminal-run, so no other source is needed.</span></li>
               <li><b style={{ color: BOARD_LANES.hunt.color }}>Hunt</b> <span style={{ color: "#8b84a6" }}>if no source has ever seen it (new to OSINT).</span></li>
               <li><b style={{ color: BOARD_LANES.block.color }}>Block now</b> <span style={{ color: "#8b84a6" }}>if the verdict is Malicious (at any age), or 2+ sources flag it, they're at least half of the sources with an opinion, and it was active within 30 days. Malicious network indicators older than 90 days are marked +HUNT: block with an expiry and search older logs. Hashes skip the freshness check: a known-bad file stays bad.</span></li>
               <li><b style={{ color: BOARD_LANES.hunt.color }}>Hunt</b> <span style={{ color: "#8b84a6" }}>if it's flagged (not Malicious) but last active more than 90 days ago.</span></li>
@@ -13947,6 +14185,7 @@ function DecisionBoard({ entries, enrichCache, onReveal }) {
                             <span><span style={{ color: "#efecf8" }}>{x.t ? `${x.f}/${x.t}` : "0 src"}</span> flagged</span>
                             <span style={{ color: "#efecf8" }}>{boardAge(x.seen)}</span>
                             {x.host && <span className="truncate max-w-full">{x.host}</span>}
+                            {x.roles.length > 0 && <span style={{ color: INFRA_ROLE_COLOR[x.roles[0]] || "#9ad0ff" }}>{x.roles.join(" · ")}</span>}
                           </span>
                           <span className="col-start-2 col-span-2 text-[11.5px]" style={{ color: "#8b84a6" }}>{x.why}</span>
                         </button>
