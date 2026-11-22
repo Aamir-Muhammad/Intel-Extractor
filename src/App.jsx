@@ -18,7 +18,7 @@ import {
 // ============================================================
 //  Backend proxy
 // ============================================================
-const WORKER_BASE = "https://ioc-parser.aamirmuhd.workers.dev";
+const WORKER_BASE = "https://api.threatterminal.com";
 
 // VirusTotal: 3 free keys rotated server-side, each capped at 4 req/min.
 // Client-side pacing keeps combined volume well under the 3-key ceiling with
@@ -56,7 +56,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v157";
+const APP_VERSION = "v158";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -7551,7 +7551,7 @@ export default function App() {
         </div>
         <div class="cover-footer">
           <span>Generated with Intel Extractor · ${APP_VERSION}</span>
-          <span>aamir-muhammad.github.io/Intel-Extractor</span>
+          <span>ioc.threatterminal.com</span>
         </div>
       </section>
     `;
@@ -8488,7 +8488,7 @@ export default function App() {
       md += `- **TLP:** WHITE = unrestricted, GREEN = community, AMBER = internal, RED = named recipients\n\n`;
     }
 
-    md += `---\n\n_Generated with Intel Extractor ${APP_VERSION} · https://aamir-muhammad.github.io/Intel-Extractor_\n`;
+    md += `---\n\n_Generated with Intel Extractor ${APP_VERSION} · https://ioc.threatterminal.com_\n`;
     return md;
   };
 

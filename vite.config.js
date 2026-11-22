@@ -3,5 +3,5 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
-  base: "/Intel-Extractor/", // GitHub Pages project site path
+  base: "/", // served at the root of ioc.threatterminal.com (GitHub Pages custom domain)
 });
