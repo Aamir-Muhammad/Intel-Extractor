@@ -19,6 +19,21 @@ import {
 //  Backend proxy
 // ============================================================
 const WORKER_BASE = "https://api.threatterminal.com";
+// Fallback host: corporate proxies (e.g. Cisco Umbrella) often block or redirect
+// newly registered domains, which breaks CORS preflights to api.threatterminal.com.
+// On a network-level failure, switch to the workers.dev host for the rest of the session.
+const WORKER_FALLBACK = "https://ioc-parser.aamirmuhd.workers.dev";
+let _workerBase = WORKER_BASE;
+async function workerFetch(url, opts) {
+  const path = url.slice(WORKER_BASE.length);
+  try {
+    return await fetch(_workerBase + path, opts);
+  } catch (e) {
+    if (_workerBase === WORKER_FALLBACK || e?.name === "AbortError") throw e;
+    _workerBase = WORKER_FALLBACK;
+    return fetch(WORKER_FALLBACK + path, opts);
+  }
+}
 
 // VirusTotal: 3 free keys rotated server-side, each capped at 4 req/min.
 // Client-side pacing keeps combined volume well under the 3-key ceiling with
@@ -56,7 +71,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v158";
+const APP_VERSION = "v159";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -1136,7 +1151,7 @@ const _ip6Big = (ip) => {
 let _spamhausP = null;
 const loadSpamhausDrop = () => {
   if (!_spamhausP) {
-    _spamhausP = fetch(`${WORKER_BASE}/enrich`, {
+    _spamhausP = workerFetch(`${WORKER_BASE}/enrich`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ api: "spamhaus_drop", value: "lists", session_id: SESSION_ID }),
     })
@@ -3866,7 +3881,7 @@ export default function App() {
     setAiScanState("loading");
     setAiScanError("");
     try {
-      const res = await fetch(`${WORKER_BASE}/artifacts`, {
+      const res = await workerFetch(`${WORKER_BASE}/artifacts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: text.slice(0, 16000) }),
@@ -4075,7 +4090,7 @@ export default function App() {
     patch({ loading: true, items: [] });
     try {
       await vtPaceGate();
-      const r = await fetch(`${WORKER_BASE}/enrich`, {
+      const r = await workerFetch(`${WORKER_BASE}/enrich`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ api: "virustotal", value, cat, session_id: SESSION_ID, vt_type: vtType, vt_rel: "comments" }),
       });
@@ -4115,7 +4130,7 @@ export default function App() {
       if (otxSection) body.otx_section = otxSection;
       if (extra && typeof extra === "object") Object.assign(body, extra);
       const _apiT0 = Date.now();
-      const r = await fetch(`${WORKER_BASE}/enrich`, {
+      const r = await workerFetch(`${WORKER_BASE}/enrich`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
@@ -6230,7 +6245,7 @@ export default function App() {
       setConverting((p) => ({ ...p, [convKey]: true }));
       try {
         let canonical = enrichCache[convKey]?.data?._canonicalSHA256 || null;
-        const post = (body) => fetch(`${WORKER_BASE}/enrich`, {
+        const post = (body) => workerFetch(`${WORKER_BASE}/enrich`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ value, cat, session_id: SESSION_ID, ...body }),
         }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
@@ -6698,14 +6713,14 @@ export default function App() {
       if (!merge) setUrl(fetchUrl);
     }
 
-    const apiP = fetch(`${WORKER_BASE}/parse`, {
+    const apiP = workerFetch(`${WORKER_BASE}/parse`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: fetchUrl, session_id: SESSION_ID }),
     })
       .then((r) => { if (!r.ok) throw new Error(`API HTTP ${r.status}`); return r.json(); });
 
-    const pageP = fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&session_id=${encodeURIComponent(SESSION_ID)}`)
+    const pageP = workerFetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&session_id=${encodeURIComponent(SESSION_ID)}`)
       .then((r) => { if (!r.ok) throw new Error(`page HTTP ${r.status}`); return r.text(); });
 
     const [aRes, pRes] = await Promise.allSettled([apiP, pageP]);
@@ -6726,7 +6741,7 @@ export default function App() {
         // that ASCII scraping cannot see.
         let pdfText = null;
         try {
-          const binRes = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&raw=1&session_id=${encodeURIComponent(SESSION_ID)}`);
+          const binRes = await workerFetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&raw=1&session_id=${encodeURIComponent(SESSION_ID)}`);
           if (binRes.ok) {
             const buf = await binRes.arrayBuffer();
             pdfText = await extractPdfText(buf);
@@ -6769,14 +6784,14 @@ export default function App() {
       // Some sites (gov, enterprise WAFs) block the initial fetch. Retry with
       // realistic browser headers + Referer. Auto-detect PDF vs HTML and parse.
       try {
-        const retryRes = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&retry=1&session_id=${encodeURIComponent(SESSION_ID)}`);
+        const retryRes = await workerFetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&retry=1&session_id=${encodeURIComponent(SESSION_ID)}`);
         if (retryRes.ok) {
           const ct = (retryRes.headers.get("Content-Type") || "").toLowerCase();
           const isPdfRetry = ct.includes("pdf") || /\.pdf(\?|#|$)/i.test(fetchUrl);
 
           if (isPdfRetry) {
             // Retry as binary for PDF
-            const binRetry = await fetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&raw=1&retry=1&session_id=${encodeURIComponent(SESSION_ID)}`);
+            const binRetry = await workerFetch(`${WORKER_BASE}/fetch?url=${encodeURIComponent(fetchUrl)}&raw=1&retry=1&session_id=${encodeURIComponent(SESSION_ID)}`);
             if (binRetry.ok) {
               const buf = await binRetry.arrayBuffer();
               const pdfText = await extractPdfText(buf);
@@ -6893,7 +6908,7 @@ export default function App() {
     const text = articleClean || rawArticle;
     if (!text || text.trim().length < 300) { setAiState("error"); return; }
     setAiState("loading");
-    fetch(`${WORKER_BASE}/summarize`, {
+    workerFetch(`${WORKER_BASE}/summarize`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, title: meta?.title || "" }),
@@ -6950,7 +6965,7 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const r = await fetch(`${WORKER_BASE}/token-status`);
+        const r = await workerFetch(`${WORKER_BASE}/token-status`);
         if (!r.ok) return;
         const j = await r.json();
         if (cancelled || !Array.isArray(j?.tokens)) return;
@@ -14329,7 +14344,7 @@ function ThreatWire({ onHunt }) {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${WORKER_BASE}/blogs`)
+    workerFetch(`${WORKER_BASE}/blogs`)
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then((j) => { if (!cancelled) setItems(Array.isArray(j.items) ? j.items.filter((b) => !b.error) : []); })
       .catch(() => { if (!cancelled) setFailed(true); });
