@@ -71,7 +71,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v161";
+const APP_VERSION = "v162";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -12794,6 +12794,20 @@ function ThreatGraph({ iocData, enrichCache, colorFor, enrichIOC, copyText, addP
             n.spawnT = (n.spawnT || 0) + 1;
             if (n.spawnT > 240) n.isNew = false; // graduate after ~4s, matching warmKick
           }
+        }
+      }
+      // Keep the constellation centred. Idle drift (strong before enrichment, while
+      // the teaser floats for a minute or two) is a random walk, and the centering
+      // spring only runs in the hot phase, so a small graph could wander into a
+      // corner and stay there. Easing every node by the centroid offset translates
+      // the whole graph without changing its shape; user panning lives in `cam`,
+      // so this never fights it. Paused while a node is being dragged.
+      if (!cam.dragNode && N.length) {
+        let sx = 0, sy = 0;
+        for (const n of N) { sx += n.x; sy += n.y; }
+        const mx = sx / N.length, my = sy / N.length;
+        if (Math.abs(mx) > 0.5 || Math.abs(my) > 0.5) {
+          for (const n of N) { n.x -= mx * 0.04; n.y -= my * 0.04; }
         }
       }
       // Ambient orbit — physics freezes once the layout settles, so every node
