@@ -71,7 +71,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v159";
+const APP_VERSION = "v160";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -5876,6 +5876,57 @@ export default function App() {
         }
       }
 
+      // VirusTotal passive DNS (resolutions) — merged into the same Passive DNS
+      // list as OTX (results.otxPDNS keeps its name; records carry `sources`).
+      // Fetched for every IP, even when the VT object lookup above was skipped on
+      // a strong signal: pivot data matters most on malicious infrastructure.
+      if (["IPV4","IPV6"].includes(cat)) {
+        try {
+          await vtPaceGate();
+          const rj = await callEnrich("virustotal", null, null, undefined, { vt_type: "ip", vt_rel: "resolutions" });
+          const rows = Array.isArray(rj?.data) ? rj.data : [];
+          if (rows.length) {
+            const byHost = new Map((results.otxPDNS?.records || []).map((g) => [
+              String(g.hostname || "").toLowerCase(), { ...g, sources: g.sources || ["OTX"] },
+            ]));
+            let added = 0;
+            rows.forEach((row) => {
+              const a = row?.attributes || {};
+              const host = String(a.host_name || "").toLowerCase().replace(/\.$/, "");
+              if (!host) return;
+              const day = a.date ? new Date(a.date * 1000).toISOString().split("T")[0] : null;
+              const g = byHost.get(host) || { hostname: host, address: null, recordType: null, first: day, last: day, obs: 0, asn: null, country: null, windows: [], sources: [] };
+              if (day && (!g.first || day < g.first)) g.first = day;
+              if (day && (!g.last || day > g.last)) g.last = day;
+              g.obs += 1;
+              if (day && !g.windows.some((w) => w.first === day && w.last === day)) g.windows.push({ first: day, last: day });
+              if (!g.sources.includes("VT")) g.sources = [...g.sources, "VT"];
+              g.vtMalicious = a.host_name_last_analysis_stats?.malicious || 0;
+              byHost.set(host, g);
+              added += 1;
+            });
+            const now = Date.now();
+            const merged = [...byHost.values()]
+              .map((g) => ({
+                ...g,
+                current: !!g.last && (now - new Date(g.last).getTime()) <= 30 * 86400000,
+                windows: [...g.windows].sort((x, y) => String(y.last || "").localeCompare(String(x.last || ""))),
+              }))
+              .sort((x, y) => (y.current - x.current) || String(y.last || "").localeCompare(String(x.last || "")))
+              .slice(0, 60);
+            if (merged.length) {
+              results.otxPDNS = {
+                total: (results.otxPDNS?.total || 0) + added,
+                unique: merged.length,
+                currentCount: merged.filter((g) => g.current).length,
+                records: merged,
+              };
+            }
+          }
+        } catch (e) { console.warn("VT passive DNS (IP) failed:", e.message); }
+        setPartial();
+      }
+
       // ---- Consolidated First Seen / Last Seen across all engines ----
       const allFirsts = [
         results.threatfox?.first, results.urlhaus?.first,
@@ -7426,7 +7477,7 @@ export default function App() {
     const nbrs = new Map(); // nodeId -> Set(primary node ids it connects to)
     const link = (x, y) => { if (!nbrs.has(x)) nbrs.set(x, new Set()); nbrs.get(x).add(y); };
     gm.edges.forEach(e => {
-      if (e.kind === "asn") return; // shared-ASN grouping isn't a pivot
+      if (e.kind === "asn" || e.kind === "resolved_hist") return; // shared-ASN grouping / historical pDNS isn't a pivot
       const A = gById.get(e.a), B = gById.get(e.b);
       if (!A || !B) return;
       if (!A.derived) link(e.b, e.a);
@@ -11655,6 +11706,13 @@ export default function App() {
                                               );
                                             })()}
                                             {r.recordType && <span className="text-[9px] px-1 rounded" style={{ color: "#958fb0", backgroundColor: "rgba(150,140,180,0.12)" }}>{r.recordType}</span>}
+                                            {(r.sources || ["OTX"]).map((src) => (
+                                              <span key={src} className="text-[9px] px-1 rounded" style={{ color: "#8b84a6", backgroundColor: "rgba(145,136,170,0.1)", border: "1px solid rgba(145,136,170,0.2)" }}>{src}</span>
+                                            ))}
+                                            {r.vtMalicious > 0 && (
+                                              <span className="text-[9px] px-1 rounded font-bold" title="VirusTotal engines flagging this hostname"
+                                                style={{ color: "#fca50a", backgroundColor: "rgba(252,165,10,0.1)", border: "1px solid rgba(252,165,10,0.3)" }}>VT {r.vtMalicious} det</span>
+                                            )}
                                             <span className="text-[9px] px-1 rounded font-bold" style={{
                                               color: r.current ? "#3ee0a1" : "#8b84a6",
                                               backgroundColor: r.current ? "rgba(62,224,161,0.12)" : "rgba(145,136,170,0.1)",
@@ -11886,6 +11944,7 @@ class GraphErrorBoundary extends Component {
 const EDGE_KIND_META = {
   serves: { label: "Serving IP", color: "#fca50a" },
   resolved: { label: "Resolved (passive DNS)", color: "#e86aa6" },
+  resolved_hist: { label: "Resolved (historical passive DNS)", color: "#b77a99" },
   hosts: { label: "Hosts file", color: "#e86aa6" },
   scanned: { label: "Scanned URL", color: "#b9a5ff" },
   contacted: { label: "Contacted", color: "#f08a4b" },
@@ -12034,16 +12093,20 @@ const buildGraphModel = (iocData, enrichCache) => {
         addEdge(val, d.urlscan.servingIP, "serves", "rgba(252,165,10,0.5)");
       }
 
-      // Passive DNS — current resolutions only. Historical ones can point at
-      // infrastructure long since reassigned to an unrelated party; auto-pivoting
-      // on them risks a false bridge. Still visible for manual pivot in the card.
+      // Passive DNS (OTX + VirusTotal). Current resolutions draw as normal
+      // "resolved" edges. For IPs, the most recent historical hostnames are drawn
+      // too, as faint "resolved_hist" edges that never count toward shared pivots:
+      // an IP reassigned on shared hosting must not falsely bridge two indicators.
+      // Domain -> historical IP stays card-only (same false-bridge risk, more noise).
+      let histShown = 0;
       (d.otxPDNS?.records || []).forEach((r) => {
-        if (!r.current) return;
+        if (!r.current && (cat === "DOMAIN" || histShown >= 12)) return;
         const target = cat === "DOMAIN" ? r.address : r.hostname;
         if (!target) return;
         const tcat = cat === "DOMAIN" ? ipCat(target) : "DOMAIN";
         addNode(target, target, tcat, true, null);
-        addEdge(val, target, "resolved", "rgba(232,106,166,0.4)");
+        if (r.current) addEdge(val, target, "resolved", "rgba(232,106,166,0.4)");
+        else { histShown += 1; addEdge(val, target, "resolved_hist", "rgba(232,106,166,0.18)"); }
       });
 
       // Hosted files (strong: same payload)
@@ -12274,7 +12337,7 @@ const buildGraphModel = (iocData, enrichCache) => {
   const primaryNeighbors = {}; // nodeId -> Set of primary IOC ids connected to it
   const primaryIds = new Set(nodeArr.filter((n) => !n.derived).map((n) => n.id));
   edges.forEach((e) => {
-    if (e.kind === "asn") return; // ASN grouping edges don't count as pivots
+    if (e.kind === "asn" || e.kind === "resolved_hist") return; // ASN grouping / historical pDNS don't count as pivots
     const aPrim = primaryIds.has(e.a), bPrim = primaryIds.has(e.b);
     if (aPrim && !bPrim) { (primaryNeighbors[e.b] = primaryNeighbors[e.b] || new Set()).add(e.a); }
     if (bPrim && !aPrim) { (primaryNeighbors[e.a] = primaryNeighbors[e.a] || new Set()).add(e.b); }
@@ -12291,7 +12354,7 @@ const buildGraphModel = (iocData, enrichCache) => {
   edges.forEach((e) => {
     const aB = nodeArr.find((n) => n.id === e.a)?.bridge;
     const bB = nodeArr.find((n) => n.id === e.b)?.bridge;
-    e.toBridge = !!(aB || bB) && e.kind !== "asn";
+    e.toBridge = !!(aB || bB) && e.kind !== "asn" && e.kind !== "resolved_hist";
   });
 
   const bridgeCount = nodeArr.filter((n) => n.bridge).length;
