@@ -71,7 +71,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v160";
+const APP_VERSION = "v161";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -5876,11 +5876,64 @@ export default function App() {
         }
       }
 
+      // ---- Consolidated First Seen / Last Seen across all engines ----
+      const allFirsts = [
+        results.threatfox?.first, results.urlhaus?.first,
+        results.malwarebazaar?.first, results.urlscan?.firstSeen,
+        // Tri.age submission and VT's first-submission date are both a
+        // reasonable "first known" proxy when no earlier ITW sighting exists.
+        results.triage?.submitted, results.virustotal?.firstSubmission,
+        results.kaspersky?.firstSeen, results.sansIsc?.minDate,
+      ].filter(Boolean).sort();
+      const allLasts = [
+        results.threatfox?.last, results.urlhaus?.last,
+        results.malwarebazaar?.last, results.urlscan?.lastSeen,
+        // AbuseIPDB lastReported = last time this IP was reported malicious —
+        // include as Last Seen if it's more recent than other sources.
+        results.abuseipdb?.lastReported,
+        // Tri.age's analysis-completed date and VT's last-submission date —
+        // both fold into the same consolidated Last Seen, not a separate chip.
+        results.triage?.completed, results.virustotal?.lastSubmission,
+        results.kaspersky?.lastSeen, results.sansIsc?.maxDate,
+      ].filter(Boolean).sort();
+      if (allFirsts.length || allLasts.length) {
+        const firstDate = allFirsts.length ? allFirsts[0] : null;
+        const lastDate = allLasts.length ? allLasts[allLasts.length - 1] : null;
+        results._timeline = {
+          firstSeen: firstDate,
+          firstFmt: timeAgoFmt(firstDate),
+          lastSeen: lastDate,
+          lastFmt: timeAgoFmt(lastDate),
+        };
+      }
+
+      // Spamhaus DROP / ASN-DROP — matched locally against the session's cached list.
+      if (["IPV4","IPV6"].includes(cat)) {
+        try {
+          const asnRaw = results.whoisASN?.asn
+            || (results.sansIsc?.asn ? `AS${results.sansIsc.asn}` : null)
+            || (results.virustotal?.asn != null ? `AS${results.virustotal.asn}` : null);
+          const sh = matchSpamhaus(await loadSpamhausDrop(), cat, value, asnRaw);
+          if (sh) results.spamhaus = sh;
+        } catch (e) { console.warn("Spamhaus DROP check failed:", e.message); }
+      }
+
       // VirusTotal passive DNS (resolutions) — merged into the same Passive DNS
       // list as OTX (results.otxPDNS keeps its name; records carry `sources`).
-      // Fetched for every IP, even when the VT object lookup above was skipped on
-      // a strong signal: pivot data matters most on malicious infrastructure.
-      if (["IPV4","IPV6"].includes(cat)) {
+      // One extra VT call, so only for IPs with a bad signal from any engine:
+      // pivots matter on malicious infrastructure, while clean / CDN / shared
+      // hosting IPs would just burn quota (and pacing time) on unrelated domains.
+      // Runs after the Spamhaus check so DROP listings count as a signal.
+      const pdnsBadSignal = ["IPV4","IPV6"].includes(cat)
+        && results.otx?.whitelisted !== true && !results.circl?.legit
+        && ((results.virustotal?.detectionStats?.malicious || 0) > 0
+          || (results.virustotal?.detectionStats?.suspicious || 0) > 0
+          || (results.abuseipdb?.score || 0) >= 25
+          || !!results.threatfox || !!results.urlhaus || !!results.spamhaus
+          || (results.sansIsc?.attacks || 0) >= 5
+          || results.kaspersky?.zone === "red"
+          || (results.validin && (results.validin.verdict === "malicious" || results.validin.maliciousCount > 0)));
+      if (pdnsBadSignal) {
         try {
           await vtPaceGate();
           const rj = await callEnrich("virustotal", null, null, undefined, { vt_type: "ip", vt_rel: "resolutions" });
@@ -5925,48 +5978,6 @@ export default function App() {
           }
         } catch (e) { console.warn("VT passive DNS (IP) failed:", e.message); }
         setPartial();
-      }
-
-      // ---- Consolidated First Seen / Last Seen across all engines ----
-      const allFirsts = [
-        results.threatfox?.first, results.urlhaus?.first,
-        results.malwarebazaar?.first, results.urlscan?.firstSeen,
-        // Tri.age submission and VT's first-submission date are both a
-        // reasonable "first known" proxy when no earlier ITW sighting exists.
-        results.triage?.submitted, results.virustotal?.firstSubmission,
-        results.kaspersky?.firstSeen, results.sansIsc?.minDate,
-      ].filter(Boolean).sort();
-      const allLasts = [
-        results.threatfox?.last, results.urlhaus?.last,
-        results.malwarebazaar?.last, results.urlscan?.lastSeen,
-        // AbuseIPDB lastReported = last time this IP was reported malicious —
-        // include as Last Seen if it's more recent than other sources.
-        results.abuseipdb?.lastReported,
-        // Tri.age's analysis-completed date and VT's last-submission date —
-        // both fold into the same consolidated Last Seen, not a separate chip.
-        results.triage?.completed, results.virustotal?.lastSubmission,
-        results.kaspersky?.lastSeen, results.sansIsc?.maxDate,
-      ].filter(Boolean).sort();
-      if (allFirsts.length || allLasts.length) {
-        const firstDate = allFirsts.length ? allFirsts[0] : null;
-        const lastDate = allLasts.length ? allLasts[allLasts.length - 1] : null;
-        results._timeline = {
-          firstSeen: firstDate,
-          firstFmt: timeAgoFmt(firstDate),
-          lastSeen: lastDate,
-          lastFmt: timeAgoFmt(lastDate),
-        };
-      }
-
-      // Spamhaus DROP / ASN-DROP — matched locally against the session's cached list.
-      if (["IPV4","IPV6"].includes(cat)) {
-        try {
-          const asnRaw = results.whoisASN?.asn
-            || (results.sansIsc?.asn ? `AS${results.sansIsc.asn}` : null)
-            || (results.virustotal?.asn != null ? `AS${results.virustotal.asn}` : null);
-          const sh = matchSpamhaus(await loadSpamhausDrop(), cat, value, asnRaw);
-          if (sh) results.spamhaus = sh;
-        } catch (e) { console.warn("Spamhaus DROP check failed:", e.message); }
       }
 
       // ---- Derive combined verdict ----
