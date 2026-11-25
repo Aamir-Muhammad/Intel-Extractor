@@ -71,7 +71,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v162";
+const APP_VERSION = "v163";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -4111,9 +4111,11 @@ export default function App() {
   };
 
   // ---- IOC Enrichment: ThreatFox + URLhaus + MalwareBazaar via Worker proxy ----
-  const enrichIOC = async (cat, value) => {
+  // opts.fresh: Refresh button. Re-runs every engine and tells the worker to skip
+  // its edge/D1 cache (no_cache) so the analyst gets live provider data.
+  const enrichIOC = async (cat, value, opts = {}) => {
     const key = `${cat}::${value}`;
-    if (enrichCache[key] && !enrichCache[key].error) return;
+    if (!opts.fresh && enrichCache[key] && !enrichCache[key].error) return;
     setEnrichCache((c) => ({ ...c, [key]: { loading: true } }));
     const results = {};
     const _t0 = Date.now();
@@ -4126,6 +4128,7 @@ export default function App() {
     };
     const callEnrich = async (api, otxType, otxSection, overrideValue, extra) => {
       const body = { api, value: overrideValue || value, cat, session_id: SESSION_ID }; // cat + session_id for server-side D1 logging
+      if (opts.fresh) body.no_cache = true;
       if (otxType) body.otx_type = otxType;
       if (otxSection) body.otx_section = otxSection;
       if (extra && typeof extra === "object") Object.assign(body, extra);
@@ -10161,6 +10164,15 @@ export default function App() {
                               className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
                               style={{ color: enr?.data ? "#3ee0a1" : enr?.error ? "#ff7a70" : "#cdb8ff" }}>
                               {enr?.loading ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
+                            </button>
+                          )}
+                          {enrichable && enr?.data && !enr?.loading && (
+                            <button onClick={() => enrichIOC(cat, arr[i], { fresh: true })}
+                              onMouseEnter={() => setHoveredActionRow(eKey)} onMouseLeave={() => setHoveredActionRow(null)}
+                              title="Refresh: re-run every engine with live data, skipping the cache (results are cached for 6h to 3 days)"
+                              className="shrink-0 rounded-md p-1 opacity-50 hover:opacity-100 transition-opacity"
+                              style={{ color: "#cdb8ff" }}>
+                              <RefreshCw size={13} />
                             </button>
                           )}
                           {vtLink(cat, arr[i]) && (
