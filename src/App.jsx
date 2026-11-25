@@ -72,9 +72,17 @@ const vtPaced = (fn) => {
   });
   // A hung request must not stall every VT call behind it: the queue moves on
   // after 30s even if this one is still pending (it still counts as real).
+  let settled = false;
+  run.then(() => { settled = true; }, () => { settled = true; });
   _vtQueue = Promise.race([
     run.catch(() => {}),
-    new Promise((r) => setTimeout(() => { _vtNextRealAt = Math.max(_vtNextRealAt, Date.now() + 6000); r(); }, 30000)),
+    new Promise((r) => {
+      const t = setTimeout(() => {
+        if (!settled) _vtNextRealAt = Math.max(_vtNextRealAt, Date.now() + 6000);
+        r();
+      }, 30000);
+      run.then(() => clearTimeout(t), () => clearTimeout(t));
+    }),
   ]);
   return run;
 };
