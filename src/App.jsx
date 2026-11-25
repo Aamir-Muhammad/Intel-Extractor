@@ -43,14 +43,40 @@ async function workerFetch(url, opts) {
 // The slot is claimed synchronously (before the only await) so concurrent
 // callers — e.g. 24 hashes from one "Enrich All" — can't both read the same
 // stale timestamp and slip through the gate together.
-let _vtNextSlotAt = 0;
-const vtPaceGate = async () => {
-  const now = Date.now();
-  const gap = 6000 + Math.random() * 4000; // 6-10s, randomized
-  const slot = Math.max(now, _vtNextSlotAt);
-  _vtNextSlotAt = slot + gap;
-  const wait = slot - now;
-  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+//
+// Cache-aware (v164): VT calls run one at a time through a queue, and the 6-10s
+// gap is only owed after a call that actually reached VirusTotal. When the
+// worker answers from its edge/D1 cache (X-IE-Cache header, no quota spent),
+// the next VT call in the queue goes straight away, so a re-run of a cached
+// report isn't throttled for nothing. Anything that isn't a confirmed hit
+// (errors, 429s, an old worker without the header) counts as a real call.
+let _vtQueue = Promise.resolve();
+let _vtNextRealAt = 0; // earliest time the next real VT call may be sent
+const vtIsCacheHit = (res) => {
+  if (!res) return false;
+  if (typeof Response !== "undefined" && res instanceof Response) return /^HIT/i.test(res.headers.get("X-IE-Cache") || "");
+  return typeof res === "object" && /^HIT/i.test(res.__ieCache || "");
+};
+const vtPaced = (fn) => {
+  const run = _vtQueue.then(async () => {
+    const wait = _vtNextRealAt - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    const sentAt = Date.now();
+    let res;
+    try {
+      res = await fn();
+      return res;
+    } finally {
+      if (!vtIsCacheHit(res)) _vtNextRealAt = sentAt + 6000 + Math.random() * 4000; // 6-10s, randomized
+    }
+  });
+  // A hung request must not stall every VT call behind it: the queue moves on
+  // after 30s even if this one is still pending (it still counts as real).
+  _vtQueue = Promise.race([
+    run.catch(() => {}),
+    new Promise((r) => setTimeout(() => { _vtNextRealAt = Math.max(_vtNextRealAt, Date.now() + 6000); r(); }, 30000)),
+  ]);
+  return run;
 };
 
 // Anonymous per-browser session id for usage analytics. Generated once,
@@ -71,7 +97,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v163";
+const APP_VERSION = "v164";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -4077,7 +4103,7 @@ export default function App() {
   };
 
   // VirusTotal community comments — loaded on demand, since each load is one
-  // VirusTotal call from the shared daily quota (and goes through vtPaceGate).
+  // VirusTotal call from the shared daily quota (and goes through vtPaced).
   const loadVtComments = async (cat, value) => {
     const key = `${cat}::${value}`;
     const vtType = ["IPV4", "IPV6"].includes(cat) ? "ip" : cat === "DOMAIN" ? "domain" : ["MD5", "SHA1", "SHA256", "SHA512"].includes(cat) ? "file" : null;
@@ -4089,11 +4115,10 @@ export default function App() {
     });
     patch({ loading: true, items: [] });
     try {
-      await vtPaceGate();
-      const r = await workerFetch(`${WORKER_BASE}/enrich`, {
+      const r = await vtPaced(() => workerFetch(`${WORKER_BASE}/enrich`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ api: "virustotal", value, cat, session_id: SESSION_ID, vt_type: vtType, vt_rel: "comments" }),
-      });
+      }));
       const j = await r.json().catch(() => null);
       if (!r.ok) throw new Error(j?.message || j?.error?.message || (typeof j?.error === "string" ? j.error : `HTTP ${r.status}`));
       const items = (Array.isArray(j?.data) ? j.data : []).map((c) => {
@@ -4143,9 +4168,15 @@ export default function App() {
       // Debug aid: the last raw payload per engine+value is kept in memory so a
       // response can be inspected from the console (copy(JSON.stringify(__IE_RAW))).
       try { (window.__IE_RAW = window.__IE_RAW || {})[`${api}${otxSection ? ":" + otxSection : ""}::${body.value}`] = text.length > 250000 ? text.slice(0, 250000) : text; } catch { /* ignore */ }
-      try { return JSON.parse(text); } catch {
+      let parsed;
+      try { parsed = JSON.parse(text); } catch {
         throw new Error(text.slice(0, 100));
       }
+      const cacheHdr = r.headers.get("X-IE-Cache");
+      if (cacheHdr && parsed && typeof parsed === "object") {
+        try { Object.defineProperty(parsed, "__ieCache", { value: cacheHdr, enumerable: false }); } catch { /* frozen? ignore */ }
+      }
+      return parsed;
     };
 
     // ═══════════════════════════════════════════════════════════════
@@ -4676,11 +4707,10 @@ export default function App() {
         // strong tiers by detection count) — everything else here (threat
         // label, capabilities, signature info) stays context-only, same
         // principle as the "signed" chip elsewhere. Three free keys are
-        // rotated server-side; vtPaceGate keeps combined client call volume
+        // rotated server-side; vtPaced keeps combined client call volume
         // well under their shared per-minute ceiling.
         try {
-          await vtPaceGate();
-          const vj = await callEnrich("virustotal");
+          const vj = await vtPaced(() => callEnrich("virustotal"));
           const vAttr = vj?.data?.attributes;
           if (vAttr) {
             const ptc = vAttr.popular_threat_classification;
@@ -5775,8 +5805,7 @@ export default function App() {
           || (results.validin && (results.validin.verdict === "malicious" || results.validin.maliciousCount > 0));
         if (!hasStrongDomainSignal) {
           try {
-            await vtPaceGate();
-            const vj = await callEnrich("virustotal", null, null, undefined, { vt_type: "domain" });
+            const vj = await vtPaced(() => callEnrich("virustotal", null, null, undefined, { vt_type: "domain" }));
             const vAttr = vj?.data?.attributes;
             if (vAttr) {
               const stats = vAttr.last_analysis_stats || {};
@@ -5810,8 +5839,7 @@ export default function App() {
                 const ids = relKey === "communicating" ? vt.communicatingFiles : vt.downloadedFiles;
                 if (!ids?.length) continue;
                 try {
-                  await vtPaceGate();
-                  const lf = parseVtLinkedFiles(await callEnrich("virustotal", null, null, undefined, { vt_type: "domain", vt_rel: relName }));
+                  const lf = parseVtLinkedFiles(await vtPaced(() => callEnrich("virustotal", null, null, undefined, { vt_type: "domain", vt_rel: relName })));
                   if (lf) linked[relKey] = lf;
                 } catch (e) { console.warn(`VT linked files (domain ${relName}) failed:`, e.message); }
               }
@@ -5848,8 +5876,7 @@ export default function App() {
           || (results.validin && (results.validin.verdict === "malicious" || results.validin.maliciousCount > 0));
         if (!hasStrongIPSignal) {
           try {
-            await vtPaceGate();
-            const vj = await callEnrich("virustotal", null, null, undefined, { vt_type: "ip" });
+            const vj = await vtPaced(() => callEnrich("virustotal", null, null, undefined, { vt_type: "ip" }));
             const vAttr = vj?.data?.attributes;
             if (vAttr) {
               const stats = vAttr.last_analysis_stats || {};
@@ -5866,8 +5893,7 @@ export default function App() {
               Object.assign(vt, parseVtNetworkExtras(vAttr));
               if (vt.communicatingFiles?.length) {
                 try {
-                  await vtPaceGate();
-                  const lf = parseVtLinkedFiles(await callEnrich("virustotal", null, null, undefined, { vt_type: "ip", vt_rel: "communicating_files" }));
+                  const lf = parseVtLinkedFiles(await vtPaced(() => callEnrich("virustotal", null, null, undefined, { vt_type: "ip", vt_rel: "communicating_files" })));
                   if (lf) vt.linkedFiles = { communicating: lf };
                 } catch (e) { console.warn("VT linked files (IP) failed:", e.message); }
               }
@@ -5938,8 +5964,7 @@ export default function App() {
           || (results.validin && (results.validin.verdict === "malicious" || results.validin.maliciousCount > 0)));
       if (pdnsBadSignal) {
         try {
-          await vtPaceGate();
-          const rj = await callEnrich("virustotal", null, null, undefined, { vt_type: "ip", vt_rel: "resolutions" });
+          const rj = await vtPaced(() => callEnrich("virustotal", null, null, undefined, { vt_type: "ip", vt_rel: "resolutions" }));
           const rows = Array.isArray(rj?.data) ? rj.data : [];
           if (rows.length) {
             const byHost = new Map((results.otxPDNS?.records || []).map((g) => [
