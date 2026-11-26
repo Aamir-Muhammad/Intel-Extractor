@@ -105,7 +105,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v164";
+const APP_VERSION = "v165";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -1358,6 +1358,18 @@ const deriveDetections = (d) => {
   };
 };
 
+// Live PTR lookup name: 1.2.3.4 -> 4.3.2.1.in-addr.arpa, IPv6 -> nibble ip6.arpa.
+const ptrQueryName = (ip) => {
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return ip.split(".").reverse().join(".") + ".in-addr.arpa";
+  if (!ip.includes(":")) return null;
+  const [head, tail = ""] = ip.toLowerCase().split("::");
+  const h = head ? head.split(":") : [], t = tail ? tail.split(":") : [];
+  if (!ip.includes("::") && h.length !== 8) return null;
+  const groups = [...h, ...Array(8 - h.length - t.length).fill("0"), ...t];
+  if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
+  return groups.map((g) => g.padStart(4, "0")).join("").split("").reverse().join(".") + ".ip6.arpa";
+};
+
 // One IP profile: ASN/owner/route/type/abuse/hostnames from the best source each.
 const buildNetworkProfile = (d) => {
   const g = d.whoisASN || {}, s = d.sansIsc || {}, a = d.abuseipdb || {}, sh = d.shodan || {}, u = d.urlscan || {}, v = d.virustotal || {};
@@ -1373,7 +1385,8 @@ const buildNetworkProfile = (d) => {
   const abuse = g.abuse && (g.abuse.email || g.abuse.phone || g.abuse.name)
     ? { ...g.abuse, source: "IPLocate (RDAP)" }
     : (s.abuseContact ? { email: s.abuseContact, source: "SANS ISC" } : null);
-  const hostnames = uniqCI([u.ptr, ...(sh.hostnames || []), ...(a.hostnames || [])]).slice(0, 6);
+  const ptrLive = (d.ptr?.names || []).map((h) => String(h).toLowerCase());
+  const hostnames = uniqCI([...ptrLive, u.ptr, ...(sh.hostnames || []), ...(a.hostnames || [])]).slice(0, 6);
   const ispDiffers = a.isp && norm(a.isp) !== norm(asnName) && norm(a.isp) !== norm(owner) && !norm(asnName).includes(norm(a.isp)) && !norm(a.isp).includes(norm(asnName));
   return {
     asn, asnName, asnSrc, owner, route, netname: g.netname || null, rir: g.rir || null,
@@ -1381,7 +1394,7 @@ const buildNetworkProfile = (d) => {
     hostingProvider: g.hostingProvider || null,
     usage: !g.asnType && a.usageType ? a.usageType : null,
     isp: ispDiffers ? a.isp : null,
-    flags, abuse, hostnames, anycast: !!g.anycast,
+    flags, abuse, hostnames, ptrLive, anycast: !!g.anycast,
     has: !!(asn || owner || route || abuse || hostnames.length || g.asnType || flags.length),
   };
 };
@@ -5172,6 +5185,34 @@ export default function App() {
             };
           }
         } catch (e) { console.warn("Enrich IPLocate failed:", e.message); }
+
+        // Live reverse DNS (PTR) over DNS-over-HTTPS: Cloudflare, then Google if a
+        // proxy blocks it. Free, keyless, CORS *, no quota. The other rDNS sources
+        // (AbuseIPDB, Shodan, urlscan) only have it if they've seen the IP.
+        // Display-only: the IP owner controls its PTR, so it never drives a verdict.
+        try {
+          const qn = ptrQueryName(value);
+          if (qn) {
+            const resolvers = [
+              `https://cloudflare-dns.com/dns-query?name=${qn}&type=PTR`,
+              `https://dns.google/resolve?name=${qn}&type=PTR`,
+            ];
+            for (const url of resolvers) {
+              try {
+                const ctl = new AbortController();
+                const t = setTimeout(() => ctl.abort(), 4000);
+                const r = await fetch(url, { headers: { Accept: "application/dns-json" }, signal: ctl.signal });
+                clearTimeout(t);
+                if (!r.ok) continue;
+                const j = await r.json();
+                const names = (j.Answer || []).filter((a) => a.type === 12 && a.data)
+                  .map((a) => String(a.data).replace(/\.$/, "")).filter(Boolean);
+                if (names.length) results.ptr = { names: names.slice(0, 4), resolver: url.includes("google") ? "Google DNS" : "Cloudflare DNS" };
+                break; // answered (even NXDOMAIN): don't ask the second resolver
+              } catch { /* blocked / timed out: try the next resolver */ }
+            }
+          }
+        } catch (e) { console.warn("Enrich PTR failed:", e.message); }
 
         // Shodan InternetDB — no key, permissive CORS, free non-commercial.
         // Adds open ports, tags, CPEs (services running), and known CVEs.
@@ -11194,7 +11235,12 @@ export default function App() {
                                     </>
                                   ), "loc")}
                                   {np.flags.length > 0 && kvRow("Flags", np.flags.map((f) => <span key={f} className="rounded px-1.5 py-0.5 font-bold" style={pill(/abuser|tor/i.test(f) ? "#ff9f43" : "#f5b53a")}>{f}</span>), "flags")}
-                                  {np.hostnames.length > 0 && kvRow("Reverse DNS", np.hostnames.map((h) => copyChip(h, `rdns-${h}`, { mono: true })), "rdns")}
+                                  {np.hostnames.length > 0 && kvRow("Reverse DNS", np.hostnames.map((h) => (
+                                    <span key={`rdns-${h}`} className="inline-flex items-center gap-1">
+                                      {copyChip(h, `rdns-${h}`, { mono: true })}
+                                      {np.ptrLive.includes(String(h).toLowerCase()) && <span className="rounded px-1 py-0.5 text-[9px] font-bold" style={pill("#5fd4ff")} title={`Live PTR record via ${d.ptr?.resolver || "DNS-over-HTTPS"}. Set by the IP's owner, so context only.`}>PTR</span>}
+                                    </span>
+                                  )), "rdns")}
                                   {np.abuse && kvRow("Abuse contact", (
                                     <>
                                       {np.abuse.name && <span>{np.abuse.name}</span>}
