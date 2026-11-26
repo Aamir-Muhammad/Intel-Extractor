@@ -105,7 +105,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v167";
+const APP_VERSION = "v168";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -10398,9 +10398,44 @@ export default function App() {
                                 ? `Domain ${smartAge(dr.ageDays)} old · TLS certificate ${smartAge(certAge)} old` : null;
                               const roles = deriveInfraRole(d, cat);
                               const cves = cat === "CVE" ? [] : deriveExploitedCves(d);
-                              if (!drivers.length && !family.length && !risk.reasons.length && !fresh && !roles.length && !cves.length) return null;
+                              // Unknown: say plainly that nothing decided it, and show what each source returned.
+                              const isUnknown = !d._verdict || d._verdict === "Unknown";
+                              const checked = [];
+                              if (isUnknown) {
+                                const st = d.virustotal?.detectionStats;
+                                if (st) {
+                                  const tot = st.malicious + st.suspicious + st.harmless + st.undetected;
+                                  checked.push(["VirusTotal", `${st.malicious + st.suspicious}/${tot} engines flagged`]);
+                                } else if (d.virustotal) checked.push(["VirusTotal", "no detections or votes"]);
+                                if (d.abuseipdb) checked.push(["AbuseIPDB", `${d.abuseipdb.score || 0}% confidence · ${d.abuseipdb.reports || 0} report${d.abuseipdb.reports === 1 ? "" : "s"}`]);
+                                if (d.otx) checked.push(["OTX", `${d.otx.pulses || 0} threat report${d.otx.pulses === 1 ? "" : "s"}`]);
+                                if (d.kaspersky) checked.push(["Kaspersky", d.kaspersky.zone === "green" && !isHash ? "unclassified" : `${d.kaspersky.zone || "no"} zone`]);
+                                if (d.sansIsc) checked.push(["SANS ISC", `${d.sansIsc.attacks || 0} reported attack${d.sansIsc.attacks === 1 ? "" : "s"}`]);
+                                if (d.validin) checked.push(["Validin", d.validin.verdict || "no annotations"]);
+                                if (d.urlscan) checked.push(["urlscan.io", d.urlscan.overallMalicious ? "malicious" : "not flagged"]);
+                                if (d.hybridAnalysis) checked.push(["Hybrid Analysis", d.hybridAnalysis.threatScore != null ? `threat score ${d.hybridAnalysis.threatScore}/100` : (d.hybridAnalysis.verdict || "no verdict")]);
+                                if (d.triage) checked.push(["Tri.age", d.triage.score != null ? `score ${d.triage.score}/10` : "no score"]);
+                              }
+                              if (!isUnknown && !drivers.length && !family.length && !risk.reasons.length && !fresh && !roles.length && !cves.length) return null;
                               return secRow("Why This Verdict", (
                                 <div className="w-full rounded-md p-2 flex flex-col gap-1.5" style={accent(vc)}>
+                                  {isUnknown && (
+                                    <div className="flex flex-col gap-1">
+                                      <div className="flex flex-wrap items-center gap-1">
+                                        <span className="rounded px-1.5 py-0.5 font-bold" style={pill(vc)}>○ Unknown</span>
+                                        <span style={{ color: "#cfc9e4" }}>No source flagged this {isIP ? "IP" : cat === "DOMAIN" ? "domain" : cat === "URL" ? "URL" : isHash ? "file" : "indicator"} as malicious or suspicious, and none confirmed it as legitimate. Treat it as unverified, not clean.</span>
+                                      </div>
+                                      {checked.length > 0 && (
+                                        <div className="flex flex-wrap items-center gap-1">
+                                          <span style={{ color: "#8b84a6" }}>Sources checked:</span>
+                                          {checked.map(([eng, txt]) => (
+                                            <span key={eng} className="rounded px-1.5 py-0.5" style={pill("#8b84a6")}><b>{eng}</b> · {txt}</span>
+                                          ))}
+                                        </div>
+                                      )}
+                                      {!d.virustotal && <span style={{ color: "#8b84a6" }}>VirusTotal was not checked for this one. Worth a manual look.</span>}
+                                    </div>
+                                  )}
                                   {drivers.length > 0 && (
                                     <div className="flex flex-wrap items-center gap-1">
                                       <span className="rounded px-1.5 py-0.5 font-bold" style={pill(vc)}>{d._verdict === "Malicious" ? "●" : d._verdict === "Suspicious" ? "●" : "●"} {d._verdict}</span>
@@ -10547,7 +10582,7 @@ export default function App() {
                                   })()}
                               </>
                             ), "Exploitation · severity · affected · fixes")}
-                            {!isCondensed && (hasVerdict || hasCrowdstrike || hasThreatfox || hasMalBaz || hasUrlhaus || hasPhishtank || hasCircl || (hasKaspersky && isHash)) && secRow("Verdict & Identity", (
+                            {!isCondensed && (d._verdict || hasCrowdstrike || hasThreatfox || hasMalBaz || hasUrlhaus || hasPhishtank || hasCircl || (hasKaspersky && isHash)) && secRow("Verdict & Identity", (
                               <>
                                   {hasCrowdstrike && (
                                     <span className="rounded-full px-2 py-0.5 font-bold" style={{
@@ -10558,13 +10593,14 @@ export default function App() {
                                       CrowdStrike Falcon (ML) · {d.crowdstrike.statusRaw || d.crowdstrike.status}{d.crowdstrike.positives != null && d.crowdstrike.total != null ? ` · ${d.crowdstrike.positives}/${d.crowdstrike.total}` : ""}
                                     </span>
                                   )}
-                                  {hasVerdict && (
-                                    <span className="rounded-full px-2 py-0.5 font-bold" style={{
+                                  {d._verdict && (
+                                    <span className="rounded-full px-2 py-0.5 font-bold"
+                                      title={hasVerdict ? "Overall verdict across all engines" : "Overall verdict: no source flagged or cleared this indicator"} style={{
                                       color: d._verdict === "Malicious" ? "#f2545b" : d._verdict === "Suspicious" ? "#f5b53a" : d._verdict === "Whitelisted" ? "#3ee0a1" : "#8b84a6",
                                       backgroundColor: d._verdict === "Malicious" ? "rgba(242,84,91,0.15)" : d._verdict === "Suspicious" ? "rgba(245,181,58,0.15)" : d._verdict === "Whitelisted" ? "rgba(62,224,161,0.15)" : "rgba(145,136,170,0.15)",
                                       border: `1px solid ${d._verdict === "Malicious" ? "rgba(242,84,91,0.4)" : d._verdict === "Suspicious" ? "rgba(245,181,58,0.4)" : d._verdict === "Whitelisted" ? "rgba(62,224,161,0.4)" : "rgba(145,136,170,0.3)"}`,
                                     }}>
-                                      {d._verdict === "Malicious" ? "●" : d._verdict === "Suspicious" ? "●" : d._verdict === "Whitelisted" ? "●" : "○"} {d._verdict}
+                                      {d._verdict === "Malicious" ? "●" : d._verdict === "Suspicious" ? "●" : d._verdict === "Whitelisted" ? "●" : "○"} {d._verdict === "Unknown" ? "Unknown · not enough evidence either way" : d._verdict}
                                     </span>
                                   )}
                                   {hasThreatfox && (
@@ -10903,7 +10939,7 @@ export default function App() {
                             {/* ── REPUTATION (VT Intel merged in here — VT is weighted above the
                                 other engines below it when it was actually called, see the
                                 verdict cascade's Tier 2 clean-consensus check) ── */}
-                            {!isCondensed && (hasVT || hasOtx || hasAbuse || hasValidin || (hasKaspersky && !isHash) || d._verdict === "Unknown") && secRow("Reputation", (
+                            {!isCondensed && (hasVT || hasOtx || hasAbuse || hasValidin || (hasKaspersky && !isHash)) && secRow("Reputation", (
                               <>
                                   {hasVT && d.virustotal.detectionStats?.harmless >= 5 && !d.virustotal.detectionStats?.malicious && !d.virustotal.detectionStats?.suspicious && (
                                     <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#3ee0a1", backgroundColor: "rgba(62,224,161,0.12)", border: "1px solid rgba(62,224,161,0.35)" }}
@@ -10984,12 +11020,6 @@ export default function App() {
                                       border: `1px solid ${d.virustotal.reputation < 0 ? "rgba(245,181,58,0.35)" : "rgba(150,140,180,0.2)"}`,
                                     }} title="VirusTotal community reputation score — negative means the community has flagged it more than voted for it">
                                       Reputation: {d.virustotal.reputation > 0 ? "+" : ""}{d.virustotal.reputation}
-                                    </span>
-                                  )}
-                                  {d._verdict === "Unknown" && d.domainReg?.state !== "deleted" && (
-                                    <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#6a6385", backgroundColor: "rgba(150,140,180,0.08)", border: "1px solid rgba(150,140,180,0.2)" }}
-                                      title="Overall verdict across all engines: none flagged this IOC as malicious or suspicious, and none confirmed it benign. Not the same as clean.">
-                                      ○ Verdict: Unknown (no source flagged or cleared it){d.virustotal ? "" : " · check VirusTotal"}
                                     </span>
                                   )}
                                   {hasOtx && d._verdict !== "Unknown" && (
