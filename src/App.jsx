@@ -105,7 +105,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v166";
+const APP_VERSION = "v167";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -4121,39 +4121,6 @@ export default function App() {
     const file = e.target?.files?.[0];
     if (file) runUpload(file);
     if (e.target) e.target.value = ""; // allow re-uploading same file
-  };
-
-  // VirusTotal community comments — loaded on demand, since each load is one
-  // VirusTotal call from the shared daily quota (and goes through vtPaced).
-  const loadVtComments = async (cat, value) => {
-    const key = `${cat}::${value}`;
-    const vtType = ["IPV4", "IPV6"].includes(cat) ? "ip" : cat === "DOMAIN" ? "domain" : ["MD5", "SHA1", "SHA256", "SHA512"].includes(cat) ? "file" : null;
-    if (!vtType) return;
-    const patch = (comments) => setEnrichCache((prev) => {
-      const e = prev[key];
-      if (!e?.data?.virustotal) return prev;
-      return { ...prev, [key]: { ...e, data: { ...e.data, virustotal: { ...e.data.virustotal, comments } } } };
-    });
-    patch({ loading: true, items: [] });
-    try {
-      const r = await vtPaced(() => workerFetch(`${WORKER_BASE}/enrich`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api: "virustotal", value, cat, session_id: SESSION_ID, vt_type: vtType, vt_rel: "comments" }),
-      }));
-      const j = await r.json().catch(() => null);
-      if (!r.ok) throw new Error(j?.message || j?.error?.message || (typeof j?.error === "string" ? j.error : `HTTP ${r.status}`));
-      const items = (Array.isArray(j?.data) ? j.data : []).map((c) => {
-        const a = c?.attributes || {};
-        return {
-          date: a.date ? new Date(a.date * 1000).toISOString().slice(0, 10) : null,
-          text: String(a.text || "").replace(/\s+/g, " ").trim().slice(0, 600),
-          up: a.votes?.positive || 0, down: a.votes?.negative || 0,
-        };
-      }).filter((c) => c.text);
-      patch({ loading: false, items });
-    } catch (e) {
-      patch({ loading: false, items: [], error: String(e?.message || e).slice(0, 140) });
-    }
   };
 
   // ---- IOC Enrichment: ThreatFox + URLhaus + MalwareBazaar via Worker proxy ----
@@ -11002,29 +10969,6 @@ export default function App() {
                                       Community: {d.virustotal.votes.harmless} harmless / {d.virustotal.votes.malicious} malicious
                                     </span>
                                   )}
-                                  {hasVT && ["IPV4","IPV6","DOMAIN","MD5","SHA1","SHA256","SHA512"].includes(cat) && (() => {
-                                    const cm = d.virustotal.comments;
-                                    const loadBtn = (label) => (
-                                      <button type="button" onClick={() => loadVtComments(cat, arr[i])} className="rounded-full px-2 py-0.5 text-[9.5px]"
-                                        title="Analyst notes from the VirusTotal community. Uses one VirusTotal lookup from the shared daily quota."
-                                        style={{ color: "#d6c8ff", border: "1px solid rgba(185,165,255,0.3)", backgroundColor: "rgba(185,165,255,0.06)", cursor: "pointer" }}>{label}</button>
-                                    );
-                                    if (!cm) return loadBtn("Load VirusTotal comments");
-                                    if (cm.loading) return <span className="rounded-full px-2 py-0.5 text-[9.5px]" style={{ color: "#8b84a6" }}>Loading VirusTotal comments…</span>;
-                                    if (cm.error) return <span className="flex items-center gap-1.5 text-[9.5px]" style={{ color: "#f5b53a" }}>VirusTotal comments failed: {cm.error} {loadBtn("Retry")}</span>;
-                                    if (!cm.items.length) return <span className="rounded-full px-2 py-0.5 text-[9.5px]" style={{ color: "#8b84a6", border: "1px solid rgba(150,140,180,0.2)" }}>No VirusTotal community comments</span>;
-                                    return (
-                                      <span className="w-full rounded-md px-2 py-1 text-[9.5px] flex flex-col gap-1" style={{ color: "#cfc9e4", backgroundColor: "rgba(150,140,180,0.04)", border: "1px solid rgba(150,140,180,0.15)" }}
-                                        title="Latest VirusTotal community comments — free text written by other analysts">
-                                        <span className="font-bold" style={{ color: "#d6c8ff" }}>VirusTotal comments ({cm.items.length})</span>
-                                        {cm.items.map((c, ci) => (
-                                          <span key={ci} className="break-words">
-                                            <span style={{ color: "#8b84a6" }}>{c.date || ""}{c.up || c.down ? ` · +${c.up}/−${c.down}` : ""}</span> — {defangProse(c.text)}
-                                          </span>
-                                        ))}
-                                      </span>
-                                    );
-                                  })()}
                                   {(hasVT ? (d.virustotal.communicatingFiles?.length > 0 || d.virustotal.downloadedFiles?.length > 0) && !d.virustotal.linkedFiles : false) && (
                                     <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#cdb8ff", backgroundColor: "rgba(205,184,255,0.10)", border: "1px solid rgba(205,184,255,0.3)" }}
                                       title="Pivotable in ThreatGraph">
