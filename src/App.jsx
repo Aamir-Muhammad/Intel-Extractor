@@ -105,7 +105,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v165";
+const APP_VERSION = "v166";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -10201,7 +10201,8 @@ export default function App() {
                               </span>
                             )}
                             {isRowCollapsed && enr?.data?._verdict && (
-                              <span className="ml-1.5 text-[9px] rounded px-1.5 py-0.5 align-middle font-bold" style={{
+                              <span className="ml-1.5 text-[9px] rounded px-1.5 py-0.5 align-middle font-bold"
+                                title={enr.data._verdict === "Unknown" ? "Overall verdict: no source flagged or cleared this IOC" : `Overall verdict across all engines: ${enr.data._verdict}`} style={{
                                 color: enr.data._verdict === "Malicious" ? "#f2545b" : enr.data._verdict === "Suspicious" ? "#f5b53a" : enr.data._verdict === "Whitelisted" ? "#3ee0a1" : "#8b84a6",
                                 backgroundColor: enr.data._verdict === "Malicious" ? "rgba(242,84,91,0.15)" : enr.data._verdict === "Suspicious" ? "rgba(245,181,58,0.15)" : enr.data._verdict === "Whitelisted" ? "rgba(62,224,161,0.15)" : "rgba(145,136,170,0.15)",
                                 border: `1px solid ${enr.data._verdict === "Malicious" ? "rgba(242,84,91,0.4)" : enr.data._verdict === "Suspicious" ? "rgba(245,181,58,0.4)" : enr.data._verdict === "Whitelisted" ? "rgba(62,224,161,0.4)" : "rgba(145,136,170,0.3)"}`,
@@ -11042,8 +11043,9 @@ export default function App() {
                                     </span>
                                   )}
                                   {d._verdict === "Unknown" && d.domainReg?.state !== "deleted" && (
-                                    <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#6a6385", backgroundColor: "rgba(150,140,180,0.08)", border: "1px solid rgba(150,140,180,0.2)" }}>
-                                      {d.virustotal ? "○ Unknown" : "○ Unknown - Check VirusTotal"}
+                                    <span className="rounded-full px-2 py-0.5 font-bold" style={{ color: "#6a6385", backgroundColor: "rgba(150,140,180,0.08)", border: "1px solid rgba(150,140,180,0.2)" }}
+                                      title="Overall verdict across all engines: none flagged this IOC as malicious or suspicious, and none confirmed it benign. Not the same as clean.">
+                                      ○ Verdict: Unknown (no source flagged or cleared it){d.virustotal ? "" : " · check VirusTotal"}
                                     </span>
                                   )}
                                   {hasOtx && d._verdict !== "Unknown" && (
