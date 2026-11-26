@@ -105,7 +105,7 @@ const SESSION_ID = getSessionId();
 // onto the /fetch, /parse, and /enrich requests the app already makes for
 // functional reasons — SESSION_ID is attached to those, but there is no
 // dedicated client-initiated logging call. Invisible to browser DevTools.
-const APP_VERSION = "v168";
+const APP_VERSION = "v169";
 
 // ============================================================
 //  IOC Whitelist — exact-match auto-removal from parsed results
@@ -9109,8 +9109,10 @@ export default function App() {
         /* Indicator detail chips: a fixed corner radius reads as a clean pill on one line and a tidy
            rounded rectangle when the text wraps (rounded-full = 9999px turned wrapped chips into blobs). */
         .ie-detail .rounded-full { border-radius: 12px; }
-        /* One fixed line height for every chip, so 10px and 9px chips (and +Add buttons) are the same height. */
-        .ie-detail [class*="rounded"][class*="py-0.5"] { line-height: 16px; }
+        /* One fixed line height for every chip, so 12px and 11px chips (and +Add buttons) are the same height. */
+        .ie-detail [class*="rounded"][class*="py-0.5"] { line-height: 19px; }
+        .ie-detail { line-height: 1.5; }
+        .ie-detail b, .ie-detail .font-bold { color: inherit; }
         .ie-detail .rounded-full:has(> .animate-spin) { display: inline-flex; align-items: center; gap: 4px; }
         .sitroom-sonar { position: absolute; inset: 0; pointer-events: none; }
         .sitroom-sonar i {
@@ -10293,7 +10295,7 @@ export default function App() {
                           ) : null;
                           if (reservedLabel) {
                             return (
-                              <div className="ie-detail ml-4 mb-1.5 text-[10px]">
+                              <div className="ie-detail ml-4 mb-1.5 text-[12px]">
                                 <span className="rounded-full px-2 py-0.5 font-bold inline-flex items-center gap-1" style={{ color: "#f5b53a", backgroundColor: "rgba(245,181,58,0.10)", border: "1px solid rgba(245,181,58,0.35)" }}
                                   title="This address is within a special-purpose/non-routable range — never real attacker infrastructure, so no further enrichment is shown.">
                                   ● {reservedLabel} — Non-Routable IP Address
@@ -10340,9 +10342,9 @@ export default function App() {
                           // Compact row: bold label on the left, chips flowing right
                           const secRow = (label, children, hint) => (
                             <div className="flex items-start gap-2 py-0.5">
-                              <span className="shrink-0 pt-0.5" style={{ width: "104px" }}>
-                                <span className="block text-[9px] uppercase tracking-widest font-black" style={{ color: "#8b84a6", letterSpacing: "1.5px" }}>{label}</span>
-                                {hint && <span className="block text-[8px] leading-tight mt-0.5" style={{ color: "#6a6385" }}>{hint}</span>}
+                              <span className="shrink-0 pt-0.5" style={{ width: "124px" }}>
+                                <span className="block text-[11px] uppercase tracking-widest font-black" style={{ color: "#bcb5d8", letterSpacing: "1.4px" }}>{label}</span>
+                                {hint && <span className="block text-[10px] leading-tight mt-0.5" style={{ color: "#a29bc2" }}>{hint}</span>}
                               </span>
                               <div className="flex flex-wrap items-start gap-1 flex-1 min-w-0">{children}</div>
                             </div>
@@ -10352,14 +10354,14 @@ export default function App() {
                           const accent = (color) => ({ background: `${color}0d`, borderLeft: `3px solid ${color}`, borderRadius: 6 });
                           const kvRow = (label, content, k) => content ? (
                             <div key={k || label} className="flex items-start gap-2 py-0.5">
-                              <span className="shrink-0 text-[9px] uppercase tracking-wider font-bold pt-0.5" style={{ color: "#6f6890", width: 92 }}>{label}</span>
+                              <span className="shrink-0 text-[11px] uppercase tracking-wider font-bold pt-0.5" style={{ color: "#aaa3c8", width: 108 }}>{label}</span>
                               <span className="min-w-0 flex-1 flex flex-wrap items-center gap-1" style={{ color: "#ddd7f1" }}>{content}</span>
                             </div>
                           ) : null;
                           const copyChip = (val, ck, opts = {}) => (
                             <button key={ck} onClick={() => copyText(val, `${eKey}::cp::${ck}`)} title="Click to copy"
                               className="rounded px-1.5 py-0.5 text-left"
-                              style={{ ...pill(opts.color || "#958fb0"), cursor: "pointer", fontFamily: opts.mono ? "monospace" : "inherit", wordBreak: "break-all" }}>
+                              style={{ ...pill(opts.color || "#c8c2e0"), cursor: "pointer", fontFamily: opts.mono ? "monospace" : "inherit", wordBreak: "break-all" }}>
                               {copied === `${eKey}::cp::${ck}` ? "Copied!" : val}
                             </button>
                           );
@@ -10368,14 +10370,14 @@ export default function App() {
                               style={{ ...pill(color || "#e86aa6"), textDecoration: "none" }}>{text} ↗</a>
                           );
                           return (
-                          <div className="ie-detail ml-4 mb-1.5 text-[10px]">
+                          <div className="ie-detail ml-4 mb-1.5 text-[12px]">
                             {/* Provenance badge — shown when this SHA256 card received data via hash dedup */}
                             {d._sourcedFrom && (
                               <div className="flex items-center gap-2 mb-2 rounded-lg px-2.5 py-1.5"
                                 style={{ background: "rgba(185,165,255,0.08)", border: "1px solid rgba(185,165,255,0.3)" }}>
                                 <span style={{ color: "#b9a5ff" }}>Enrichment data sourced from {d._sourcedFrom.cat} <span style={{ fontFamily: "monospace" }}>{d._sourcedFrom.value.slice(0,16)}…</span> — partial results until re-enriched as SHA256</span>
                                 <button onClick={() => { const newKey = `SHA256::${arr[i]}`; setEnrichCache(c=>({...c,[newKey]:undefined})); enrichIOC("SHA256", arr[i]); }}
-                                  className="shrink-0 rounded-md px-2 py-0.5 text-[10px] font-bold"
+                                  className="shrink-0 rounded-md px-2 py-0.5 text-[12px] font-bold"
                                   style={{ color: "#160b02", background: "#b9a5ff", border: "none", cursor: "pointer" }}>
                                   Re-enrich as SHA256
                                 </button>
@@ -10390,7 +10392,7 @@ export default function App() {
                               const family = deriveFamilyConsensus(d);
                               const risk = deriveRiskContext(d);
                               const flaggedBad = d._verdict === "Malicious" || d._verdict === "Suspicious";
-                              const vc = d._verdict === "Malicious" ? "#f2545b" : d._verdict === "Suspicious" ? "#f5b53a" : d._verdict === "Whitelisted" ? "#3ee0a1" : "#8b84a6";
+                              const vc = d._verdict === "Malicious" ? "#f2545b" : d._verdict === "Suspicious" ? "#f5b53a" : d._verdict === "Whitelisted" ? "#3ee0a1" : "#bcb5d8";
                               const dr = d.domainReg;
                               const vtCertDays = d.virustotal?.cert?.notBefore ? Math.floor((Date.now() - new Date(d.virustotal.cert.notBefore).getTime()) / 86400000) : null;
                               const certAge = d.urlscan?.tlsAgeDays ?? (vtCertDays != null && !isNaN(vtCertDays) ? vtCertDays : null);
@@ -10427,19 +10429,19 @@ export default function App() {
                                       </div>
                                       {checked.length > 0 && (
                                         <div className="flex flex-wrap items-center gap-1">
-                                          <span style={{ color: "#8b84a6" }}>Sources checked:</span>
+                                          <span style={{ color: "#bcb5d8" }}>Sources checked:</span>
                                           {checked.map(([eng, txt]) => (
-                                            <span key={eng} className="rounded px-1.5 py-0.5" style={pill("#8b84a6")}><b>{eng}</b> · {txt}</span>
+                                            <span key={eng} className="rounded px-1.5 py-0.5" style={pill("#bcb5d8")}><b>{eng}</b> · {txt}</span>
                                           ))}
                                         </div>
                                       )}
-                                      {!d.virustotal && <span style={{ color: "#8b84a6" }}>VirusTotal was not checked for this one. Worth a manual look.</span>}
+                                      {!d.virustotal && <span style={{ color: "#bcb5d8" }}>VirusTotal was not checked for this one. Worth a manual look.</span>}
                                     </div>
                                   )}
                                   {drivers.length > 0 && (
                                     <div className="flex flex-wrap items-center gap-1">
                                       <span className="rounded px-1.5 py-0.5 font-bold" style={pill(vc)}>{d._verdict === "Malicious" ? "●" : d._verdict === "Suspicious" ? "●" : "●"} {d._verdict}</span>
-                                      <span style={{ color: "#8b84a6" }}>decided by</span>
+                                      <span style={{ color: "#bcb5d8" }}>decided by</span>
                                       {drivers.slice(0, 5).map((x, i) => (
                                         <span key={i} className="rounded px-1.5 py-0.5" style={pill(vc)}><b>{x.engine}</b> · {x.text}</span>
                                       ))}
@@ -10451,7 +10453,7 @@ export default function App() {
                                       {against.slice(0, 4).map((x, i) => (
                                         <span key={i} className="rounded px-1.5 py-0.5" style={pill(x.polarity === "clean" ? "#3ee0a1" : "#f5b53a")}><b>{x.engine}</b> · {x.text}</span>
                                       ))}
-                                      <span style={{ color: "#8b84a6" }}>— verify before acting</span>
+                                      <span style={{ color: "#bcb5d8" }}>— verify before acting</span>
                                     </div>
                                   )}
                                   {family.length > 0 && (
@@ -10459,7 +10461,7 @@ export default function App() {
                                       <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#cdb8ff")}>Malware family</span>
                                       {family.map((f) => (
                                         <span key={f.name} className="rounded px-1.5 py-0.5" style={pill("#cdb8ff")}>
-                                          <b>{f.name}</b> <span style={{ color: "#8b84a6" }}>· {f.sources.join(", ")}</span>
+                                          <b>{f.name}</b> <span style={{ color: "#bcb5d8" }}>· {f.sources.join(", ")}</span>
                                         </span>
                                       ))}
                                     </div>
@@ -10469,7 +10471,7 @@ export default function App() {
                                       <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#9ad0ff")} title="What this infrastructure is used for, from the sources that reported it">Infrastructure role</span>
                                       {roles.map((r) => (
                                         <span key={r.role} className="rounded px-1.5 py-0.5" style={pill(INFRA_ROLE_COLOR[r.role] || "#9ad0ff")}>
-                                          <b>{r.role}</b> <span style={{ color: "#8b84a6" }}>· {r.sources.join(", ")}</span>
+                                          <b>{r.role}</b> <span style={{ color: "#bcb5d8" }}>· {r.sources.join(", ")}</span>
                                         </span>
                                       ))}
                                     </div>
@@ -10484,7 +10486,7 @@ export default function App() {
                                             onClick={() => { if (!inList) mergeIntoResults({ CVE: [c.id] }, { CVE: { [c.id]: "custom" } }, "custom"); enrichIOC("CVE", c.id); }}
                                             title={inList ? `${c.id} is already in the CVE list` : `Add ${c.id} to the CVE list and enrich it (CISA KEV, EPSS, NVD)`}
                                             className="rounded px-1.5 py-0.5 text-left" style={{ ...pill("#f0a6ff"), cursor: "pointer" }}>
-                                            <b className="ie-mono">{c.id}</b> <span style={{ color: "#8b84a6" }}>· {c.sources.join(", ")}{inList ? " · in CVE list" : " · + add & enrich"}</span>
+                                            <b className="ie-mono">{c.id}</b> <span style={{ color: "#bcb5d8" }}>· {c.sources.join(", ")}{inList ? " · in CVE list" : " · + add & enrich"}</span>
                                           </button>
                                         );
                                       })}
@@ -10494,7 +10496,7 @@ export default function App() {
                                     <div className="flex flex-wrap items-center gap-1">
                                       <span className="rounded px-1.5 py-0.5 font-bold" style={pill(flaggedBad ? "#f0a030" : "#e86aa6")}>Shared / popular infrastructure</span>
                                       {risk.reasons.map((r) => <span key={r} className="rounded px-1.5 py-0.5" style={pill("#e86aa6")}>{r}</span>)}
-                                      <span style={{ color: flaggedBad ? "#f5b53a" : "#8b84a6" }}>
+                                      <span style={{ color: flaggedBad ? "#f5b53a" : "#bcb5d8" }}>
                                         {flaggedBad
                                           ? "— flagged despite this: could be a compromised site or an abused legitimate service — verify before blocking outright"
                                           : "— blocking this indicator outright may cause collateral damage"}
@@ -10505,7 +10507,7 @@ export default function App() {
                                     <div className="flex flex-wrap items-center gap-1">
                                       <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#ff9f43")}>Freshly stood-up infrastructure</span>
                                       <span style={{ color: "#ddd7f1" }}>{fresh}</span>
-                                      <span style={{ color: "#8b84a6" }}>— typical of phishing / C2 kits</span>
+                                      <span style={{ color: "#bcb5d8" }}>— typical of phishing / C2 kits</span>
                                     </div>
                                   )}
                                 </div>
@@ -10521,13 +10523,13 @@ export default function App() {
                                     </span>
                                   )}
                                   {hasCisaKev && !d.cisaKev.listed && (
-                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#8b84a6", backgroundColor: "rgba(145,136,170,0.08)", border: "1px solid rgba(145,136,170,0.25)" }}>
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#bcb5d8", backgroundColor: "rgba(145,136,170,0.08)", border: "1px solid rgba(145,136,170,0.25)" }}>
                                       ○ CISA KEV · Not listed
                                     </span>
                                   )}
                                   {hasEpss && (
                                     <span className="rounded-full px-2 py-0.5" style={{
-                                      color: d.epss.score >= 50 ? "#f5b53a" : "#8b84a6",
+                                      color: d.epss.score >= 50 ? "#f5b53a" : "#bcb5d8",
                                       backgroundColor: d.epss.score >= 50 ? "rgba(245,181,58,0.10)" : "rgba(145,136,170,0.08)",
                                       border: `1px solid ${d.epss.score >= 50 ? "rgba(245,181,58,0.35)" : "rgba(145,136,170,0.25)"}`,
                                     }} title="EPSS — Exploit Prediction Scoring System (first.org): probability of exploitation in the next 30 days">
@@ -10544,7 +10546,7 @@ export default function App() {
                                         NVD · CVSS {d.nvd.cvss ?? "—"}{d.nvd.severity ? ` (${d.nvd.severity})` : ""}{d.nvd.published ? ` · Published ${d.nvd.published}` : ""}
                                       </span>
                                       {(d.nvd.kevName || d.nvd.description) && (
-                                        <span className="rounded-md px-2 py-1 text-[10px] leading-snug" style={{ color: "#b4acd0", backgroundColor: "rgba(150,140,180,0.05)", border: "1px solid rgba(150,140,180,0.15)" }}>
+                                        <span className="rounded-md px-2 py-1 text-[12px] leading-snug" style={{ color: "#b4acd0", backgroundColor: "rgba(150,140,180,0.05)", border: "1px solid rgba(150,140,180,0.15)" }}>
                                           {d.nvd.kevName && <b style={{ color: "#f4f1fb" }}>{d.nvd.kevName}{d.cisaKev?.vendorProject || d.cisaKev?.product ? ` — ${[d.cisaKev.vendorProject, d.cisaKev.product].filter(Boolean).join(" ")}` : ""}. </b>}
                                           {d.nvd.description ? (d.nvd.description.length > 380 ? d.nvd.description.slice(0, 380) + "…" : d.nvd.description) : ""}
                                         </span>
@@ -10565,18 +10567,18 @@ export default function App() {
                                           {n.privileges && <span className="rounded px-1.5 py-0.5" style={pill("#b9a5ff")}>Privileges: {title(n.privileges)}</span>}
                                           {n.userInteraction && <span className="rounded px-1.5 py-0.5" style={pill("#b9a5ff")}>User interaction: {title(n.userInteraction)}</span>}
                                           {n.scope && <span className="rounded px-1.5 py-0.5" style={pill("#b9a5ff")}>Scope: {title(n.scope)}</span>}
-                                          {n.exploitability != null && <span className="rounded px-1.5 py-0.5" style={pill("#958fb0")} title="NVD exploitability sub-score">Exploitability {n.exploitability}</span>}
-                                          {n.impact != null && <span className="rounded px-1.5 py-0.5" style={pill("#958fb0")} title="NVD impact sub-score">Impact {n.impact}</span>}
-                                          {n.vector && copyChip(n.vector, "cvss-vector", { mono: true, color: "#958fb0" })}
+                                          {n.exploitability != null && <span className="rounded px-1.5 py-0.5" style={pill("#c8c2e0")} title="NVD exploitability sub-score">Exploitability {n.exploitability}</span>}
+                                          {n.impact != null && <span className="rounded px-1.5 py-0.5" style={pill("#c8c2e0")} title="NVD impact sub-score">Impact {n.impact}</span>}
+                                          {n.vector && copyChip(n.vector, "cvss-vector", { mono: true, color: "#c8c2e0" })}
                                         </div>
                                         {n.cwes?.length > 0 && kvRow("Weakness", n.cwes.map((w) => extLink(`https://cwe.mitre.org/data/definitions/${w.replace("CWE-", "")}.html`, w, "#cdb8ff")), "cwe")}
                                         {(n.products?.length > 0 || d.cisaKev?.product) && kvRow("Affected", (n.products?.length ? n.products : [[d.cisaKev.vendorProject, d.cisaKev.product].filter(Boolean).join(" ")]).map((pName) => <span key={pName} className="rounded px-1.5 py-0.5" style={pill("#f5b53a")}>{pName}</span>), "affected")}
-                                        {n.kevAction && kvRow("Required action", <span className="text-[10px] leading-snug" style={{ color: "#ffb4b4" }}>{n.kevAction.length > 300 ? n.kevAction.slice(0, 300) + "…" : n.kevAction}</span>, "action")}
+                                        {n.kevAction && kvRow("Required action", <span className="text-[12px] leading-snug" style={{ color: "#ffb4b4" }}>{n.kevAction.length > 300 ? n.kevAction.slice(0, 300) + "…" : n.kevAction}</span>, "action")}
                                         {n.refs?.patch?.length > 0 && kvRow("Patch / fix", n.refs.patch.map((r) => extLink(r.url, r.host, "#3ee0a1")), "patch")}
                                         {n.refs?.advisory?.length > 0 && kvRow("Vendor advisory", n.refs.advisory.map((r) => extLink(r.url, r.host, "#e86aa6")), "adv")}
                                         {n.refs?.mitigation?.length > 0 && kvRow("Mitigation", n.refs.mitigation.map((r) => extLink(r.url, r.host, "#f5b53a")), "mit")}
                                         {n.refs?.exploit?.length > 0 && kvRow("Public exploit", n.refs.exploit.map((r) => extLink(r.url, r.host, "#ff9f43")), "exp")}
-                                        {(n.status || n.modified) && kvRow("Record", <span style={{ color: "#8b84a6" }}>{n.status || ""}{n.modified ? ` · last modified ${fmtDate(n.modified)}` : ""}</span>, "rec")}
+                                        {(n.status || n.modified) && kvRow("Record", <span style={{ color: "#bcb5d8" }}>{n.status || ""}{n.modified ? ` · last modified ${fmtDate(n.modified)}` : ""}</span>, "rec")}
                                       </div>
                                     );
                                   })()}
@@ -10586,7 +10588,7 @@ export default function App() {
                               <>
                                   {hasCrowdstrike && (
                                     <span className="rounded-full px-2 py-0.5 font-bold" style={{
-                                      color: d.crowdstrike.status === "malicious" ? "#f2545b" : d.crowdstrike.status === "clean" ? "#3ee0a1" : "#8b84a6",
+                                      color: d.crowdstrike.status === "malicious" ? "#f2545b" : d.crowdstrike.status === "clean" ? "#3ee0a1" : "#bcb5d8",
                                       backgroundColor: d.crowdstrike.status === "malicious" ? "rgba(242,84,91,0.15)" : d.crowdstrike.status === "clean" ? "rgba(62,224,161,0.15)" : "rgba(145,136,170,0.15)",
                                       border: `1px solid ${d.crowdstrike.status === "malicious" ? "rgba(242,84,91,0.4)" : d.crowdstrike.status === "clean" ? "rgba(62,224,161,0.4)" : "rgba(145,136,170,0.3)"}`,
                                     }} title="CrowdStrike Falcon Static Analysis (ML), via Hybrid Analysis — treated as authoritative and supersedes every other engine's verdict when confident (clean/malicious)">
@@ -10596,7 +10598,7 @@ export default function App() {
                                   {d._verdict && (
                                     <span className="rounded-full px-2 py-0.5 font-bold"
                                       title={hasVerdict ? "Overall verdict across all engines" : "Overall verdict: no source flagged or cleared this indicator"} style={{
-                                      color: d._verdict === "Malicious" ? "#f2545b" : d._verdict === "Suspicious" ? "#f5b53a" : d._verdict === "Whitelisted" ? "#3ee0a1" : "#8b84a6",
+                                      color: d._verdict === "Malicious" ? "#f2545b" : d._verdict === "Suspicious" ? "#f5b53a" : d._verdict === "Whitelisted" ? "#3ee0a1" : "#bcb5d8",
                                       backgroundColor: d._verdict === "Malicious" ? "rgba(242,84,91,0.15)" : d._verdict === "Suspicious" ? "rgba(245,181,58,0.15)" : d._verdict === "Whitelisted" ? "rgba(62,224,161,0.15)" : "rgba(145,136,170,0.15)",
                                       border: `1px solid ${d._verdict === "Malicious" ? "rgba(242,84,91,0.4)" : d._verdict === "Suspicious" ? "rgba(245,181,58,0.4)" : d._verdict === "Whitelisted" ? "rgba(62,224,161,0.4)" : "rgba(145,136,170,0.3)"}`,
                                     }}>
@@ -10610,7 +10612,7 @@ export default function App() {
                                         {d.threatfox.link && <>{" · "}<a href={d.threatfox.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a></>}
                                       </span>
                                       {(d.threatfox.aliases?.length > 0 || d.threatfox.families?.length > 1 || d.threatfox.recordCount > 1 || d.threatfox.reference || d.threatfox.malpedia || d.threatfox.reporter) && (
-                                        <span className="rounded-full px-2 py-0.5 text-[9px] flex flex-wrap items-center gap-x-2" style={{ color: "#ff9aa0", backgroundColor: "rgba(242,84,91,0.06)", border: "1px solid rgba(242,84,91,0.2)" }}>
+                                        <span className="rounded-full px-2 py-0.5 text-[11px] flex flex-wrap items-center gap-x-2" style={{ color: "#ff9aa0", backgroundColor: "rgba(242,84,91,0.06)", border: "1px solid rgba(242,84,91,0.2)" }}>
                                           {d.threatfox.families?.length > 1 && <span>{d.threatfox.families.length} different families reported: {d.threatfox.families.join(", ")}</span>}
                                           {d.threatfox.recordCount > 1 && <span>{d.threatfox.recordCount} records</span>}
                                           {d.threatfox.aliases?.length > 0 && <span>aka {d.threatfox.aliases.join(", ")}</span>}
@@ -10631,13 +10633,13 @@ export default function App() {
                                         URLhaus · {d.urlhaus.status === "online" ? "● Online" : "○ Offline"}{d.urlhaus.urls_total ? ` · ${d.urlhaus.urls_total} URLs${d.urlhaus.online != null ? ` (${d.urlhaus.online} online)` : ""}` : ""}{d.urlhaus.tags ? ` · ${d.urlhaus.tags}` : ""}
                                       </span>
                                       {d.urlhaus.blacklists?.length > 0 && (
-                                        <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#ff9aa0", backgroundColor: "rgba(242,84,91,0.06)", border: "1px solid rgba(242,84,91,0.2)" }}
+                                        <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#ff9aa0", backgroundColor: "rgba(242,84,91,0.06)", border: "1px solid rgba(242,84,91,0.2)" }}
                                           title="Host-level reputation lists returned alongside the URLhaus record">
                                           Blocklisted: {d.urlhaus.blacklists.join(" · ")}
                                         </span>
                                       )}
                                       {d.urlhaus.topUrls?.length > 0 && (
-                                        <span className="rounded-md px-2 py-1 text-[9px] flex flex-col gap-0.5" style={{ color: "#b4acd0", backgroundColor: "rgba(150,140,180,0.04)", border: "1px solid rgba(150,140,180,0.15)" }}>
+                                        <span className="rounded-md px-2 py-1 text-[11px] flex flex-col gap-0.5" style={{ color: "#b4acd0", backgroundColor: "rgba(150,140,180,0.04)", border: "1px solid rgba(150,140,180,0.15)" }}>
                                           {d.urlhaus.topUrls.map((u) => (
                                             <span key={u.url} className="break-all" style={{ fontFamily: "monospace" }}>
                                               {u.status === "online" ? "●" : "○"} {defang(u.url)}{u.threat ? ` · ${u.threat.replace(/_/g, " ")}` : ""}{u.added ? ` · ${u.added}` : ""}
@@ -10646,13 +10648,13 @@ export default function App() {
                                         </span>
                                       )}
                                       {d.urlhaus.payloadList?.length > 0 && (
-                                        <span className="rounded-md px-2 py-1 text-[9px] flex flex-col gap-0.5" style={{ color: "#b4acd0", backgroundColor: "rgba(150,140,180,0.04)", border: "1px solid rgba(150,140,180,0.15)" }}>
+                                        <span className="rounded-md px-2 py-1 text-[11px] flex flex-col gap-0.5" style={{ color: "#b4acd0", backgroundColor: "rgba(150,140,180,0.04)", border: "1px solid rgba(150,140,180,0.15)" }}>
                                           {d.urlhaus.payloadList.map((p) => (
                                             <span key={p.sha256} className="flex flex-wrap items-center gap-1">
                                               <span>{p.filename || "payload"}{p.fileType ? ` (${p.fileType})` : ""}{p.signature ? ` · ${p.signature}` : ""}{p.vtPercent != null ? ` · VT ${p.vtPercent}%` : ""}</span>
-                                              <span style={{ fontFamily: "monospace", color: "#8b84a6" }}>{p.sha256.slice(0, 16)}…</span>
+                                              <span style={{ fontFamily: "monospace", color: "#bcb5d8" }}>{p.sha256.slice(0, 16)}…</span>
                                               {isPivotAdded("SHA256", p.sha256)
-                                                ? <><span className="rounded px-1 font-bold" style={{ color: "#160b02", backgroundColor: "#3ee0a1" }}>Added</span><button onClick={() => removePivotIOC("SHA256", p.sha256)} className="rounded px-1 font-bold" style={{ color: "#ff7a70", backgroundColor: "rgba(255,122,112,0.15)", fontSize: 9, lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,122,112,0.3)" }}>Remove</button></>
+                                                ? <><span className="rounded px-1 font-bold" style={{ color: "#160b02", backgroundColor: "#3ee0a1" }}>Added</span><button onClick={() => removePivotIOC("SHA256", p.sha256)} className="rounded px-1 font-bold" style={{ color: "#ff7a70", backgroundColor: "rgba(255,122,112,0.15)", fontSize: 11, lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,122,112,0.3)" }}>Remove</button></>
                                                 : <button onClick={() => addPivotIOC("SHA256", p.sha256, `URLhaus payload of ${arr[i]}`)} className="rounded px-1 font-bold" style={{ color: "#160b02", backgroundColor: "#e86aa6", cursor: "pointer", border: "none" }}>+ Add as IOC</button>}
                                             </span>
                                           ))}
@@ -10662,7 +10664,7 @@ export default function App() {
                                   )}
                                   {hasPhishtank && (
                                     <span className="rounded-full px-2 py-0.5" style={{
-                                      color: d.phishtank.verified && d.phishtank.valid ? "#f2545b" : "#8b84a6",
+                                      color: d.phishtank.verified && d.phishtank.valid ? "#f2545b" : "#bcb5d8",
                                       backgroundColor: d.phishtank.verified && d.phishtank.valid ? "rgba(242,84,91,0.12)" : "rgba(145,136,170,0.12)",
                                       border: `1px solid ${d.phishtank.verified && d.phishtank.valid ? "rgba(242,84,91,0.3)" : "rgba(145,136,170,0.25)"}`,
                                     }} title="PhishTank community-verified phishing report">
@@ -10679,7 +10681,7 @@ export default function App() {
                                   {d.circl && (
                                     <span className="flex flex-col gap-0.5">
                                       <span className="rounded-full px-2 py-0.5" style={{
-                                        color: d.circl.legit ? "#3ee0a1" : "#958fb0",
+                                        color: d.circl.legit ? "#3ee0a1" : "#c8c2e0",
                                         backgroundColor: d.circl.legit ? "rgba(62,224,161,0.10)" : "rgba(150,140,180,0.08)",
                                         border: `1px solid ${d.circl.legit ? "rgba(62,224,161,0.35)" : "rgba(150,140,180,0.25)"}`,
                                       }} title="CIRCL hashlookup — NSRL and community-attested known files">
@@ -10689,7 +10691,7 @@ export default function App() {
                                         {d.circl.source ? ` · Source: ${d.circl.source}` : ""}
                                       </span>
                                       {(d.circl.productName || d.circl.packageVersion || d.circl.maintainer) && (
-                                        <span className="rounded-full px-2 py-0.5 text-[10px]" style={{ color: "#8b84a6", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
+                                        <span className="rounded-full px-2 py-0.5 text-[12px]" style={{ color: "#bcb5d8", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
                                           {[
                                             d.circl.productName,
                                             d.circl.packageVersion,
@@ -10699,7 +10701,7 @@ export default function App() {
                                         </span>
                                       )}
                                       {d.circl.description && (
-                                        <span className="rounded-full px-2 py-0.5 text-[10px]" style={{ color: "#8b84a6", backgroundColor: "rgba(150,140,180,0.04)", border: "1px solid rgba(150,140,180,0.15)" }}>
+                                        <span className="rounded-full px-2 py-0.5 text-[12px]" style={{ color: "#bcb5d8", backgroundColor: "rgba(150,140,180,0.04)", border: "1px solid rgba(150,140,180,0.15)" }}>
                                           {d.circl.description}
                                         </span>
                                       )}
@@ -10721,12 +10723,12 @@ export default function App() {
                                           {" · "}<a href={d.triage.triageUrl} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a>
                                         </span>
                                         {d.triage.tags?.length > 0 && (
-                                          <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8b84a6", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
+                                          <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#bcb5d8", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
                                             {d.triage.tags.join(", ")}
                                           </span>
                                         )}
                                         {d.triage.c2Urls?.length > 0 && (
-                                          <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#ff9aa0", backgroundColor: "rgba(242,84,91,0.08)", border: "1px solid rgba(242,84,91,0.3)" }}>
+                                          <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#ff9aa0", backgroundColor: "rgba(242,84,91,0.08)", border: "1px solid rgba(242,84,91,0.3)" }}>
                                             C2: {d.triage.c2Urls.slice(0, 3).join(", ")}{d.triage.c2Urls.length > 3 ? ` +${d.triage.c2Urls.length - 3} more` : ""}
                                           </span>
                                         )}
@@ -10755,27 +10757,27 @@ export default function App() {
                                           {ha.reportUrl ? <>{" · "}<a href={ha.reportUrl} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a></> : ""}
                                         </span>
                                         {ha.classifTags && (
-                                          <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8b84a6", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
+                                          <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#bcb5d8", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
                                             {ha.classifTags}
                                           </span>
                                         )}
                                         {ha.tags && (
-                                          <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8b84a6", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
+                                          <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#bcb5d8", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
                                             {ha.tags}
                                           </span>
                                         )}
                                         {ha.compromised && ha.compromised.length > 0 && (
-                                          <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#ff9aa0", backgroundColor: "rgba(242,84,91,0.08)", border: "1px solid rgba(242,84,91,0.3)" }}>
+                                          <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#ff9aa0", backgroundColor: "rgba(242,84,91,0.08)", border: "1px solid rgba(242,84,91,0.3)" }}>
                                             C2: {ha.compromised.join(", ")}
                                           </span>
                                         )}
                                         {ha.submitContext && ha.submitContext.length > 0 && (
-                                          <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#fcb045", backgroundColor: "rgba(252,176,69,0.08)", border: "1px solid rgba(252,176,69,0.3)" }}>
+                                          <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#fcb045", backgroundColor: "rgba(252,176,69,0.08)", border: "1px solid rgba(252,176,69,0.3)" }}>
                                             Downloaded from: {ha.submitContext.join(", ")}
                                           </span>
                                         )}
                                         {isHashHA && (ha.netConns > 0 || ha.totalProcs > 0 || ha.totalSigs > 0) && (
-                                          <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8b84a6", backgroundColor: "rgba(150,140,180,0.04)", border: "1px solid rgba(150,140,180,0.15)" }}>
+                                          <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#bcb5d8", backgroundColor: "rgba(150,140,180,0.04)", border: "1px solid rgba(150,140,180,0.15)" }}>
                                             {ha.totalProcs} processes · {ha.netConns} network · {ha.totalSigs} signatures
                                           </span>
                                         )}
@@ -10784,7 +10786,7 @@ export default function App() {
                                   })()}
                                   {isHash && d.kaspersky && (() => {
                                     const z = d.kaspersky.zone;
-                                    const c = z === "red" ? "#f2545b" : z === "yellow" ? "#f5b53a" : z === "green" ? "#3ee0a1" : "#958fb0";
+                                    const c = z === "red" ? "#f2545b" : z === "yellow" ? "#f5b53a" : z === "green" ? "#3ee0a1" : "#c8c2e0";
                                     const bg = z === "red" ? "rgba(242,84,91,0.12)" : z === "yellow" ? "rgba(245,181,58,0.10)" : z === "green" ? "rgba(62,224,161,0.10)" : "rgba(150,140,180,0.08)";
                                     const bd = z === "red" ? "rgba(242,84,91,0.35)" : z === "yellow" ? "rgba(245,181,58,0.35)" : z === "green" ? "rgba(62,224,161,0.35)" : "rgba(150,140,180,0.25)";
                                     const icon = z === "red" ? "●" : z === "yellow" ? "●" : z === "green" ? "●" : "○";
@@ -10827,7 +10829,7 @@ export default function App() {
                                   ), "compiled")}
                                   {fi.signer && kvRow("Signature", (
                                     <>
-                                      <span className="rounded px-1.5 py-0.5" style={pill(fi.signer.status === "Signed" ? "#8b84a6" : "#f5b53a")}
+                                      <span className="rounded px-1.5 py-0.5" style={pill(fi.signer.status === "Signed" ? "#bcb5d8" : "#f5b53a")}
                                         title={`Source: ${fi.signer.source}${fi.signer.issuer ? ` · Issuer: ${fi.signer.issuer}` : ""} — signed malware usually means a stolen or abused certificate`}>
                                         {fi.signer.status}{fi.signer.who ? ` · ${fi.signer.who}` : ""}
                                       </span>
@@ -10837,9 +10839,9 @@ export default function App() {
                                     <>
                                       {copyChip(h.value, `fh-${k}`, { mono: true })}
                                       {h.cat && (isPivotAdded(h.cat, h.value)
-                                        ? <><span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#160b02", backgroundColor: "#3ee0a1", fontSize: 9 }}>Added to {h.cat}</span><button onClick={() => removePivotIOC(h.cat, h.value)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff7a70", backgroundColor: "rgba(255,122,112,0.15)", fontSize: 9, lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,122,112,0.3)" }}>Remove</button></>
+                                        ? <><span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#160b02", backgroundColor: "#3ee0a1", fontSize: 11 }}>Added to {h.cat}</span><button onClick={() => removePivotIOC(h.cat, h.value)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff7a70", backgroundColor: "rgba(255,122,112,0.15)", fontSize: 11, lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,122,112,0.3)" }}>Remove</button></>
                                         : <button onClick={() => addPivotIOC(h.cat, h.value, `${label} of ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold"
-                                            style={{ color: "#160b02", backgroundColor: "#e86aa6", fontSize: 9, cursor: "pointer", border: "none" }}
+                                            style={{ color: "#160b02", backgroundColor: "#e86aa6", fontSize: 11, cursor: "pointer", border: "none" }}
                                             title="Pivot: hunt for other samples sharing this value">+ Add as IOC</button>)}
                                     </>
                                   ), k))}
@@ -10864,7 +10866,7 @@ export default function App() {
                                   {(sigma.length > 0 || vt.sigmaHits > 0) && kvRow("Sigma", sigma.length
                                     ? sigma.map((g) => <span key={g.title} className="rounded px-1.5 py-0.5" style={pill(g.level === "critical" || g.level === "high" ? "#ff9f43" : "#b9a5ff")}>{g.title}{g.level ? ` · ${g.level}` : ""}</span>)
                                     : <span className="rounded px-1.5 py-0.5" style={pill("#b9a5ff")}>{vt.sigmaHits} rule match{vt.sigmaHits !== 1 ? "es" : ""}</span>, "sigma")}
-                                  {clam.length > 0 && kvRow("ClamAV", clam.map((c) => <span key={c} className="rounded px-1.5 py-0.5" style={pill("#958fb0")}>{c}</span>), "clam")}
+                                  {clam.length > 0 && kvRow("ClamAV", clam.map((c) => <span key={c} className="rounded px-1.5 py-0.5" style={pill("#c8c2e0")}>{c}</span>), "clam")}
                                   {ids.length > 0 && kvRow("IDS / network", ids.map((x) => <span key={x.msg} className="rounded px-1.5 py-0.5" style={pill("#f5b53a")}>{x.msg}</span>), "ids")}
                                   {sandbox.length > 0 && kvRow("Sandbox verdicts", sandbox.map((x) => (
                                     <span key={x.sandbox} className="rounded px-1.5 py-0.5" style={pill(x.category === "malicious" ? "#f2545b" : "#f5b53a")}>
@@ -10872,7 +10874,7 @@ export default function App() {
                                     </span>
                                   )), "sandbox")}
                                   {sigs.length > 0 && kvRow("Behaviors", sigs.map((g) => (
-                                    <span key={g.name} className="rounded px-1.5 py-0.5" style={pill((g.score || 0) >= 8 ? "#ff9f43" : (g.score || 0) >= 5 ? "#f5b53a" : "#958fb0")}>
+                                    <span key={g.name} className="rounded px-1.5 py-0.5" style={pill((g.score || 0) >= 8 ? "#ff9f43" : (g.score || 0) >= 5 ? "#f5b53a" : "#c8c2e0")}>
                                       {g.name}{g.score != null ? ` · ${g.score}/10` : ""}
                                     </span>
                                   )), "sigs")}
@@ -10894,7 +10896,7 @@ export default function App() {
                             {!isCondensed && hasRockyRaccoon && secRow("Process Intel", (
                               <>
                                   <span className="rounded-full px-2 py-0.5" style={{
-                                    color: d.rockyRaccoon.riskLevel && /high|critical/i.test(d.rockyRaccoon.riskLevel) ? "#f5b53a" : "#8b84a6",
+                                    color: d.rockyRaccoon.riskLevel && /high|critical/i.test(d.rockyRaccoon.riskLevel) ? "#f5b53a" : "#bcb5d8",
                                     backgroundColor: d.rockyRaccoon.riskLevel && /high|critical/i.test(d.rockyRaccoon.riskLevel) ? "rgba(245,181,58,0.10)" : "rgba(150,140,180,0.08)",
                                     border: `1px solid ${d.rockyRaccoon.riskLevel && /high|critical/i.test(d.rockyRaccoon.riskLevel) ? "rgba(245,181,58,0.35)" : "rgba(150,140,180,0.25)"}`,
                                   }} title="Rocky Raccoon — Windows process behavioral baseline (EchoTrail dataset). Context/investigative only, does not drive the verdict.">
@@ -10902,34 +10904,34 @@ export default function App() {
                                     {d.rockyRaccoon.isLOLBin ? " · LOLBin" : ""}
                                   </span>
                                   {d.rockyRaccoon.expectedParent && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8b84a6", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
+                                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#bcb5d8", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
                                       Expected parent: {d.rockyRaccoon.expectedParent}
                                     </span>
                                   )}
                                   {d.rockyRaccoon.suspiciousIndicators.length > 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#f5b53a", backgroundColor: "rgba(245,181,58,0.08)", border: "1px solid rgba(245,181,58,0.3)" }}>
+                                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#f5b53a", backgroundColor: "rgba(245,181,58,0.08)", border: "1px solid rgba(245,181,58,0.3)" }}>
                                       {d.rockyRaccoon.suspiciousIndicators.join(" · ")}
                                     </span>
                                   )}
                                   {d.rockyRaccoon.mitreAttacks.length > 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#ff9f43", backgroundColor: "rgba(255,159,67,0.08)", border: "1px solid rgba(255,159,67,0.25)" }}>
+                                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#ff9f43", backgroundColor: "rgba(255,159,67,0.08)", border: "1px solid rgba(255,159,67,0.25)" }}>
                                       MITRE: {d.rockyRaccoon.mitreAttacks.join(", ")}
                                     </span>
                                   )}
                                   {d.rockyRaccoon.executionsTotal != null && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8b84a6", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}
+                                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#bcb5d8", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}
                                       title="How often this process name appears in the EchoTrail telemetry — a very low count is itself unusual for a system binary">
                                       Seen in {d.rockyRaccoon.executionsTotal.toLocaleString()} observed executions{d.rockyRaccoon.confidence ? ` · confidence ${d.rockyRaccoon.confidence}` : ""}
                                     </span>
                                   )}
                                   {d.rockyRaccoon.abusePatterns?.length > 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#ff9f43", backgroundColor: "rgba(255,159,67,0.08)", border: "1px solid rgba(255,159,67,0.25)" }}
+                                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#ff9f43", backgroundColor: "rgba(255,159,67,0.08)", border: "1px solid rgba(255,159,67,0.25)" }}
                                       title="Known abuse patterns for this binary (EchoTrail)">
                                       Known abuse: {d.rockyRaccoon.abusePatterns.join(" · ")}
                                     </span>
                                   )}
                                   {d.rockyRaccoon.description && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8b84a6", backgroundColor: "rgba(150,140,180,0.04)", border: "1px solid rgba(150,140,180,0.15)" }}>
+                                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#bcb5d8", backgroundColor: "rgba(150,140,180,0.04)", border: "1px solid rgba(150,140,180,0.15)" }}>
                                       {d.rockyRaccoon.description}
                                     </span>
                                   )}
@@ -10948,7 +10950,7 @@ export default function App() {
                                     </span>
                                   )}
                                   {hasVT && d.virustotal.noNotableData && (
-                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#8b84a6", backgroundColor: "rgba(145,136,170,0.08)", border: "1px solid rgba(145,136,170,0.25)" }}
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#bcb5d8", backgroundColor: "rgba(145,136,170,0.08)", border: "1px solid rgba(145,136,170,0.25)" }}
                                       title="VirusTotal has a record for this indicator but returned no detections, harmless votes, categorization, or pivots">
                                       ○ VirusTotal · Unknown
                                     </span>
@@ -10960,23 +10962,23 @@ export default function App() {
                                     </span>
                                   )}
                                   {hasVT && cat === "DOMAIN" && d.virustotal.categories?.length > 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8b84a6", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
+                                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#bcb5d8", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
                                       {d.virustotal.categories.join(", ")}
                                     </span>
                                   )}
                                   {hasVT && cat === "DOMAIN" && d.virustotal.popularityRank && d.virustotal.popularityRank.rank > 100000 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#3ee0a1", backgroundColor: "rgba(62,224,161,0.06)", border: "1px solid rgba(62,224,161,0.25)" }}
+                                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#3ee0a1", backgroundColor: "rgba(62,224,161,0.06)", border: "1px solid rgba(62,224,161,0.25)" }}
                                       title="Lower rank = more popular — a counter-signal against this being a throwaway malicious domain">
                                       {d.virustotal.popularityRank.source} rank #{d.virustotal.popularityRank.rank.toLocaleString()}
                                     </span>
                                   )}
                                   {hasVT && cat === "DOMAIN" && d.virustotal.subdomains?.length > 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#b9a5ff", backgroundColor: "rgba(185,165,255,0.08)", border: "1px solid rgba(185,165,255,0.3)" }}>
+                                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#b9a5ff", backgroundColor: "rgba(185,165,255,0.08)", border: "1px solid rgba(185,165,255,0.3)" }}>
                                       {d.virustotal.subdomains.length} subdomain{d.virustotal.subdomains.length !== 1 ? "s" : ""}
                                     </span>
                                   )}
                                   {hasVT && ["IPV4","IPV6"].includes(cat) && d.virustotal.tags?.length > 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8b84a6", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
+                                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#bcb5d8", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
                                       {d.virustotal.tags.join(", ")}
                                     </span>
                                   )}
@@ -10989,24 +10991,24 @@ export default function App() {
                                     </span>
                                   )}
                                   {hasVT && !["DOMAIN","IPV4","IPV6"].includes(cat) && d.virustotal.capabilities?.length > 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#8b84a6", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
+                                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#bcb5d8", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
                                       {d.virustotal.capabilities.join(", ")}
                                     </span>
                                   )}
                                   {hasVT && ["DOMAIN","IPV4","IPV6"].includes(cat) && d.virustotal.engineFlags?.length > 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#ff9aa0", backgroundColor: "rgba(242,84,91,0.06)", border: "1px solid rgba(242,84,91,0.2)" }}
+                                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#ff9aa0", backgroundColor: "rgba(242,84,91,0.06)", border: "1px solid rgba(242,84,91,0.2)" }}
                                       title="Which VirusTotal engines flagged it, and the label each one gave it (phishing vs malware vs C2…)">
                                       {d.virustotal.engineFlags.slice(0, 6).map((f) => `${f.engine}: ${f.result || f.category}`).join(" · ")}{d.virustotal.engineFlags.length > 6 ? ` +${d.virustotal.engineFlags.length - 6} more` : ""}
                                     </span>
                                   )}
                                   {hasVT && d.virustotal.votes && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: d.virustotal.votes.malicious > d.virustotal.votes.harmless ? "#f5b53a" : "#8b84a6", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}
+                                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: d.virustotal.votes.malicious > d.virustotal.votes.harmless ? "#f5b53a" : "#bcb5d8", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}
                                       title="VirusTotal community votes">
                                       Community: {d.virustotal.votes.harmless} harmless / {d.virustotal.votes.malicious} malicious
                                     </span>
                                   )}
                                   {(hasVT ? (d.virustotal.communicatingFiles?.length > 0 || d.virustotal.downloadedFiles?.length > 0) && !d.virustotal.linkedFiles : false) && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{ color: "#cdb8ff", backgroundColor: "rgba(205,184,255,0.10)", border: "1px solid rgba(205,184,255,0.3)" }}
+                                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ color: "#cdb8ff", backgroundColor: "rgba(205,184,255,0.10)", border: "1px solid rgba(205,184,255,0.3)" }}
                                       title="Pivotable in ThreatGraph">
                                       {d.virustotal.downloadedFiles?.length > 0 ? `${d.virustotal.downloadedFiles.length} downloaded file${d.virustotal.downloadedFiles.length !== 1 ? "s" : ""}` : ""}
                                       {d.virustotal.downloadedFiles?.length > 0 && d.virustotal.communicatingFiles?.length > 0 ? " · " : ""}
@@ -11014,8 +11016,8 @@ export default function App() {
                                     </span>
                                   )}
                                   {d.virustotal?.reputation != null && d.virustotal.reputation !== 0 && (
-                                    <span className="rounded-full px-2 py-0.5 text-[9px]" style={{
-                                      color: d.virustotal.reputation < 0 ? "#f5b53a" : "#8b84a6",
+                                    <span className="rounded-full px-2 py-0.5 text-[11px]" style={{
+                                      color: d.virustotal.reputation < 0 ? "#f5b53a" : "#bcb5d8",
                                       backgroundColor: d.virustotal.reputation < 0 ? "rgba(245,181,58,0.10)" : "rgba(150,140,180,0.06)",
                                       border: `1px solid ${d.virustotal.reputation < 0 ? "rgba(245,181,58,0.35)" : "rgba(150,140,180,0.2)"}`,
                                     }} title="VirusTotal community reputation score — negative means the community has flagged it more than voted for it">
@@ -11037,7 +11039,7 @@ export default function App() {
                                         AbuseIPDB · {d.abuseipdb.score}% Confidence · {d.abuseipdb.reports} Report{d.abuseipdb.reports !== 1 ? "s" : ""}{d.abuseipdb.distinctReporters != null && d.abuseipdb.reports > 0 ? ` from ${d.abuseipdb.distinctReporters} distinct reporter${d.abuseipdb.distinctReporters !== 1 ? "s" : ""}` : ""}{d.abuseipdb.categories ? ` · ${d.abuseipdb.categories}` : ""}{d.abuseipdb.lastReported ? ` · Last: ${d.abuseipdb.lastReported}` : ""}{d.abuseipdb.isWhitelisted ? " · whitelisted by AbuseIPDB" : ""}
                                       </span>
                                       {d.abuseipdb.recentReports?.length > 0 && (
-                                        <span className="rounded-md px-2 py-1 text-[9px] flex flex-col gap-0.5" style={{ color: "#b4acd0", backgroundColor: "rgba(150,140,180,0.04)", border: "1px solid rgba(150,140,180,0.15)" }}
+                                        <span className="rounded-md px-2 py-1 text-[11px] flex flex-col gap-0.5" style={{ color: "#b4acd0", backgroundColor: "rgba(150,140,180,0.04)", border: "1px solid rgba(150,140,180,0.15)" }}
                                           title="Most recent community reports — free text written by reporters">
                                           {d.abuseipdb.recentReports.map((r, ri) => (
                                             <span key={ri}>{r.date || ""}{r.cc ? ` (${r.cc})` : ""} — {defangProse(r.comment)}</span>
@@ -11059,7 +11061,7 @@ export default function App() {
                                     const z = d.kaspersky.zone;
                                     // For domain/URL/IP, green means "unclassified", not trusted → show as Unknown.
                                     const greenIsUnknown = z === "green";
-                                    const c = z === "red" ? "#f2545b" : z === "yellow" ? "#f5b53a" : "#8b84a6";
+                                    const c = z === "red" ? "#f2545b" : z === "yellow" ? "#f5b53a" : "#bcb5d8";
                                     const bg = z === "red" ? "rgba(242,84,91,0.12)" : z === "yellow" ? "rgba(245,181,58,0.10)" : "rgba(150,140,180,0.08)";
                                     const bd = z === "red" ? "rgba(242,84,91,0.35)" : z === "yellow" ? "rgba(245,181,58,0.35)" : "rgba(150,140,180,0.25)";
                                     const icon = z === "red" ? "●" : z === "yellow" ? "●" : "○";
@@ -11089,7 +11091,7 @@ export default function App() {
                                 <div className="w-full rounded-md p-2" style={accent("#cdb8ff")}>
                                   {groups.map(([k, title]) => (
                                     <div key={k} className="mb-1">
-                                      <div className="text-[9px] uppercase tracking-wider font-bold mb-1" style={{ color: "#6f6890" }}>
+                                      <div className="text-[11px] uppercase tracking-wider font-bold mb-1" style={{ color: "#aaa3c8" }}>
                                         {title} — {lf[k].total} file{lf[k].total !== 1 ? "s" : ""}{lf[k].total > lf[k].items.length ? ` (showing ${lf[k].items.length})` : ""}
                                       </div>
                                       {lf[k].items.map((f) => {
@@ -11100,12 +11102,12 @@ export default function App() {
                                             <span className="rounded px-1.5 py-0.5 font-bold" style={pill(col)} title="VirusTotal detections (engines flagging / engines that ran)">{flagged}/{f.total}</span>
                                             <b style={{ color: "#f4f1fb" }}>{f.name || "unnamed file"}</b>
                                             {f.label && <span className="rounded px-1.5 py-0.5" style={pill("#cdb8ff")}>{f.label}</span>}
-                                            {(f.type || f.size || f.firstSeen) && <span style={{ color: "#6f6890" }}>{[f.type, f.size, f.firstSeen ? `first seen ${fmtDate(f.firstSeen)}` : null].filter(Boolean).join(" · ")}</span>}
-                                            {copyChip(f.sha256, `lf-${f.sha256}`, { mono: true, color: "#958fb0" })}
+                                            {(f.type || f.size || f.firstSeen) && <span style={{ color: "#aaa3c8" }}>{[f.type, f.size, f.firstSeen ? `first seen ${fmtDate(f.firstSeen)}` : null].filter(Boolean).join(" · ")}</span>}
+                                            {copyChip(f.sha256, `lf-${f.sha256}`, { mono: true, color: "#c8c2e0" })}
                                             {isPivotAdded("SHA256", f.sha256)
-                                              ? <><span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#160b02", backgroundColor: "#3ee0a1", fontSize: 9 }}>Added to SHA256</span><button onClick={() => removePivotIOC("SHA256", f.sha256)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff7a70", backgroundColor: "rgba(255,122,112,0.15)", fontSize: 9, lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,122,112,0.3)" }}>Remove</button></>
+                                              ? <><span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#160b02", backgroundColor: "#3ee0a1", fontSize: 11 }}>Added to SHA256</span><button onClick={() => removePivotIOC("SHA256", f.sha256)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff7a70", backgroundColor: "rgba(255,122,112,0.15)", fontSize: 11, lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,122,112,0.3)" }}>Remove</button></>
                                               : <button onClick={() => addPivotIOC("SHA256", f.sha256, `VT ${k} file of ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold"
-                                                  style={{ color: "#160b02", backgroundColor: "#e86aa6", fontSize: 9, cursor: "pointer", border: "none" }}>+ Add as IOC</button>}
+                                                  style={{ color: "#160b02", backgroundColor: "#e86aa6", fontSize: 11, cursor: "pointer", border: "none" }}>+ Add as IOC</button>}
                                             {extLink(`https://www.virustotal.com/gui/file/${f.sha256}`, "VT", "#e86aa6")}
                                           </div>
                                         );
@@ -11131,7 +11133,7 @@ export default function App() {
                                   )}
                                   {o.pulseList?.length > 0 && (
                                     <div className="flex flex-col gap-1">
-                                      <span className="text-[9px] uppercase tracking-wider font-bold" style={{ color: "#6f6890" }}>
+                                      <span className="text-[11px] uppercase tracking-wider font-bold" style={{ color: "#aaa3c8" }}>
                                         {o.pulses} report{o.pulses !== 1 ? "s" : ""} reference this indicator{o.parentDomain ? ` (via parent domain ${o.parentDomain})` : ""} — newest {Math.min(o.pulseList.length, 4)} shown
                                       </span>
                                       {o.pulseList.slice(0, 4).map((p) => (
@@ -11140,7 +11142,7 @@ export default function App() {
                                             {p.id
                                               ? <a href={`https://otx.alienvault.com/pulse/${p.id}`} target="_blank" rel="noreferrer noopener" className="font-bold" style={{ color: "#f39bc6", textDecoration: "underline" }}>{p.name}</a>
                                               : <b style={{ color: "#f39bc6" }}>{p.name}</b>}
-                                            <span style={{ color: "#6f6890" }}>{[p.author, p.created ? fmtDate(p.created) : null].filter(Boolean).join(" · ")}</span>
+                                            <span style={{ color: "#aaa3c8" }}>{[p.author, p.created ? fmtDate(p.created) : null].filter(Boolean).join(" · ")}</span>
                                             {p.ref && <a href={p.ref} target="_blank" rel="noreferrer noopener" style={{ color: "#e86aa6", textDecoration: "underline" }}>{hostOfUrl(p.ref)} ↗</a>}
                                           </div>
                                           {(p.adversary || p.families.length > 0 || p.attack.length > 0 || p.industries.length > 0) && (
@@ -11190,15 +11192,15 @@ export default function App() {
                                   {np.asn && kvRow("ASN", (
                                     <>
                                       <span className="rounded px-1.5 py-0.5 font-bold" style={pill("#b9a5ff")} title={`Source: ${np.asnSrc}`}>{np.asn}{np.asnName ? ` · ${np.asnName}` : ""}</span>
-                                      {np.type && <span className="rounded px-1.5 py-0.5" style={pill(np.type === "hosting" ? "#f5b53a" : "#958fb0")} title="Network type per IPLocate">{np.type}</span>}
+                                      {np.type && <span className="rounded px-1.5 py-0.5" style={pill(np.type === "hosting" ? "#f5b53a" : "#c8c2e0")} title="Network type per IPLocate">{np.type}</span>}
                                     </>
                                   ), "asn")}
-                                  {np.owner && kvRow("Owner", <span>{np.owner}{g.companyType ? <span style={{ color: "#6f6890" }}> · {g.companyType}</span> : null}</span>, "owner")}
+                                  {np.owner && kvRow("Owner", <span>{np.owner}{g.companyType ? <span style={{ color: "#aaa3c8" }}> · {g.companyType}</span> : null}</span>, "owner")}
                                   {np.route && kvRow("Network", (
                                     <>
                                       {copyChip(np.route, "route", { mono: true, color: "#b9a5ff" })}
-                                      {np.netname && <span style={{ color: "#8b84a6" }}>netname {np.netname}</span>}
-                                      {np.rir && <span style={{ color: "#6f6890" }}>· {np.rir}</span>}
+                                      {np.netname && <span style={{ color: "#bcb5d8" }}>netname {np.netname}</span>}
+                                      {np.rir && <span style={{ color: "#aaa3c8" }}>· {np.rir}</span>}
                                     </>
                                   ), "route")}
                                   {np.hostingProvider && kvRow("Hosting", <span className="rounded px-1.5 py-0.5" style={pill("#f5b53a")}>{np.hostingProvider}</span>, "host")}
@@ -11214,7 +11216,7 @@ export default function App() {
                                   {np.hostnames.length > 0 && kvRow("Reverse DNS", np.hostnames.map((h) => (
                                     <span key={`rdns-${h}`} className="inline-flex items-center gap-1">
                                       {copyChip(h, `rdns-${h}`, { mono: true })}
-                                      {np.ptrLive.includes(String(h).toLowerCase()) && <span className="rounded px-1 py-0.5 text-[9px] font-bold" style={pill("#5fd4ff")} title={`Live PTR record via ${d.ptr?.resolver || "DNS-over-HTTPS"}. Set by the IP's owner, so context only.`}>PTR</span>}
+                                      {np.ptrLive.includes(String(h).toLowerCase()) && <span className="rounded px-1 py-0.5 text-[11px] font-bold" style={pill("#5fd4ff")} title={`Live PTR record via ${d.ptr?.resolver || "DNS-over-HTTPS"}. Set by the IP's owner, so context only.`}>PTR</span>}
                                     </span>
                                   )), "rdns")}
                                   {np.abuse && kvRow("Abuse contact", (
@@ -11228,7 +11230,7 @@ export default function App() {
                                         title="Copies a ready-to-send takedown request addressed to the network's abuse contact">
                                         <Copy size={11} /> {copied === `${eKey}::cp::ip-abuse-report` ? "Copied!" : "Copy abuse report"}
                                       </button>
-                                      <span style={{ color: "#6a6385" }}>via {np.abuse.source}</span>
+                                      <span style={{ color: "#a29bc2" }}>via {np.abuse.source}</span>
                                     </>
                                   ), "abuse")}
                                 </div>
@@ -11246,14 +11248,14 @@ export default function App() {
                                     }}>
                                       Urlscan.io · {d.urlscan.isPrimaryTarget ? `${d.urlscan.primaryScans} Scan${d.urlscan.primaryScans !== 1 ? "s" : ""}` : `${d.urlscan.scans} apex scan${d.urlscan.scans !== 1 ? "s" : ""}`}{d.urlscan.isPrimaryTarget && d.urlscan.malicious > 0 ? ` · ● ${d.urlscan.malicious} Malicious` : ""}{d.urlscan.isPrimaryTarget && d.urlscan.title ? ` · "${d.urlscan.title}"` : ""}{d.urlscan.isPrimaryTarget && d.urlscan.country && d.urlscan.flag ? ` · ${d.urlscan.flag}` : ""}
                                       {!d.urlscan.isPrimaryTarget && (
-                                        <span className="text-[9px] ml-1" style={{ color: "#f5b53a" }} title="No urlscan scan targets this exact host. It only appears as a contacted domain / redirect hop inside scans of other URLs, so no host-specific verdict, title, or screenshot is shown.">host only seen as contacted domain — no direct scan</span>
+                                        <span className="text-[11px] ml-1" style={{ color: "#f5b53a" }} title="No urlscan scan targets this exact host. It only appears as a contacted domain / redirect hop inside scans of other URLs, so no host-specific verdict, title, or screenshot is shown.">host only seen as contacted domain — no direct scan</span>
                                       )}
                                       {d.urlscan.link && <>{" · "}<a href={d.urlscan.link} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "inherit" }}>View</a></>}
                                       {" · "}<a href={d.urlscan.hostSearchLink || (isIP ? `https://urlscan.io/ip/${encodeURIComponent(arr[i])}` : `https://urlscan.io/domain/${encodeURIComponent(arr[i].replace(/^https?:\/\//i, "").split("/")[0])}`)} target="_blank" rel="noreferrer noopener" style={{ textDecoration: "underline", color: "#f5b53a" }}>History</a>
                                       {d.urlscan.isPrimaryTarget && d.urlscan.screenshot && (
                                         <span className="relative inline-block ml-1" style={{ cursor: "pointer" }}>
                                           <a href={d.urlscan.screenshot} target="_blank" rel="noreferrer noopener"
-                                            className="peer text-[10px] px-1 py-0.5 rounded inline-block"
+                                            className="peer text-[12px] px-1 py-0.5 rounded inline-block"
                                             style={{ color: "#cdb8ff", border: "1px solid rgba(205,184,255,0.3)", backgroundColor: "rgba(205,184,255,0.08)", textDecoration: "none" }}>
                                             Screen
                                           </a>
@@ -11262,7 +11264,7 @@ export default function App() {
                                             <img src={d.urlscan.screenshot} alt="Screenshot" loading="lazy"
                                               style={{ width: "100%", borderRadius: "6px", display: "block" }}
                                               onError={(e) => { e.target.parentElement.style.display = "none"; }} />
-                                            <p className="text-[9px] text-center mt-1" style={{ color: "#6a6385" }}>{arr[i]}</p>
+                                            <p className="text-[11px] text-center mt-1" style={{ color: "#a29bc2" }}>{arr[i]}</p>
                                           </span>
                                         </span>
                                       )}
@@ -11303,7 +11305,7 @@ export default function App() {
                                   })()}
                                   {hasSansIsc && (
                                     <span className="rounded-full px-2 py-0.5" style={{
-                                      color: d.sansIsc.attacks >= 5 ? "#f5b53a" : "#8b84a6",
+                                      color: d.sansIsc.attacks >= 5 ? "#f5b53a" : "#bcb5d8",
                                       backgroundColor: d.sansIsc.attacks >= 5 ? "rgba(245,181,58,0.10)" : "rgba(145,136,170,0.08)",
                                       border: `1px solid ${d.sansIsc.attacks >= 5 ? "rgba(245,181,58,0.35)" : "rgba(145,136,170,0.25)"}`,
                                     }} title="SANS ISC / DShield — crowd-sourced firewall log submissions">
@@ -11321,7 +11323,7 @@ export default function App() {
                                       ) : (
                                         <button onClick={() => addPivotIOC(ipCat(d.urlscan.servingIP), d.urlscan.servingIP, `Serving IP of ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#160b02", backgroundColor: "#e86aa6", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>+ Add as IOC</button>
                                       )}
-                                      <button onClick={() => dismissPivot(`ip::${d.urlscan.servingIP}::${arr[i]}`)} className="rounded p-0.5" style={{ color: "#6a6385", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
+                                      <button onClick={() => dismissPivot(`ip::${d.urlscan.servingIP}::${arr[i]}`)} className="rounded p-0.5" style={{ color: "#a29bc2", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
                                     </span>
                                 )}
                               </>
@@ -11346,9 +11348,9 @@ export default function App() {
                                   {prim && (u.httpStatus || u.mimeType || u.server || u.language) && kvRow("Page", (
                                     <>
                                       {u.httpStatus && <span className="rounded px-1.5 py-0.5" style={pill(String(u.httpStatus).startsWith("2") ? "#3ee0a1" : "#f5b53a")}>HTTP {u.httpStatus}</span>}
-                                      {u.mimeType && <span className="rounded px-1.5 py-0.5" style={pill("#958fb0")}>{u.mimeType}</span>}
-                                      {u.server && <span className="rounded px-1.5 py-0.5" style={pill("#958fb0")}>server: {u.server}</span>}
-                                      {u.language && <span style={{ color: "#6f6890" }}>lang {u.language}</span>}
+                                      {u.mimeType && <span className="rounded px-1.5 py-0.5" style={pill("#c8c2e0")}>{u.mimeType}</span>}
+                                      {u.server && <span className="rounded px-1.5 py-0.5" style={pill("#c8c2e0")}>server: {u.server}</span>}
+                                      {u.language && <span style={{ color: "#aaa3c8" }}>lang {u.language}</span>}
                                     </>
                                   ), "page")}
                                   {prim && u.tech?.length > 0 && kvRow("Tech stack", u.tech.map((t) => (
@@ -11356,36 +11358,36 @@ export default function App() {
                                   )), "tech")}
                                   {certIssuer && kvRow("Certificate", (
                                     <>
-                                      <span className="rounded px-1.5 py-0.5" style={pill(freshCert ? "#ff9f43" : "#958fb0")}
+                                      <span className="rounded px-1.5 py-0.5" style={pill(freshCert ? "#ff9f43" : "#c8c2e0")}
                                         title="A very fresh certificate on a brand-like or newly registered domain is a phishing indicator">
                                         {certIssuer}
                                       </span>
-                                      {certFrom && <span style={{ color: "#8b84a6" }}>issued {fmtDate(certFrom)}{certAge != null ? ` (${smartAge(certAge)} ago)` : ""}</span>}
-                                      {certTo && <span style={{ color: "#6f6890" }}>· expires {fmtDate(certTo)}</span>}
-                                      {prim && u.tlsValidDays != null && <span style={{ color: "#6f6890" }}>· {u.tlsValidDays}-day lifetime</span>}
+                                      {certFrom && <span style={{ color: "#bcb5d8" }}>issued {fmtDate(certFrom)}{certAge != null ? ` (${smartAge(certAge)} ago)` : ""}</span>}
+                                      {certTo && <span style={{ color: "#aaa3c8" }}>· expires {fmtDate(certTo)}</span>}
+                                      {prim && u.tlsValidDays != null && <span style={{ color: "#aaa3c8" }}>· {u.tlsValidDays}-day lifetime</span>}
                                       {freshCert && <span className="font-bold" style={{ color: "#ff9f43" }}>· ● issued &lt;30 days ago</span>}
                                     </>
                                   ), "cert")}
                                   {sans.length > 0 && kvRow("Cert covers", (
                                     <>
-                                      {sans.slice(0, 6).map((n) => <span key={n} className="rounded px-1.5 py-0.5" style={{ ...pill("#958fb0"), fontFamily: "monospace" }}>{n}</span>)}
-                                      {sans.length > 6 && <span style={{ color: "#6f6890" }}>+{sans.length - 6} more</span>}
+                                      {sans.slice(0, 6).map((n) => <span key={n} className="rounded px-1.5 py-0.5" style={{ ...pill("#c8c2e0"), fontFamily: "monospace" }}>{n}</span>)}
+                                      {sans.length > 6 && <span style={{ color: "#aaa3c8" }}>+{sans.length - 6} more</span>}
                                     </>
                                   ), "san")}
                                   {prim && u.redirectChain?.length > 1 && kvRow("Redirects", (
-                                    <span className="break-all text-[10px]" style={{ fontFamily: "monospace", color: "#f5b53a" }}>{u.redirectChain.map((x) => defang(x)).join("  →  ")}</span>
+                                    <span className="break-all text-[12px]" style={{ fontFamily: "monospace", color: "#f5b53a" }}>{u.redirectChain.map((x) => defang(x)).join("  →  ")}</span>
                                   ), "redir")}
                                   {prim && (u.engineVerdict || u.communityVotes) && kvRow("Scan verdicts", (
                                     <>
                                       {u.engineVerdict && <span className="rounded px-1.5 py-0.5" style={pill(u.engineVerdict.malicious > 0 ? "#f2545b" : "#3ee0a1")}>urlscan engines: {u.engineVerdict.malicious}/{u.engineVerdict.total} malicious</span>}
-                                      {u.communityVotes && <span className="rounded px-1.5 py-0.5" style={pill(u.communityVotes.malicious > u.communityVotes.benign ? "#f2545b" : "#958fb0")}>community: {u.communityVotes.malicious} malicious / {u.communityVotes.benign} benign</span>}
+                                      {u.communityVotes && <span className="rounded px-1.5 py-0.5" style={pill(u.communityVotes.malicious > u.communityVotes.benign ? "#f2545b" : "#c8c2e0")}>community: {u.communityVotes.malicious} malicious / {u.communityVotes.benign} benign</span>}
                                     </>
                                   ), "verd")}
                                   {prim && (u.ptr || u.scanStats || (u.umbrellaRank != null && u.umbrellaRank > 100000)) && kvRow("Observed", (
                                     <>
-                                      {u.ptr && <span style={{ color: "#8b84a6" }}>rDNS <span style={{ fontFamily: "monospace" }}>{u.ptr}</span></span>}
-                                      {u.scanStats && <span style={{ color: "#6f6890" }}>· {u.scanStats.requests ?? "?"} requests · {u.scanStats.uniqIPs ?? "?"} IPs · {u.scanStats.uniqCountries ?? "?"} countries</span>}
-                                      {u.umbrellaRank != null && u.umbrellaRank > 100000 && <span className="rounded px-1.5 py-0.5" style={pill("#958fb0")} title="Cisco Umbrella 1M popularity rank — lower is more popular">Umbrella #{u.umbrellaRank.toLocaleString()}</span>}
+                                      {u.ptr && <span style={{ color: "#bcb5d8" }}>rDNS <span style={{ fontFamily: "monospace" }}>{u.ptr}</span></span>}
+                                      {u.scanStats && <span style={{ color: "#aaa3c8" }}>· {u.scanStats.requests ?? "?"} requests · {u.scanStats.uniqIPs ?? "?"} IPs · {u.scanStats.uniqCountries ?? "?"} countries</span>}
+                                      {u.umbrellaRank != null && u.umbrellaRank > 100000 && <span className="rounded px-1.5 py-0.5" style={pill("#c8c2e0")} title="Cisco Umbrella 1M popularity rank — lower is more popular">Umbrella #{u.umbrellaRank.toLocaleString()}</span>}
                                     </>
                                   ), "obs")}
                                 </div>
@@ -11399,14 +11401,14 @@ export default function App() {
                               const spf = dn.txt.find((t) => /^v=spf1/i.test(t));
                               const other = dn.txt.filter((t) => t !== spf);
                               return secRow("Mail & DNS Records", (
-                                <div className="w-full rounded-md p-2" style={accent("#958fb0")}>
+                                <div className="w-full rounded-md p-2" style={accent("#c8c2e0")}>
                                   {kvRow("Mail (MX)", dn.mx.length
-                                    ? dn.mx.map((m) => <span key={m.host} className="rounded px-1.5 py-0.5" style={{ ...pill("#958fb0"), fontFamily: "monospace" }}>{m.priority != null ? `${m.priority} ` : ""}{m.host}</span>)
-                                    : <span style={{ color: "#8b84a6" }}>No MX records — this domain is not set up to receive mail</span>, "mx")}
+                                    ? dn.mx.map((m) => <span key={m.host} className="rounded px-1.5 py-0.5" style={{ ...pill("#c8c2e0"), fontFamily: "monospace" }}>{m.priority != null ? `${m.priority} ` : ""}{m.host}</span>)
+                                    : <span style={{ color: "#bcb5d8" }}>No MX records — this domain is not set up to receive mail</span>, "mx")}
                                   {kvRow("SPF", spf
-                                    ? <span className="text-[10px] break-all" style={{ fontFamily: "monospace", color: "#ddd7f1" }}>{spf}</span>
-                                    : <span style={{ color: "#8b84a6" }}>No SPF record</span>, "spf")}
-                                  {other.length > 0 && kvRow("Other TXT", <span className="text-[10px]" style={{ color: "#8b84a6" }}>{other.length} record{other.length !== 1 ? "s" : ""}: {other.slice(0, 3).map((t) => t.slice(0, 48)).join(" · ")}{other.length > 3 ? " …" : ""}</span>, "txt")}
+                                    ? <span className="text-[12px] break-all" style={{ fontFamily: "monospace", color: "#ddd7f1" }}>{spf}</span>
+                                    : <span style={{ color: "#bcb5d8" }}>No SPF record</span>, "spf")}
+                                  {other.length > 0 && kvRow("Other TXT", <span className="text-[12px]" style={{ color: "#bcb5d8" }}>{other.length} record{other.length !== 1 ? "s" : ""}: {other.slice(0, 3).map((t) => t.slice(0, 48)).join(" · ")}{other.length > 3 ? " …" : ""}</span>, "txt")}
                                 </div>
                               ), "MX · SPF · TXT (VirusTotal)");
                             })()}
@@ -11418,7 +11420,7 @@ export default function App() {
                             {!isCondensed && (hasTimeline || hasApexObs || (hasDomainReg && d.domainReg.state !== "deleted")) && secRow("Timeline", (
                               <>
                                   {hasTimeline && (
-                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#958fb0", backgroundColor: "rgba(150,140,180,0.08)", border: "1px solid rgba(150,140,180,0.25)" }}>
+                                    <span className="rounded-full px-2 py-0.5" style={{ color: "#c8c2e0", backgroundColor: "rgba(150,140,180,0.08)", border: "1px solid rgba(150,140,180,0.25)" }}>
                                       {d._timeline.firstFmt ? ` First Seen: ${d._timeline.firstFmt}` : ""}{d._timeline.lastFmt ? ` · Last Seen: ${d._timeline.lastFmt}` : ""}
                                     </span>
                                   )}
@@ -11443,7 +11445,7 @@ export default function App() {
                                     const isAlert = isNewDomain || isNewSubdomain;
                                     return (
                                       <span className="rounded-full px-2 py-0.5" style={{
-                                        color: isAlert ? "#ff9f43" : isYoungDomain ? "#f5b53a" : isUnregistered ? "#8b84a6" : "#958fb0",
+                                        color: isAlert ? "#ff9f43" : isYoungDomain ? "#f5b53a" : isUnregistered ? "#bcb5d8" : "#c8c2e0",
                                         backgroundColor: isAlert ? "rgba(255,159,67,0.10)" : isYoungDomain ? "rgba(245,181,58,0.10)" : "rgba(150,140,180,0.08)",
                                         border: `1px solid ${isAlert ? "rgba(255,159,67,0.3)" : isYoungDomain ? "rgba(245,181,58,0.35)" : "rgba(150,140,180,0.25)"}`,
                                       }}>
@@ -11463,7 +11465,7 @@ export default function App() {
                                     const isYoungApex = sd.apexAgeDays >= 90 && sd.apexAgeDays < 180;
                                     return (
                                       <span className="rounded-full px-2 py-0.5" style={{
-                                        color: isNewApex ? "#ff9f43" : isYoungApex ? "#f5b53a" : "#8b84a6",
+                                        color: isNewApex ? "#ff9f43" : isYoungApex ? "#f5b53a" : "#bcb5d8",
                                         backgroundColor: isNewApex ? "rgba(255,159,67,0.10)" : isYoungApex ? "rgba(245,181,58,0.10)" : "rgba(150,140,180,0.05)",
                                         border: `1px dashed ${isNewApex ? "rgba(255,159,67,0.35)" : isYoungApex ? "rgba(245,181,58,0.35)" : "rgba(150,140,180,0.3)"}`,
                                       }} title="Observational — urlscan first-sighting, not registry data">
@@ -11484,7 +11486,7 @@ export default function App() {
                                 registrant: { label: "Registrant", icon: "", color: "#cdb8ff" },
                                 admin:      { label: "Admin",      icon: "", color: "#b9a5ff" },
                                 tech:       { label: "Technical",  icon: "", color: "#e86aa6" },
-                                billing:    { label: "Billing",    icon: "", color: "#958fb0" },
+                                billing:    { label: "Billing",    icon: "", color: "#c8c2e0" },
                                 abuse:      { label: "Abuse",      icon: "", color: "#ff7a59" },
                               };
                               const order = ["registrant", "admin", "tech", "billing", "abuse"];
@@ -11513,7 +11515,7 @@ export default function App() {
                                 <button key={k} onClick={() => copyText(val, `${eKey}::reg::${k}`)} title="Click to copy"
                                   className="flex items-start gap-1.5 text-left w-full rounded px-1 py-0.5"
                                   style={{ background: "none", border: "none", cursor: "pointer", color: copied === `${eKey}::reg::${k}` ? "#3ee0a1" : "#ddd7f1" }}>
-                                  <span className="shrink-0 inline-flex items-center" style={{ width: 14, height: 15, color: "#8b84a6" }}>{icon}</span>
+                                  <span className="shrink-0 inline-flex items-center" style={{ width: 14, height: 15, color: "#bcb5d8" }}>{icon}</span>
                                   <span className="min-w-0 break-words" style={{ fontFamily: mono ? "monospace" : "inherit", wordBreak: "break-word" }}>
                                     {copied === `${eKey}::reg::${k}` ? "Copied!" : val}
                                   </span>
@@ -11531,7 +11533,7 @@ export default function App() {
                                     </button>
                                     {regLabel && <span className="rounded-full px-2 py-0.5" style={chip("#cdb8ff")}>Registrant: {regLabel}</span>}
                                     {dc.proxy && <span className="rounded-full px-2 py-0.5" style={chip("#f5b53a")} title="Registrant details are hidden by a privacy/proxy service">Privacy-protected · {dc.proxy}</span>}
-                                    {!dc.proxy && dc.redacted && !regLabel && <span className="rounded-full px-2 py-0.5" style={chip("#8b84a6")} title="Registrant details are redacted by the registry/registrar">Redacted</span>}
+                                    {!dc.proxy && dc.redacted && !regLabel && <span className="rounded-full px-2 py-0.5" style={chip("#bcb5d8")} title="Registrant details are redacted by the registry/registrar">Redacted</span>}
                                     {abuse?.email && <span className="rounded-full px-2 py-0.5" style={chip("#ff7a59")}>{abuse.email}</span>}
                                   </div>
                                   {open && (
@@ -11539,16 +11541,16 @@ export default function App() {
                                       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
                                         {dc.registrar && (dc.registrar.name || dc.registrar.ianaId) && (
                                           <div className="rounded-md p-2" style={{ background: "rgba(0,0,0,0.25)", borderLeft: "3px solid #e86aa6" }}>
-                                            <div className="text-[9px] uppercase tracking-widest font-black mb-1" style={{ color: "#e86aa6" }}>Registrar</div>
+                                            <div className="text-[11px] uppercase tracking-widest font-black mb-1" style={{ color: "#e86aa6" }}>Registrar</div>
                                             {row(<Building2 size={11} />, dc.registrar.name, "registrar-name")}
                                             {row(<HashIcon size={11} />, dc.registrar.ianaId ? `IANA ID ${dc.registrar.ianaId}` : "", "registrar-iana", true)}
                                           </div>
                                         )}
                                         {people.map((c, ci) => {
-                                          const m = ROLE_META[c.role] || { label: c.role, icon: "", color: "#958fb0" };
+                                          const m = ROLE_META[c.role] || { label: c.role, icon: "", color: "#c8c2e0" };
                                           return (
                                             <div key={`${c.role}-${ci}`} className="rounded-md p-2" style={{ background: "rgba(0,0,0,0.25)", borderLeft: `3px solid ${m.color}` }}>
-                                              <div className="text-[9px] uppercase tracking-widest font-black mb-1" style={{ color: m.color }}>{m.label}</div>
+                                              <div className="text-[11px] uppercase tracking-widest font-black mb-1" style={{ color: m.color }}>{m.label}</div>
                                               {row(<UserIcon size={11} />, c.name, `${c.role}${ci}-name`)}
                                               {row(<Building2 size={11} />, c.org, `${c.role}${ci}-org`)}
                                               {row(<MapPin size={11} />, c.address, `${c.role}${ci}-adr`)}
@@ -11557,9 +11559,9 @@ export default function App() {
                                               {c.email && c.role !== "abuse" && (
                                                 <div className="px-1 pb-0.5">
                                                   {isPivotAdded("EMAIL", c.email)
-                                                    ? <><span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#160b02", backgroundColor: "#3ee0a1", fontSize: 9 }}>Added to EMAIL</span><button onClick={() => removePivotIOC("EMAIL", c.email)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff7a70", backgroundColor: "rgba(255,122,112,0.15)", fontSize: 9, lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,122,112,0.3)" }}>Remove</button></>
+                                                    ? <><span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#160b02", backgroundColor: "#3ee0a1", fontSize: 11 }}>Added to EMAIL</span><button onClick={() => removePivotIOC("EMAIL", c.email)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff7a70", backgroundColor: "rgba(255,122,112,0.15)", fontSize: 11, lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,122,112,0.3)" }}>Remove</button></>
                                                     : <button onClick={() => addPivotIOC("EMAIL", c.email, `${m.label} contact of ${domainForReport}`)} className="rounded px-1.5 py-0.5 font-bold"
-                                                        style={{ color: "#160b02", backgroundColor: "#f0abfc", fontSize: 9, cursor: "pointer", border: "none" }}
+                                                        style={{ color: "#160b02", backgroundColor: "#f0abfc", fontSize: 11, cursor: "pointer", border: "none" }}
                                                         title="Pivot: hunt for other domains registered with this contact">+ Add as IOC</button>}
                                                 </div>
                                               )}
@@ -11569,24 +11571,24 @@ export default function App() {
                                       </div>
                                       {(dc.nameservers.length > 0 || dc.dnssec !== null) && (
                                         <div className="flex flex-wrap items-center gap-1 mt-2">
-                                          <span className="text-[9px] uppercase tracking-widest font-black" style={{ color: "#8b84a6" }}>Nameservers</span>
+                                          <span className="text-[11px] uppercase tracking-widest font-black" style={{ color: "#bcb5d8" }}>Nameservers</span>
                                           {dc.nameservers.map((ns) => {
                                             const info = nsPivotInfo(ns, domainForReport, new Set((displayData?.DOMAIN || []).map((x) => registrableDomain(String(x).toLowerCase()))));
                                             return (
                                               <span key={ns} className="inline-flex items-center gap-1">
                                                 <button onClick={() => copyText(ns, `${eKey}::reg::ns-${ns}`)} title="Click to copy"
-                                                  className="rounded-full px-2 py-0.5" style={{ ...chip(info.pivot ? "#d6c8ff" : "#958fb0"), cursor: "pointer", fontFamily: "monospace" }}>
+                                                  className="rounded-full px-2 py-0.5" style={{ ...chip(info.pivot ? "#d6c8ff" : "#c8c2e0"), cursor: "pointer", fontFamily: "monospace" }}>
                                                   {copied === `${eKey}::reg::ns-${ns}` ? "Copied!" : ns}
                                                 </button>
                                                 {info.provider && (
-                                                  <span className="text-[9px]" style={{ color: "#6a6385" }} title="Shared DNS infrastructure — it doesn't identify who operates the domain, so it isn't offered as an IOC or graph pivot">
+                                                  <span className="text-[11px]" style={{ color: "#a29bc2" }} title="Shared DNS infrastructure — it doesn't identify who operates the domain, so it isn't offered as an IOC or graph pivot">
                                                     shared DNS · {info.provider}
                                                   </span>
                                                 )}
                                                 {info.pivot && (isPivotAdded("DOMAIN", ns)
-                                                  ? <><span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#160b02", backgroundColor: "#3ee0a1", fontSize: 9 }}>Added to DOMAIN</span><button onClick={() => removePivotIOC("DOMAIN", ns)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff7a70", backgroundColor: "rgba(255,122,112,0.15)", fontSize: 9, lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,122,112,0.3)" }}>Remove</button></>
+                                                  ? <><span className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#160b02", backgroundColor: "#3ee0a1", fontSize: 11 }}>Added to DOMAIN</span><button onClick={() => removePivotIOC("DOMAIN", ns)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#ff7a70", backgroundColor: "rgba(255,122,112,0.15)", fontSize: 11, lineHeight: 1, cursor: "pointer", border: "1px solid rgba(255,122,112,0.3)" }}>Remove</button></>
                                                   : <button onClick={() => addPivotIOC("DOMAIN", ns, `Nameserver of ${domainForReport}`)} className="rounded px-1.5 py-0.5 font-bold"
-                                                      style={{ color: "#160b02", backgroundColor: "#d6c8ff", fontSize: 9, cursor: "pointer", border: "none" }}
+                                                      style={{ color: "#160b02", backgroundColor: "#d6c8ff", fontSize: 11, cursor: "pointer", border: "none" }}
                                                       title={info.vanity ? "Nameserver on the domain's own infrastructure — a strong pivot" : "Not a known shared DNS provider — domains sharing it are likely related"}>
                                                       + Add as IOC{info.vanity ? " · vanity NS" : ""}
                                                     </button>)}
@@ -11594,7 +11596,7 @@ export default function App() {
                                             );
                                           })}
                                           {dc.dnssec !== null && (
-                                            <span className="rounded-full px-2 py-0.5" style={chip(dc.dnssec ? "#3ee0a1" : "#8b84a6")}>
+                                            <span className="rounded-full px-2 py-0.5" style={chip(dc.dnssec ? "#3ee0a1" : "#bcb5d8")}>
                                               {dc.dnssec ? "DNSSEC signed" : "DNSSEC unsigned"}
                                             </span>
                                           )}
@@ -11607,7 +11609,7 @@ export default function App() {
                                           title="Copies a ready-to-send takedown request addressed to the registrar abuse contact">
                                           <Copy size={11} /> {copied === `${eKey}::reg::abuse-report` ? "Copied!" : "Copy abuse report"}
                                         </button>
-                                        <span style={{ color: "#6a6385" }}>
+                                        <span style={{ color: "#a29bc2" }}>
                                           via {dc.source === "whoisjson" ? "WhoisJSON" : "RDAP"}{dc.redacted ? " · some fields redacted" : ""}
                                         </span>
                                       </div>
@@ -11670,7 +11672,7 @@ export default function App() {
                                 const open = !!pivotsExpanded[`${eKey}::${key}`];
                                 return (
                                   <button key={`more-${key}`} onClick={() => setPivotsExpanded((p) => ({ ...p, [`${eKey}::${key}`]: !p[`${eKey}::${key}`] }))}
-                                    className="self-start text-[9px] rounded px-2 py-0.5 font-bold my-0.5"
+                                    className="self-start text-[11px] rounded px-2 py-0.5 font-bold my-0.5"
                                     style={{ color: "#b9a5ff", backgroundColor: "rgba(185,165,255,0.1)", border: "1px solid rgba(185,165,255,0.3)", cursor: "pointer" }}>
                                     {open ? "Show fewer pivots" : `Show Additional Pivots (+${list.length - PIVOT_CAP})`}
                                   </button>
@@ -11690,14 +11692,14 @@ export default function App() {
                                           {shot && (
                                           <span className="relative inline-block shrink-0">
                                             <a href={shot} target="_blank" rel="noreferrer noopener"
-                                              className="peer text-[9px] px-1 py-0.5 rounded inline-block"
+                                              className="peer text-[11px] px-1 py-0.5 rounded inline-block"
                                               style={{ color: "#cdb8ff", border: "1px solid rgba(205,184,255,0.3)", backgroundColor: "rgba(205,184,255,0.08)", textDecoration: "none" }}><Monitor size={11} style={{ display: "inline-block", verticalAlign: "-2px" }} /></a>
                                             <span className="hidden peer-hover:block fixed z-[9999] rounded-lg shadow-2xl pointer-events-none"
                                               style={{ border: "2px solid rgba(205,184,255,0.5)", backgroundColor: "#0f0d19", padding: "4px", width: "400px", maxWidth: "90vw", left: "50%", top: "50%", transform: "translate(-50%, -50%)" }}>
                                               <img src={shot} alt="Screenshot" loading="lazy"
                                                 style={{ width: "100%", borderRadius: "6px", display: "block" }}
                                                 onError={(e) => { e.target.parentElement.style.display = "none"; }} />
-                                              <p className="text-[9px] text-center mt-1" style={{ color: "#6a6385" }}>{uNorm}</p>
+                                              <p className="text-[11px] text-center mt-1" style={{ color: "#a29bc2" }}>{uNorm}</p>
                                             </span>
                                           </span>
                                           )}
@@ -11709,7 +11711,7 @@ export default function App() {
                                           ) : (
                                             <button onClick={() => addPivotIOC(targetCat, uNorm, `Urlscan scan of ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#160b02", backgroundColor: "#b9a5ff", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>+ Add as IOC</button>
                                           )}
-                                          <button onClick={() => dismissPivot(`url::${uNorm}::${arr[i]}`)} className="rounded p-0.5 shrink-0" style={{ color: "#6a6385", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
+                                          <button onClick={() => dismissPivot(`url::${uNorm}::${arr[i]}`)} className="rounded p-0.5 shrink-0" style={{ color: "#a29bc2", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
                                         </span>
                                       );
                                     })}
@@ -11719,7 +11721,7 @@ export default function App() {
                                       const fileAdded = f.filename && isPivotAdded("FILE_NAME", f.filename);
                                       const urlAdded = f.url && isPivotAdded("URL", f.url.replace(/^https?:\/\//i, "").replace(/\/+$/, ""));
                                       return (
-                                        <span key={`f${fi}`} className="rounded-full px-2 py-0.5 flex items-center gap-1.5 flex-wrap" style={{ color: "#958fb0", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
+                                        <span key={`f${fi}`} className="rounded-full px-2 py-0.5 flex items-center gap-1.5 flex-wrap" style={{ color: "#c8c2e0", backgroundColor: "rgba(150,140,180,0.06)", border: "1px solid rgba(150,140,180,0.2)" }}>
                                           <span className="break-all flex-1">
                                             {f.filename ? <span style={{ color: "#f5b53a" }}>{f.filename}</span> : null}
                                             {f.url ? <>{f.filename ? " · " : ""}<span style={{ color: "#b9a5ff" }}>{f.url}</span></> : null}
@@ -11740,17 +11742,17 @@ export default function App() {
                                               : <button onClick={() => addPivotIOC("URL", f.url.replace(/^https?:\/\//i, "").replace(/\/+$/, ""), `File URL on ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold" style={{ color: "#160b02", backgroundColor: "#b9a5ff", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>+ URL</button>
                                             )}
                                           </span>
-                                          <button onClick={() => dismissPivot(`file::${f.sha256 || f.filename}::${arr[i]}`)} className="rounded p-0.5 shrink-0" style={{ color: "#6a6385", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
+                                          <button onClick={() => dismissPivot(`file::${f.sha256 || f.filename}::${arr[i]}`)} className="rounded p-0.5 shrink-0" style={{ color: "#a29bc2", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
                                         </span>
                                       );
                                     })}
                                     {pivotMore("files", visibleFiles)}
                                     {pdnsRecords.length > 0 && (
                                       <div className="flex items-center gap-1.5 mt-1 mb-0.5">
-                                        <span className="text-[9px] uppercase tracking-widest font-bold" style={{ color: "#6a6385" }}>Passive DNS</span>
-                                        <span className="text-[9px]" style={{ color: "#6a6385" }}>· {d.otxPDNS.unique || pdnsRecords.length} unique {cat === "DOMAIN" ? "IPs" : "hosts"} from {d.otxPDNS.total} observations{d.otxPDNS.currentCount != null ? ` · ${d.otxPDNS.currentCount} current` : ""}</span>
+                                        <span className="text-[11px] uppercase tracking-widest font-bold" style={{ color: "#a29bc2" }}>Passive DNS</span>
+                                        <span className="text-[11px]" style={{ color: "#a29bc2" }}>· {d.otxPDNS.unique || pdnsRecords.length} unique {cat === "DOMAIN" ? "IPs" : "hosts"} from {d.otxPDNS.total} observations{d.otxPDNS.currentCount != null ? ` · ${d.otxPDNS.currentCount} current` : ""}</span>
                                         <button onClick={() => setPdnsExpanded((p) => ({ ...p, [eKey]: !p[eKey] }))}
-                                          className="text-[9px] rounded px-1.5 py-0.5 font-bold ml-1"
+                                          className="text-[11px] rounded px-1.5 py-0.5 font-bold ml-1"
                                           style={{ color: "#b9a5ff", backgroundColor: "rgba(185,165,255,0.1)", border: "1px solid rgba(185,165,255,0.3)", cursor: "pointer" }}>
                                           {pdnsExpanded[eKey] ? "Grouped view" : "Show all records"}
                                         </button>
@@ -11766,7 +11768,7 @@ export default function App() {
                                       const rowOpen = pdnsExpanded[eKey] || pdnsRowOpen[rowKey];
                                       return (
                                         <div key={`pd${pi}`}>
-                                        <span className="rounded-full px-2 py-0.5 flex items-center gap-1.5" style={{ color: "#958fb0", backgroundColor: "rgba(150,140,180,0.05)", border: "1px solid rgba(150,140,180,0.2)" }}>
+                                        <span className="rounded-full px-2 py-0.5 flex items-center gap-1.5" style={{ color: "#c8c2e0", backgroundColor: "rgba(150,140,180,0.05)", border: "1px solid rgba(150,140,180,0.2)" }}>
                                           <span className="flex-1 min-w-0 flex flex-wrap items-center gap-1.5">
                                             <span style={{ color: "#b9a5ff", fontWeight: 600 }}>{target}</span>
                                             {(() => {
@@ -11776,37 +11778,37 @@ export default function App() {
                                               if (!shot) return null;
                                               return (
                                                 <span className="relative group/shot inline-flex">
-                                                  <span className="text-[9px] rounded px-1 cursor-help" style={{ color: "#fca50a", backgroundColor: "rgba(252,165,10,0.1)", border: "1px solid rgba(252,165,10,0.3)" }}><ImageIcon size={11} style={{ display: "inline-block", verticalAlign: "-2px" }} /></span>
+                                                  <span className="text-[11px] rounded px-1 cursor-help" style={{ color: "#fca50a", backgroundColor: "rgba(252,165,10,0.1)", border: "1px solid rgba(252,165,10,0.3)" }}><ImageIcon size={11} style={{ display: "inline-block", verticalAlign: "-2px" }} /></span>
                                                   <img src={shot} alt="preview" loading="lazy"
                                                     className="hidden group-hover/shot:block absolute z-40 rounded-lg"
                                                     style={{ bottom: "120%", left: 0, width: 240, border: "1px solid rgba(252,165,10,0.4)", boxShadow: "0 0 24px rgba(0,0,0,0.6)" }} />
                                                 </span>
                                               );
                                             })()}
-                                            {r.recordType && <span className="text-[9px] px-1 rounded" style={{ color: "#958fb0", backgroundColor: "rgba(150,140,180,0.12)" }}>{r.recordType}</span>}
+                                            {r.recordType && <span className="text-[11px] px-1 rounded" style={{ color: "#c8c2e0", backgroundColor: "rgba(150,140,180,0.12)" }}>{r.recordType}</span>}
                                             {(r.sources || ["OTX"]).map((src) => (
-                                              <span key={src} className="text-[9px] px-1 rounded" style={{ color: "#8b84a6", backgroundColor: "rgba(145,136,170,0.1)", border: "1px solid rgba(145,136,170,0.2)" }}>{src}</span>
+                                              <span key={src} className="text-[11px] px-1 rounded" style={{ color: "#bcb5d8", backgroundColor: "rgba(145,136,170,0.1)", border: "1px solid rgba(145,136,170,0.2)" }}>{src}</span>
                                             ))}
                                             {r.vtMalicious > 0 && (
-                                              <span className="text-[9px] px-1 rounded font-bold" title="VirusTotal engines flagging this hostname"
+                                              <span className="text-[11px] px-1 rounded font-bold" title="VirusTotal engines flagging this hostname"
                                                 style={{ color: "#fca50a", backgroundColor: "rgba(252,165,10,0.1)", border: "1px solid rgba(252,165,10,0.3)" }}>VT {r.vtMalicious} det</span>
                                             )}
-                                            <span className="text-[9px] px-1 rounded font-bold" style={{
-                                              color: r.current ? "#3ee0a1" : "#8b84a6",
+                                            <span className="text-[11px] px-1 rounded font-bold" style={{
+                                              color: r.current ? "#3ee0a1" : "#bcb5d8",
                                               backgroundColor: r.current ? "rgba(62,224,161,0.12)" : "rgba(145,136,170,0.1)",
                                               border: `1px solid ${r.current ? "rgba(62,224,161,0.3)" : "rgba(145,136,170,0.25)"}`,
                                             }}>{r.current ? "CURRENT" : "HISTORICAL"}</span>
-                                            <span className="text-[10px]" style={{ color: "#6a6385" }}>{fmtDate(r.first)} → {fmtDate(r.last)}</span>
+                                            <span className="text-[12px]" style={{ color: "#a29bc2" }}>{fmtDate(r.first)} → {fmtDate(r.last)}</span>
                                             {multiObs && (
                                               <button onClick={() => setPdnsRowOpen((p) => ({ ...p, [rowKey]: !p[rowKey] }))}
-                                                className="text-[9px] px-1 rounded font-bold"
+                                                className="text-[11px] px-1 rounded font-bold"
                                                 style={{ color: "#cdb8ff", backgroundColor: "rgba(205,184,255,0.12)", border: "1px solid rgba(205,184,255,0.3)", cursor: "pointer" }}
                                                 title="Show individual observation windows">
                                                 {r.obs} obs {rowOpen ? "▾" : "▸"}
                                               </button>
                                             )}
-                                            {r.asn && cat === "DOMAIN" && <span className="text-[10px]" style={{ color: "#8b84a6" }}>· {r.asn}</span>}
-                                            {r.country && cat === "DOMAIN" && <span className="text-[10px]" style={{ color: "#8b84a6" }}>· {r.country}</span>}
+                                            {r.asn && cat === "DOMAIN" && <span className="text-[12px]" style={{ color: "#bcb5d8" }}>· {r.asn}</span>}
+                                            {r.country && cat === "DOMAIN" && <span className="text-[12px]" style={{ color: "#bcb5d8" }}>· {r.country}</span>}
                                           </span>
                                           {added ? (
                                             <>
@@ -11816,12 +11818,12 @@ export default function App() {
                                           ) : (
                                             <button onClick={() => addPivotIOC(targetCat, target, `Passive DNS of ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#160b02", backgroundColor: "#b9a5ff", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>+ Add as IOC</button>
                                           )}
-                                          <button onClick={() => dismissPivot(`pdns::${target.toLowerCase()}::${arr[i]}`)} className="rounded p-0.5 shrink-0" style={{ color: "#6a6385", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
+                                          <button onClick={() => dismissPivot(`pdns::${target.toLowerCase()}::${arr[i]}`)} className="rounded p-0.5 shrink-0" style={{ color: "#a29bc2", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
                                         </span>
                                         {multiObs && rowOpen && (r.windows || []).length > 0 && (
                                           <div className="ml-4 mt-0.5 mb-1 flex flex-col gap-0.5">
                                             {r.windows.map((w, wi) => (
-                                              <span key={wi} className="text-[9px]" style={{ color: "#6a6385" }}>
+                                              <span key={wi} className="text-[11px]" style={{ color: "#a29bc2" }}>
                                                 ↳ {fmtDate(w.first)} → {fmtDate(w.last)}
                                               </span>
                                             ))}
@@ -11852,8 +11854,8 @@ export default function App() {
                                       return (
                                         <>
                                           <div className="flex items-center gap-1.5 mt-1 mb-0.5">
-                                            <span className="text-[9px] uppercase tracking-widest font-bold" style={{ color: "#6a6385" }}>Contacted Infrastructure</span>
-                                            <span className="text-[9px]" style={{ color: "#6a6385" }}>· hosts this page communicated with (CDN/analytics filtered)</span>
+                                            <span className="text-[11px] uppercase tracking-widest font-bold" style={{ color: "#a29bc2" }}>Contacted Infrastructure</span>
+                                            <span className="text-[11px]" style={{ color: "#a29bc2" }}>· hosts this page communicated with (CDN/analytics filtered)</span>
                                           </div>
                                           {pivotCap("contacted", rows).map((row, ci) => {
                                             const added = isPivotAdded(row.cat, row.v);
@@ -11861,7 +11863,7 @@ export default function App() {
                                               <span key={`c${ci}`} className="rounded-full px-2 py-0.5 flex items-center gap-1.5" style={{ color: "#f08a4b", backgroundColor: "rgba(240,138,75,0.06)", border: "1px solid rgba(240,138,75,0.25)" }}>
                                                 <span className="flex-1 min-w-0 flex flex-wrap items-center gap-1.5">
                                                   <span style={{ color: "#f08a4b", fontWeight: 600 }}>{row.v}</span>
-                                                  <span className="text-[9px] px-1 rounded" style={{ color: "#958fb0", backgroundColor: "rgba(150,140,180,0.12)" }}>{row.cat}</span>
+                                                  <span className="text-[11px] px-1 rounded" style={{ color: "#c8c2e0", backgroundColor: "rgba(150,140,180,0.12)" }}>{row.cat}</span>
                                                   {(() => {
                                                     const shot = enrichCache[`${row.cat}::${row.v}`]?.data?.urlscan?.screenshot
                                                       || enrichCache[`DOMAIN::${row.v}`]?.data?.urlscan?.screenshot
@@ -11869,7 +11871,7 @@ export default function App() {
                                                     if (!shot) return null;
                                                     return (
                                                       <span className="relative group/shot2 inline-flex">
-                                                        <span className="text-[9px] rounded px-1 cursor-help" style={{ color: "#fca50a", backgroundColor: "rgba(252,165,10,0.1)", border: "1px solid rgba(252,165,10,0.3)" }}><ImageIcon size={11} style={{ display: "inline-block", verticalAlign: "-2px" }} /></span>
+                                                        <span className="text-[11px] rounded px-1 cursor-help" style={{ color: "#fca50a", backgroundColor: "rgba(252,165,10,0.1)", border: "1px solid rgba(252,165,10,0.3)" }}><ImageIcon size={11} style={{ display: "inline-block", verticalAlign: "-2px" }} /></span>
                                                         <img src={shot} alt="preview" loading="lazy"
                                                           className="hidden group-hover/shot2:block absolute z-40 rounded-lg"
                                                           style={{ bottom: "120%", left: 0, width: 240, border: "1px solid rgba(252,165,10,0.4)", boxShadow: "0 0 24px rgba(0,0,0,0.6)" }} />
@@ -11885,7 +11887,7 @@ export default function App() {
                                                 ) : (
                                                   <button onClick={() => addPivotIOC(row.cat, row.v, `Contacted by ${arr[i]}`)} className="rounded px-1.5 py-0.5 font-bold shrink-0" style={{ color: "#160b02", backgroundColor: "#f08a4b", fontSize: "9px", lineHeight: 1, cursor: "pointer", border: "none" }}>+ Add as IOC</button>
                                                 )}
-                                                <button onClick={() => dismissPivot(`contact::${row.v.toLowerCase()}::${arr[i]}`)} className="rounded p-0.5 shrink-0" style={{ color: "#6a6385", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
+                                                <button onClick={() => dismissPivot(`contact::${row.v.toLowerCase()}::${arr[i]}`)} className="rounded p-0.5 shrink-0" style={{ color: "#a29bc2", cursor: "pointer", border: "none", background: "none" }}><X size={10} /></button>
                                               </span>
                                             );
                                           })}
